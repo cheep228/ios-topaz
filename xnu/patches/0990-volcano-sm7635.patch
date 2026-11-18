@@ -82,7 +82,7 @@ index ed9a0c7..cc85e2d 100644
  	fReal = real == 1 && sweet_i2c1_init() == 0;
  	/* Publish a complete source BEFORE registerService wakes powerd. */
 diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
-index 96c557b..de8509d 100644
+index 96c557b..208c1f2 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
 @@ -73,8 +73,8 @@ SweetCPU::start(IOService *provider)
@@ -105,6 +105,22 @@ index 96c557b..de8509d 100644
  	if (cpuName == NULL) {
  		return false;
  	}
+@@ -145,11 +145,11 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+ 		IOSleep(1);
+ 	}
+ 	/*
+-	 * topaz: the ADT lists only the A73 (gold) cores and the shim boots xnu
+-	 * on gold CPU 0x100 (the silver cluster has no 16K granule).
++	 * volcano: every core has the 16K granule; the shim boots xnu on the
++	 * first A520 (MPIDR 0x000) and the ADT lists all eight cores.
+ 	 */
+-	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != 0x100) {
+-		panic("SWEET CPU: expected boot MPIDR 0x100 and logical CPU 0, got 0x%x/%u",
++	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != 0x000) {
++		panic("SWEET CPU: expected boot MPIDR 0x000 and logical CPU 0, got 0x%x/%u",
+ 		    topology->boot_cpu->phys_id, topology->boot_cpu->cpu_id);
+ 	}
+ 	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 index 1d3ee17..6480a7d 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
