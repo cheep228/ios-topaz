@@ -1,0 +1,434 @@
+diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
+index 94c7552..d96e3fc 100644
+--- a/bsd/dev/sweet_cpufreq.c
++++ b/bsd/dev/sweet_cpufreq.c
+@@ -21,7 +21,7 @@ int sweet_cpufreq_max(void);
+ int
+ sweet_cpufreq_max(void)
+ {
+-	int on = 1;
++	int on = 0;     /* volcano: EPSS layout differs from SM6115; off until ported */
+ 	PE_parse_boot_argn("sweetcpufreq", &on, sizeof(on));
+ 	if (!on) {
+ 		return 0;
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+index 65970f9..f4fdb31 100644
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -126,7 +126,7 @@ keys_thread(void *arg, wait_result_t result)
+ void
+ sweet_keys_init(void)
+ {
+-	int enabled = 1;
++	int enabled = 0;        /* volcano: topaz SPMI/PMIC addresses not ported */
+ 	thread_t thread;
+ 	if (keys_started) {
+ 		return;
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 370d18b..2c3564d 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -743,7 +743,7 @@ out:
+ void
+ sweet_touch_init(void)
+ {
+-	int enabled = 1;
++	int enabled = 0;        /* volcano: topaz QUP/TLMM addresses; FocalTech on SPI not ported */
+ 	thread_t thread;
+ 	if (st.started) {
+ 		return;
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+index 7a32a23..1d10d4b 100644
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -981,6 +981,10 @@ PEInitiatePanic(void)
+ #endif // defined(__arm64__)
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++extern "C" void volcano_psci_reset(unsigned int delay_s);
++#endif
++
+ int
+ PEHaltRestartInternal(unsigned int type, uint32_t details)
+ {
+@@ -1092,6 +1096,15 @@ PEHaltRestartInternal(unsigned int type, uint32_t details)
+ 	}
+ 
+ skip_to_haltRestart:
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		/* volcano: PSCI is the only reset; the topaz platform expert has none */
++		if (type == kPERestartCPU || type == kPEHaltCPU || type == kPEPanicRestartCPU ||
++		    type == kPEUPSDelayHaltCPU) {
++			volcano_psci_reset(type == kPEPanicRestartCPU ? 15 : 1);
++		}
++	}
++#endif
+ 	if (gIOPlatform) {
+ 		// note that this will not necessarily halt or restart the system...
+ 		// Implementors of this function will check the type and take action accordingly
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index ed9a0c7..cc85e2d 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -436,7 +436,7 @@ SweetBattery::start(IOService *provider)
+ 		return false;
+ 	}
+ 	(void)sweet_cpufreq_max();
+-	int real = 1;   /* topaz: real gauge by default; sweetbattery=0 for the static fallback */
++	int real = 0;   /* volcano: static fallback by default (topaz I2C1/PMIC addresses) */
+ 	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
+ 	fReal = real == 1 && sweet_i2c1_init() == 0;
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 96c557b..de8509d 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -73,8 +73,8 @@ SweetCPU::start(IOService *provider)
+ 	if (*(const uint32_t *)reg->getBytesNoCopy() != cpu->phys_id) {
+ 		return false;
+ 	}
+-	/* topaz (SM6225): MPIDR Aff1 = cluster, Aff0 = core: 0x0-0x3 A53, 0x100-0x103 A73 */
+-	if ((cpu->phys_id >> 8) > 1 || (cpu->phys_id & 0xff) > 3 ||
++	/* volcano (SM7635): MPIDR Aff1 = core: 0x000-0x300 A520, 0x400-0x700 A720 */
++	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
+ 	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
+ 		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+@@ -82,7 +82,7 @@ SweetCPU::start(IOService *provider)
+ 	if (!IOCPU::start(provider)) {
+ 		return false;
+ 	}
+-	cpuName = OSSymbol::withCStringNoCopy("Kryo 260");
++	cpuName = OSSymbol::withCStringNoCopy("Cortex-A720/A520");
+ 	if (cpuName == NULL) {
+ 		return false;
+ 	}
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 1d3ee17..6480a7d 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -352,11 +352,12 @@ AppleCLCD::start(IOService *provider)
+ 		IOLog("SWEET FB: no vsync timer\n");
+ 		return false;
+ 	}
+-	fVig0 = (volatile uint32_t *)ml_io_map(0x05e05000, 0x1000);
+-	fCtl0 = (volatile uint32_t *)ml_io_map(0x05e02000, 0x1000);
++	/* volcano: SM7635 DPU is elsewhere (0x0ae00000); no direct scanout yet */
++	fVig0 = NULL;
++	fCtl0 = NULL;
+ 	topaz_adreno_init();
+ 	setProperty("RedwoodWaitsForGPU", true);         /* present() waits for the GPU (eagl.c reads it) */
+-	fDsi = (volatile uint8_t *)ml_io_map(0x05e94000, 0x1000);
++	fDsi = NULL;    /* volcano: DSI not ported */
+ 	fDsiBuf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+ 	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, page_size, 0x00000000fffff000ull);
+ 	fDsiBufPhys = fDsiBuf ? fDsiBuf->getPhysicalSegment(0, NULL, kIOMemoryMapperNone) : 0;
+@@ -399,7 +400,7 @@ AppleCLCD::start(IOService *provider)
+ 	}
+ 	OSSafeReleaseNULL(accel);
+ 	/* dpu sm6115 catalog: intf_1 at mdp+0x6a800, mdp at 0x5e01000 */
+-	fIntf1 = (volatile uint32_t *)ml_io_map(0x05e6b000, 0x1000);
++	fIntf1 = NULL;  /* volcano: DPU INTF not ported */
+ 	if (fIntf1 != NULL) {
+ 		volatile uint32_t *r = fIntf1 + 0x800 / 4;
+ 		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index b926886..d1837aa 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1881,7 +1881,7 @@ sweet_early_map_final(void)
+ 	tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
+ 	tt_entry_t *slot = &l2[(va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
+ 	assert(*slot == ARM_TTE_EMPTY);
+-	*slot = 0x9c000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
++	*slot = (uint64_t)SWEET_EARLY_FB_BLOCK | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
+ 	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
+ 	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
+ 	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
+@@ -2235,7 +2235,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	}
+ #elif defined(SWEET)
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+-	sweet_early_relocate(SWEET_EARLY_FB_VA);
++	sweet_early_relocate(SWEET_EARLY_FB_VA + SWEET_EARLY_FB_OFF);
+ #endif
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
+ 
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 9fd1cb9..b0e7d0e 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -518,7 +518,7 @@ LEXT(start_first_cpu)
+ #if defined(TOPAZ_4K)
+ 	MOV64	x0, (0x5c000000 + 2368 * 4320)	/* topaz splash framebuffer */
+ #else
+-	MOV64	x0, (0x9c000000 + 2368 * 4320)
++	MOV64	x0, (SWEET_EARLY_FB_PA + (SWEET_EARLY_FB_ROWS - 32) * 4320)	/* volcano */
+ #endif
+ 	mov		w1, #-1
+ 	mov		x2, #32
+@@ -712,13 +712,22 @@ Ltopaz_fb_block:
+ 	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+ 	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
+ 	 */
+-	MOV64	x10, 0x9c000000
++	MOV64	x10, SWEET_EARLY_FB_BLOCK	/* volcano splash, 32 MB block */
+ 	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
+ 	orr		x11, x11, x10
+ 	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
+ 	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
+ 	add		x13, x25, #(2 * PGBYTES)
+ 	str		x11, [x13, x12, lsl #TTE_SHIFT]
++#if defined(VOLCANO)
++	/* volcano: ramoops console (log mirror) in the same V=P L2 table */
++	MOV64	x10, VOLCANO_RAMOOPS_BLOCK
++	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
++	orr		x11, x11, x10
++	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
++	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
++	str		x11, [x13, x12, lsl #TTE_SHIFT]
++#endif
+ #endif
+ 
+ 	/* Ensure TTEs are visible */
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 9429767..5c862cf 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -14,11 +14,11 @@
+ #if defined(TOPAZ_4K)
+ static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x5c000000;  /* topaz splash */
+ #else
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
++static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)SWEET_EARLY_FB_PA;   /* volcano */
+ #endif
+ #define EARLY_FB early_fb
+ #define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2400u
++#define EARLY_HEIGHT ((unsigned int)SWEET_EARLY_FB_ROWS)
+ #define EARLY_STRIDE (4320u / 4)
+ #define EARLY_SCALE 2u
+ #define EARLY_CELL_W (8u * EARLY_SCALE)
+@@ -43,9 +43,59 @@ sweet_early_clear_row(void)
+ 	}
+ }
+ 
++#if defined(VOLCANO)
++/*
++ * ramoops console mirror. The write position lives in the header itself, so
++ * the shim's log, the early console (VA=PA) and fbcon (ml_io_map) all append
++ * to the same record. struct persistent_ram_buffer: sig, start, size, data[].
++ */
++#define VOLCANO_RAMOOPS_SIG     0x43474244u
++#define VOLCANO_RAMOOPS_DATA    (0x200000u - 12u)
++static volatile uint8_t *volcano_early_log = (volatile uint8_t *)(uintptr_t)VOLCANO_RAMOOPS_PA;
++
++void
++volcano_log_putc(volatile uint8_t *base, char c)
++{
++	volatile uint32_t *h = (volatile uint32_t *)base;
++	if (base == NULL || c == '\r' || h[0] != VOLCANO_RAMOOPS_SIG) {
++		return;
++	}
++	uint32_t n = h[2];
++	if (n >= VOLCANO_RAMOOPS_DATA) {
++		return;
++	}
++	base[12 + n] = (uint8_t)c;
++	h[1] = n + 1;
++	h[2] = n + 1;
++}
++
++/* PSCI SYSTEM_RESET2 (warm, keeps ramoops), then SYSTEM_RESET. */
++void
++volcano_psci_reset(unsigned int delay_s)
++{
++	uint64_t frq = __builtin_arm_rsr64("CNTFRQ_EL0");
++	uint64_t end = __builtin_arm_rsr64("CNTVCT_EL0") + frq * delay_s;
++	while (__builtin_arm_rsr64("CNTVCT_EL0") < end) {
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	for (;;) {
++		register uint64_t x0 __asm__("x0") = 0xc4000012ULL;   /* SYSTEM_RESET2 */
++		register uint64_t x1 __asm__("x1") = 0;
++		register uint64_t x2 __asm__("x2") = 0;
++		register uint64_t x3 __asm__("x3") = 0;
++		__asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : : "memory");
++		x0 = 0x84000009ULL;                                     /* SYSTEM_RESET */
++		__asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : : "memory");
++	}
++}
++#endif
++
+ void
+ sweet_early_putc(char c)
+ {
++#if defined(VOLCANO)
++	volcano_log_putc(volcano_early_log, c);
++#endif
+ 	if (early_disabled) {
+ 		return;
+ 	}
+@@ -133,6 +183,9 @@ void
+ sweet_early_relocate(uint64_t base)
+ {
+ 	sweet_early_mark(8, "leaving bootstrap TTBR0");
++#if defined(VOLCANO)
++	volcano_early_log = NULL;       /* VA=PA alias goes away; fbcon maps it again */
++#endif
+ 	early_fb = (volatile uint32_t *)(uintptr_t)base;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	sweet_early_mark(9, "kernel framebuffer VA live");
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index d7a25f2..68e1db0 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -12,6 +12,10 @@ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
++#if defined(VOLCANO)
++void volcano_log_putc(volatile uint8_t *base, char c);
++void volcano_psci_reset(unsigned int delay_s) __attribute__((noreturn));
++#endif
+ #else
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ {
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index 437adb1..72f5765 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1155,9 +1155,18 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ 	__builtin_unreachable();
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <arm64/sweet_early.h>
++#endif
++
+ void
+ panic_spin_forever(void)
+ {
++#if defined(VOLCANO)
++	/* No debugger on the phone: show the panic for 15 s, then warm reset to
++	 * Android (the log survives in ramoops). */
++	volcano_psci_reset(15);
++#endif
+ 	for (;;) {
+ #if defined(__arm__) || defined(__arm64__)
+ 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+index 6089db9..0d8cce3 100644
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -26,22 +26,30 @@ static vm_offset_t gicd_base;
+ static vm_offset_t gicr_base;
+ static vm_offset_t gicr_size;
+ 
+-static uint32_t
++/*
++ * volcano: plain ldr/str only. Gunyah traps GIC accesses and cannot emulate
++ * writeback addressing, which the compiler may pick for a loop.
++ */
++static inline uint32_t
+ _gic_read32(vm_offset_t addr)
+ {
+-	return *((volatile uint32_t *) addr);
++	uint32_t v;
++	__asm__ volatile ("ldr %w0, [%1]" : "=r"(v) : "r"(addr) : "memory");
++	return v;
+ }
+ 
+-static uint64_t
++static inline uint64_t
+ _gic_read64(vm_offset_t addr)
+ {
+-	return *((volatile uint64_t *) addr);
++	uint64_t v;
++	__asm__ volatile ("ldr %0, [%1]" : "=r"(v) : "r"(addr) : "memory");
++	return v;
+ }
+ 
+-static void
++static inline void
+ _gic_write32(vm_offset_t addr, uint32_t value)
+ {
+-	*((volatile uint32_t *) addr) = value;
++	__asm__ volatile ("str %w0, [%1]" : : "rZ"(value), "r"(addr) : "memory");
+ }
+ 
+ #define gicd_read32(offset) (_gic_read32(gicd_base + (offset)))
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index 19f27cd..523f537 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -718,6 +718,9 @@ extern unsigned char iso_font[256 * 16];
+ #define FBCON_BG        0xff000000u
+ 
+ static volatile uint32_t *fbcon_base;
++#if defined(VOLCANO)
++static volatile uint8_t *fbcon_log;     /* ramoops console mirror */
++#endif
+ static uint32_t fbcon_width, fbcon_height, fbcon_stride;
+ static uint32_t fbcon_cols, fbcon_rows, fbcon_col, fbcon_row;
+ 
+@@ -761,6 +764,9 @@ fbcon_transmit_ready(void)
+ static void
+ fbcon_transmit_data(uint8_t c)
+ {
++#if defined(VOLCANO)
++	volcano_log_putc(fbcon_log, (char)c);
++#endif
+ 	if (c == '\r') {
+ 		fbcon_col = 0;
+ 		return;
+@@ -837,6 +843,9 @@ fbcon_probe(void)
+ 	sweet_early_mark(17, "fbcon config read; mapping");
+ 	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
+ 	sweet_early_mark(18, "fbcon mapping returned");
++#if defined(VOLCANO)
++	fbcon_log = (volatile uint8_t *)ml_io_map_wcomb(VOLCANO_RAMOOPS_PA, 0x200000);
++#endif
+ 	if (fbcon_base != NULL) {
+ 		register_serial_functions(&sweet_fbcon_serial_functions);
+ 	}
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index cfeb976..15aac23 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -58,11 +58,32 @@
+  * (CNTV) is INTID 16 + 3 = 19.
+  */
+ #define SWEET_VTIMER_INTID        19
++
++/*
++ * volcano: Nothing Phone (3a), Qualcomm SM7635. XNU runs at EL1 as a guest of
++ * the Gunyah hypervisor (EL2), which emulates the GIC and cannot decode
++ * loads/stores with writeback (ISV=0 -> injected external abort): every MMIO
++ * access must be a plain ldr/str. Timer PPIs use the standard numbering
++ * (virt 27), set from the ADT "virtual-timer-intid".
++ */
++#define VOLCANO                   1
++/* ABL cont_splash, 1080x2392 a8r8g8b8, stride 4320. It crosses the 32 MB
++ * block at 0xe4000000: the early console maps one block and uses the top
++ * SWEET_EARLY_FB_ROWS lines only. */
++#define SWEET_EARLY_FB_PA         0xe3940000
++#define SWEET_EARLY_FB_BLOCK      0xe2000000
++#define SWEET_EARLY_FB_OFF        0x01940000
++#define SWEET_EARLY_FB_ROWS       1600
++/* Android's ramoops console zone (0x400000@0x81f20000, console = first 2 MB):
++ * the shim and xnu append their log there; Android shows it after a warm
++ * PSCI reset in /sys/fs/pstore/console-ramoops-0. */
++#define VOLCANO_RAMOOPS_PA        0x81f20000
++#define VOLCANO_RAMOOPS_BLOCK     0x80000000
+ #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
+ 
+-#define GICR_PE_SIZE              0x20000 // Size of each redistributor region
++#define GICR_PE_SIZE              0x40000 // volcano: GICv4-style 256K redistributor stride
+ 
+ /* GICv3 register definitions; see GICv3 spec (Arm IHI 0069G) */
+ #define GICD_CTLR                 0x0
