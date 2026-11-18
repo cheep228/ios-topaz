@@ -81,7 +81,7 @@ index fd7a94b..27f56a5 100644
  		if (serialmode & SERIALMODE_OUTPUT) {
  			wp->ws_col = 80;
 diff --git a/bsd/dev/arm/systemcalls.c b/bsd/dev/arm/systemcalls.c
-index 7fd9be1..a8b8f69 100644
+index 7fd9be1..f61e54a 100644
 --- a/bsd/dev/arm/systemcalls.c
 +++ b/bsd/dev/arm/systemcalls.c
 @@ -31,6 +31,12 @@
@@ -97,7 +97,7 @@ index 7fd9be1..a8b8f69 100644
  
  #if CONFIG_MACF
  #include <security/mac_framework.h>
-@@ -178,7 +184,22 @@ unix_syscall(
+@@ -178,7 +184,24 @@ unix_syscall(
  #endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
  
  	AUDIT_SYSCALL_ENTER(code, proc, uthread);
@@ -105,6 +105,8 @@ index 7fd9be1..a8b8f69 100644
 +	/* volcano bring-up: trace the first syscalls of PID 1 */
 +	unsigned int volcano_sc = (pid == 1 && volcano_sc_count < 200) ? ++volcano_sc_count : 0;
 +	if (volcano_sc) {
++		extern thread_t volcano_watched;
++		volcano_watched = thread_act;
 +		printf("VOLCANO sc#%u pid1 enter %u (0x%llx, 0x%llx, 0x%llx)\n", volcano_sc, code,
 +		    (unsigned long long)uthread->uu_arg[0], (unsigned long long)uthread->uu_arg[1],
 +		    (unsigned long long)uthread->uu_arg[2]);
@@ -190,6 +192,81 @@ index bb2a2bf..5e3421c 100644
  	lock_trace = 1;
  }
  
+diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
+index 94b4383..b3dd52a 100644
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -72,6 +72,13 @@
+  * Version 2.0.
+  */
+ 
++#if defined(__arm64__)
++#include <pexpert/arm64/board_config.h>
++#endif
++#if defined(VOLCANO)
++#define VOLCANO_PID1(ctx) (proc_pid(vfs_context_proc(ctx)) == 1)
++static unsigned int volcano_lk_count;
++#endif
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/syslimits.h>
+@@ -165,6 +172,11 @@ extern lck_rw_t rootvnode_rw_lock;
+ int
+ namei(struct nameidata *ndp)
+ {
++#if defined(VOLCANO)
++	if (VOLCANO_PID1(ndp->ni_cnd.cn_context)) {
++		printf("VOLCANO namei: op %d flags 0x%llx\n", (int)ndp->ni_cnd.cn_nameiop, (unsigned long long)ndp->ni_cnd.cn_flags);
++	}
++#endif
+ 	struct vnode *dp;       /* the directory we are searching */
+ 	struct vnode *usedvp = ndp->ni_dvp;  /* store pointer to vp in case we must loop due to
+ 	                                      *                                          heavy vnode pressure */
+@@ -1321,7 +1333,19 @@ unionlookup:
+ 	 * not fix whether or not you should or should not get /tmp/a vs. /foo/b.
+ 	 */
+ 
++#if defined(VOLCANO)
++	if (VOLCANO_PID1(ctx)) {
++		printf("VOLCANO lookup: '%.*s' in dvp %p type %d mount %p\n", (int)cnp->cn_namelen, cnp->cn_nameptr,
++		    dp, (int)dp->v_type, dp->v_mount);
++	}
++#endif
+ 	error = VNOP_LOOKUP(dp, &ndp->ni_vp, cnp, ctx);
++#if defined(VOLCANO)
++	if (VOLCANO_PID1(ctx)) {
++		printf("VOLCANO lookup: -> %d vp %p type %d mountedhere %p\n", error, ndp->ni_vp,
++		    ndp->ni_vp ? (int)ndp->ni_vp->v_type : -1, ndp->ni_vp ? ndp->ni_vp->v_mountedhere : NULL);
++	}
++#endif
+ 
+ 	if (error) {
+ lookup_error:
+@@ -1587,6 +1611,12 @@ restart:
+ 		}
+ 
+ 
++#if defined(VOLCANO)
++		if (VOLCANO_PID1(ctx) && volcano_lk_count++ < 20) {
++			printf("VOLCANO traverse: dp %p mp %p lflag 0x%x flag 0x%x vbusyflags %d\n", dp, mp,
++			    mp->mnt_lflag, mp->mnt_flag, vbusyflags);
++		}
++#endif
+ 		if (vfs_busy(mp, vbusyflags)) {
+ 			mount_dropcrossref(mp, dp, 0);
+ 			if (vbusyflags == LK_NOWAIT) {
+@@ -1598,6 +1628,11 @@ restart:
+ 		}
+ 
+ 		error = VFS_ROOT(mp, &tdp, ctx);
++#if defined(VOLCANO)
++		if (VOLCANO_PID1(ctx)) {
++			printf("VOLCANO traverse: VFS_ROOT -> %d tdp %p\n", error, error ? NULL : tdp);
++		}
++#endif
+ 
+ 		mount_dropcrossref(mp, dp, 0);
+ 		vfs_unbusy(mp);
 diff --git a/bsd/vfs/vfs_vnops.c b/bsd/vfs/vfs_vnops.c
 index 3a94ed4..cf04f36 100644
 --- a/bsd/vfs/vfs_vnops.c
@@ -499,10 +576,10 @@ index d7a25f2..68e1db0 100644
  static inline void sweet_early_mark(unsigned int stage, const char *label)
  {
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
-index 437adb1..20e12d5 100644
+index 437adb1..190faa0 100644
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1155,9 +1155,86 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+@@ -1155,9 +1155,89 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
  	__builtin_unreachable();
  }
  
@@ -516,7 +593,8 @@ index 437adb1..20e12d5 100644
 + * state and saved kernel backtrace of PID 1's thread, then after 90 s warm
 + * resets to Android. Lets one unattended fastboot boot say where init hangs.
 + */
-+static thread_t volcano_watched;
++extern thread_t volcano_watched;
++thread_t volcano_watched;
 +static int volcano_watch_ev;
 +
 +static void
@@ -548,18 +626,22 @@ index 437adb1..20e12d5 100644
 +static void
 +volcano_watch(__unused void *arg, __unused wait_result_t wr)
 +{
-+	thread_t t = volcano_watched;
-+	printf("VOLCANO watch: started, init thread %p, slide 0x%lx\n", t, (unsigned long)vm_kernel_slide);
-+	for (unsigned int i = 1; i <= 9; i++) {
++	printf("VOLCANO watch: started, slide 0x%lx\n", (unsigned long)vm_kernel_slide);
++	for (unsigned int i = 1; i <= 6; i++) {
 +		assert_wait_timeout((event_t)&volcano_watch_ev, THREAD_UNINT, 10, NSEC_PER_SEC);
 +		thread_block(THREAD_CONTINUE_NULL);
-+		printf("VOLCANO watch %us: state 0x%x wait_event 0x%llx (unslid 0x%lx) hint %d wresult %d pri %d\n",
-+		    i * 10, t->state, (unsigned long long)t->wait_event,
++		thread_t t = volcano_watched;
++		if (t == THREAD_NULL) {
++			printf("VOLCANO watch %us: PID 1 made no syscall yet\n", i * 10);
++			continue;
++		}
++		printf("VOLCANO watch %us: thread %p state 0x%x wait_event 0x%llx (unslid 0x%lx) hint %d wresult %d pri %d\n",
++		    i * 10, t, t->state, (unsigned long long)t->wait_event,
 +		    (unsigned long)VM_KERNEL_UNSLIDE((vm_offset_t)t->wait_event), (int)t->block_hint,
 +		    t->wait_result, t->sched_pri);
 +		volcano_watch_bt(t);
 +	}
-+	printf("VOLCANO watch: 90 s up, PSCI reset to Android\n");
++	printf("VOLCANO watch: 60 s up, PSCI reset to Android\n");
 +	volcano_psci_reset(2);
 +}
 +
@@ -568,8 +650,6 @@ index 437adb1..20e12d5 100644
 +volcano_watch_start(void)
 +{
 +	thread_t w;
-+	volcano_watched = current_thread();
-+	thread_reference(volcano_watched);
 +	if (kernel_thread_start_priority(volcano_watch, NULL, MAXPRI_KERNEL, &w) == KERN_SUCCESS) {
 +		thread_deallocate(w);
 +	} else {
