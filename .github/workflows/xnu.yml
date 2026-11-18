@@ -12,6 +12,9 @@ on:
       machine_config:
         description: xnu MACHINE_CONFIG
         default: SWEET
+      runner:
+        description: runner label (macos-15-intel, or macos-15 arm64 when intel is short)
+        default: macos-15-intel
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
@@ -23,7 +26,7 @@ on:
 
 
 concurrency:
-  group: xnu-${{ github.ref }}
+  group: xnu-${{ github.ref }}-${{ inputs.runner || 'macos-15-intel' }}
   cancel-in-progress: true
 
 env:
@@ -44,7 +47,7 @@ jobs:
   build:
     # macos-14 images are gone; macos-15-intel ships Xcode 16+, whose iig emits
     # IORPC.kernelContent: 0991-volcano-xcode16-iig.patch backports that field
-    runs-on: macos-15-intel
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -91,9 +94,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('xnu/patches/**', '.github/workflows/xnu.yml') }}
+          key: ccache-${{ runner.arch }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('xnu/patches/**', '.github/workflows/xnu.yml') }}
           restore-keys: |
-            ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-
+            ccache-${{ runner.arch }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-
 
       - name: Build
         working-directory: dxb
