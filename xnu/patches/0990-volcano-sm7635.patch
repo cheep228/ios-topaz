@@ -1,3 +1,125 @@
+diff --git a/bsd/dev/arm/cons.c b/bsd/dev/arm/cons.c
+index 5ac18e2..619e024 100644
+--- a/bsd/dev/arm/cons.c
++++ b/bsd/dev/arm/cons.c
+@@ -12,6 +12,9 @@
+ /*
+  * Indirect driver for console.
+  */
++#if defined(__arm64__)
++#include <pexpert/arm64/board_config.h>
++#endif
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/conf.h>
+@@ -52,7 +55,14 @@ int
+ cnopen(__unused dev_t dev, int flag, int devtype, struct proc *pp)
+ {
+ 	dev = cndev();
++#if defined(VOLCANO)
++	printf("VOLCANO cnopen: cndev 0x%x d_open %p\n", dev, (void *)cdevsw[major(dev)].d_open);
++	int volcano_ret = (*cdevsw[major(dev)].d_open)(dev, flag, devtype, pp);
++	printf("VOLCANO cnopen: -> %d\n", volcano_ret);
++	return volcano_ret;
++#else
+ 	return (*cdevsw[major(dev)].d_open)(dev, flag, devtype, pp);
++#endif
+ }
+ 
+ 
+diff --git a/bsd/dev/arm/km.c b/bsd/dev/arm/km.c
+index fd7a94b..27f56a5 100644
+--- a/bsd/dev/arm/km.c
++++ b/bsd/dev/arm/km.c
+@@ -8,6 +8,14 @@
+  *
+  * HISTORY
+  */
++#if defined(__arm64__)
++#include <pexpert/arm64/board_config.h>
++#endif
++#if defined(VOLCANO)
++#define VKM(x) printf("VOLCANO kmopen: " x "\n")
++#else
++#define VKM(x) do { } while (0)
++#endif
+ #include <sys/param.h>
+ #include <sys/tty.h>
+ 
+@@ -79,8 +87,14 @@ kmopen(dev_t dev, __unused int flag, __unused int devtype, proc_t pp)
+ 	}
+ 
+ 	tp = km_tty[unit];
++	VKM("tty lookup");
++	if (tp == NULL) {
++		VKM("km_tty[0] is NULL");
++		return ENXIO;
++	}
+ 
+ 	tty_lock(tp);
++	VKM("tty locked");
+ 
+ 	tp->t_oproc = kmstart;
+ 	tp->t_param = NULL;
+@@ -102,6 +116,7 @@ kmopen(dev_t dev, __unused int flag, __unused int devtype, proc_t pp)
+ 	tp->t_state |= TS_CARR_ON;      /* lie and say carrier exists and is
+ 	                                 * on. */
+ 	ret = ((*linesw[tp->t_line].l_open)(dev, tp));
++	VKM("l_open done");
+ 	{
+ 		PE_Video        video;
+ 		wp = &tp->t_winsize;
+@@ -116,8 +131,10 @@ kmopen(dev_t dev, __unused int flag, __unused int devtype, proc_t pp)
+ 
+ 		bzero(&video, sizeof(video));
+ 		PE_current_console(&video);
++		VKM("PE_current_console done");
+ 
+ 		tty_lock(tp);
++		VKM("relocked");
+ 
+ 		if (serialmode & SERIALMODE_OUTPUT) {
+ 			wp->ws_col = 80;
+diff --git a/bsd/dev/arm/systemcalls.c b/bsd/dev/arm/systemcalls.c
+index 7fd9be1..a8b8f69 100644
+--- a/bsd/dev/arm/systemcalls.c
++++ b/bsd/dev/arm/systemcalls.c
+@@ -31,6 +31,12 @@
+ #include <sys/bitstring.h>
+ 
+ #include <security/audit/audit.h>
++#if defined(__arm64__)
++#include <pexpert/arm64/board_config.h>
++#endif
++#if defined(VOLCANO)
++static unsigned int volcano_sc_count;
++#endif
+ 
+ #if CONFIG_MACF
+ #include <security/mac_framework.h>
+@@ -178,7 +184,22 @@ unix_syscall(
+ #endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
+ 
+ 	AUDIT_SYSCALL_ENTER(code, proc, uthread);
++#if defined(VOLCANO)
++	/* volcano bring-up: trace the first syscalls of PID 1 */
++	unsigned int volcano_sc = (pid == 1 && volcano_sc_count < 200) ? ++volcano_sc_count : 0;
++	if (volcano_sc) {
++		printf("VOLCANO sc#%u pid1 enter %u (0x%llx, 0x%llx, 0x%llx)\n", volcano_sc, code,
++		    (unsigned long long)uthread->uu_arg[0], (unsigned long long)uthread->uu_arg[1],
++		    (unsigned long long)uthread->uu_arg[2]);
++	}
++#endif
+ 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
++#if defined(VOLCANO)
++	if (volcano_sc) {
++		printf("VOLCANO sc#%u pid1 leave %u error %d rval 0x%llx\n", volcano_sc, code, error,
++		    (unsigned long long)uthread->uu_rval[0]);
++	}
++#endif
+ 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
+ 
+ #if CONFIG_MACF
 diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
 index 94c7552..d96e3fc 100644
 --- a/bsd/dev/sweet_cpufreq.c
@@ -37,6 +159,70 @@ index 370d18b..2c3564d 100644
  	thread_t thread;
  	if (st.started) {
  		return;
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index bb2a2bf..5e3421c 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -79,6 +79,9 @@
+  * Version 2.0.
+  */
+ 
++#if defined(__arm64__)
++#include <pexpert/arm64/board_config.h>
++#endif
+ #include <sys/param.h>
+ #include <sys/filedesc.h>
+ #include <sys/kernel.h>
+@@ -1098,7 +1101,16 @@ bsdinit_task(void)
+ 
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
++#if defined(VOLCANO)
++	{
++		extern void volcano_watch_start(void);
++		volcano_watch_start();  /* reports where PID 1 is stuck, then resets */
++	}
++#endif
+ 	load_init_program(p);
++#if defined(VOLCANO)
++	printf("VOLCANO: load_init_program returned, entering user mode as PID %d\n", proc_pid(p));
++#endif
+ 	lock_trace = 1;
+ }
+ 
+diff --git a/bsd/vfs/vfs_vnops.c b/bsd/vfs/vfs_vnops.c
+index 3a94ed4..cf04f36 100644
+--- a/bsd/vfs/vfs_vnops.c
++++ b/bsd/vfs/vfs_vnops.c
+@@ -73,6 +73,9 @@
+  * Version 2.0.
+  */
+ 
++#if defined(__arm64__)
++#include <pexpert/arm64/board_config.h>
++#endif
+ #include <sys/param.h>
+ #include <sys/types.h>
+ #include <sys/systm.h>
+@@ -654,7 +657,18 @@ continue_create_lookup:
+ 			}
+ 		}
+ 
++#if defined(VOLCANO)
++		if (proc_pid(vfs_context_proc(ctx)) == 1) {
++			printf("VOLCANO vn_open: VNOP_OPEN vp %p type %d rdev 0x%x\n", vp, (int)vnode_vtype(vp),
++			    (vnode_vtype(vp) == VCHR || vnode_vtype(vp) == VBLK) ? vnode_specrdev(vp) : 0);
++		}
++#endif
+ 		error = VNOP_OPEN(vp, fmode, ctx);
++#if defined(VOLCANO)
++		if (proc_pid(vfs_context_proc(ctx)) == 1) {
++			printf("VOLCANO vn_open: VNOP_OPEN -> %d\n", error);
++		}
++#endif
+ 		if (error) {
+ 			/*
+ 			 * Some file systems fail in vnop_open call with absense of both
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
 index 7a32a23..1d10d4b 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
@@ -313,16 +499,84 @@ index d7a25f2..68e1db0 100644
  static inline void sweet_early_mark(unsigned int stage, const char *label)
  {
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
-index 437adb1..72f5765 100644
+index 437adb1..20e12d5 100644
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1155,9 +1155,18 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+@@ -1155,9 +1155,86 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
  	__builtin_unreachable();
  }
  
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <arm64/sweet_early.h>
 +#endif
++
++#if defined(VOLCANO)
++/*
++ * volcano bring-up: a kernel thread that wakes every 10 s and prints the
++ * state and saved kernel backtrace of PID 1's thread, then after 90 s warm
++ * resets to Android. Lets one unattended fastboot boot say where init hangs.
++ */
++static thread_t volcano_watched;
++static int volcano_watch_ev;
++
++static void
++volcano_watch_bt(thread_t t)
++{
++	vm_offset_t lo = t->kernel_stack, hi = lo + kernel_stack_size;
++	if (lo == 0) {
++		printf("VOLCANO watch:   no kernel stack, continuation 0x%lx\n",
++		    (unsigned long)VM_KERNEL_UNSLIDE((vm_offset_t)t->continuation));
++		return;
++	}
++	if (t == current_thread()) {
++		return;
++	}
++	arm_kernel_context_t *kc = (arm_kernel_context_t *)t->machine.kstackptr;
++	uint64_t fp = kc->ss.fp, lr = kc->ss.lr;
++	printf("VOLCANO watch:   saved lr 0x%lx fp 0x%llx sp 0x%llx\n",
++	    (unsigned long)VM_KERNEL_UNSLIDE((vm_offset_t)lr), fp, kc->ss.sp);
++	for (int i = 0; i < 24 && fp >= lo && fp + 16 <= hi && (fp & 7) == 0; i++) {
++		uint64_t *frame = (uint64_t *)fp;
++		printf("VOLCANO watch:   #%d 0x%lx\n", i, (unsigned long)VM_KERNEL_UNSLIDE((vm_offset_t)frame[1]));
++		if (frame[0] <= fp) {
++			break;
++		}
++		fp = frame[0];
++	}
++}
++
++static void
++volcano_watch(__unused void *arg, __unused wait_result_t wr)
++{
++	thread_t t = volcano_watched;
++	printf("VOLCANO watch: started, init thread %p, slide 0x%lx\n", t, (unsigned long)vm_kernel_slide);
++	for (unsigned int i = 1; i <= 9; i++) {
++		assert_wait_timeout((event_t)&volcano_watch_ev, THREAD_UNINT, 10, NSEC_PER_SEC);
++		thread_block(THREAD_CONTINUE_NULL);
++		printf("VOLCANO watch %us: state 0x%x wait_event 0x%llx (unslid 0x%lx) hint %d wresult %d pri %d\n",
++		    i * 10, t->state, (unsigned long long)t->wait_event,
++		    (unsigned long)VM_KERNEL_UNSLIDE((vm_offset_t)t->wait_event), (int)t->block_hint,
++		    t->wait_result, t->sched_pri);
++		volcano_watch_bt(t);
++	}
++	printf("VOLCANO watch: 90 s up, PSCI reset to Android\n");
++	volcano_psci_reset(2);
++}
++
++void volcano_watch_start(void);
++void
++volcano_watch_start(void)
++{
++	thread_t w;
++	volcano_watched = current_thread();
++	thread_reference(volcano_watched);
++	if (kernel_thread_start_priority(volcano_watch, NULL, MAXPRI_KERNEL, &w) == KERN_SUCCESS) {
++		thread_deallocate(w);
++	} else {
++		printf("VOLCANO watch: failed to start\n");
++	}
++}
++#endif /* VOLCANO */
 +
  void
  panic_spin_forever(void)
