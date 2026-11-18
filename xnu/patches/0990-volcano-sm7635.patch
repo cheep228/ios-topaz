@@ -435,8 +435,39 @@ index b926886..d1837aa 100644
  #endif
  	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
  
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+index e01c124..7df5ddb 100644
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -651,12 +651,25 @@
+ #define SCTLR_JOP_KEYS_DEFAULT  0
+ #endif
+ 
++#if defined(VOLCANO)
++/*
++ * volcano: Cortex-A520/A720 are ARMv9.2, where SCTLR_EL1.SPAN (RES1 on the
++ * ARMv8.0 cores this config targets) is a live bit: SPAN=0 sets PSTATE.PAN on
++ * every exception to EL1. This kernel has no PAN support and never clears it,
++ * so every copyin/copyout then takes a permission fault that arm_fast_fault
++ * "resolves" forever. Keep PAN unchanged on exception entry.
++ */
++#define SCTLR_VOLCANO_EXTRA       SCTLR_PAN_UNCHANGED
++#else
++#define SCTLR_VOLCANO_EXTRA       0
++#endif
++
+ #define SCTLR_EL1_DEFAULT \
+ 	(SCTLR_RESERVED | SCTLR_UCI_ENABLED | SCTLR_nTWE_WFE_ENABLED | SCTLR_DZE_ENABLED | \
+ 	 SCTLR_I_ENABLED | SCTLR_SED_DISABLED | SCTLR_CP15BEN_ENABLED |                    \
+ 	 SCTLR_SA0_ENABLED | SCTLR_SA_ENABLED | SCTLR_C_ENABLED | SCTLR_M_ENABLED |        \
+ 	 SCTLR_CSEH_DEFAULT | SCTLR_DSSBS_DEFAULT |                                        \
+-	 SCTLR_ROP_KEYS_DEFAULT | SCTLR_JOP_KEYS_DEFAULT)
++	 SCTLR_ROP_KEYS_DEFAULT | SCTLR_JOP_KEYS_DEFAULT | SCTLR_VOLCANO_EXTRA)
+ 
+ /*
+  * Coprocessor Access Control Register (CPACR)
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index 9fd1cb9..b0e7d0e 100644
+index 9fd1cb9..8734854 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
 @@ -518,7 +518,7 @@ LEXT(start_first_cpu)
@@ -472,6 +503,17 @@ index 9fd1cb9..b0e7d0e 100644
  #endif
  
  	/* Ensure TTEs are visible */
+@@ -862,6 +871,10 @@ common_start:
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
++#if defined(VOLCANO)
++	.long	0xd500409f			// msr PAN, #0 (SPAN=1 keeps it clear from here on)
++	isb		sy
++#endif
+ 
+ #if !VMAPPLE && !defined(SWEET)
+ 	MOV64   x1, SCTLR_EL1_DEFAULT
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 index 9429767..5c862cf 100644
 --- a/osfmk/arm64/sweet_early.c
