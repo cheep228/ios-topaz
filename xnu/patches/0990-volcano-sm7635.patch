@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/arm/cons.c b/bsd/dev/arm/cons.c
-index 5ac18e2..619e024 100644
+index 5ac18e2..58979df 100644
 --- a/bsd/dev/arm/cons.c
 +++ b/bsd/dev/arm/cons.c
 @@ -12,6 +12,9 @@
@@ -12,14 +12,19 @@ index 5ac18e2..619e024 100644
  #include <sys/param.h>
  #include <sys/systm.h>
  #include <sys/conf.h>
-@@ -52,7 +55,14 @@ int
+@@ -52,7 +55,19 @@ int
  cnopen(__unused dev_t dev, int flag, int devtype, struct proc *pp)
  {
  	dev = cndev();
 +#if defined(VOLCANO)
-+	printf("VOLCANO cnopen: cndev 0x%x d_open %p\n", dev, (void *)cdevsw[major(dev)].d_open);
++	extern int volcano_dbg;
++	if (volcano_dbg) {
++		printf("VOLCANO cnopen: cndev 0x%x d_open %p\n", dev, (void *)cdevsw[major(dev)].d_open);
++	}
 +	int volcano_ret = (*cdevsw[major(dev)].d_open)(dev, flag, devtype, pp);
-+	printf("VOLCANO cnopen: -> %d\n", volcano_ret);
++	if (volcano_dbg) {
++		printf("VOLCANO cnopen: -> %d\n", volcano_ret);
++	}
 +	return volcano_ret;
 +#else
  	return (*cdevsw[major(dev)].d_open)(dev, flag, devtype, pp);
@@ -28,10 +33,10 @@ index 5ac18e2..619e024 100644
  
  
 diff --git a/bsd/dev/arm/km.c b/bsd/dev/arm/km.c
-index fd7a94b..27f56a5 100644
+index fd7a94b..f9c5885 100644
 --- a/bsd/dev/arm/km.c
 +++ b/bsd/dev/arm/km.c
-@@ -8,6 +8,14 @@
+@@ -8,6 +8,15 @@
   *
   * HISTORY
   */
@@ -39,14 +44,15 @@ index fd7a94b..27f56a5 100644
 +#include <pexpert/arm64/board_config.h>
 +#endif
 +#if defined(VOLCANO)
-+#define VKM(x) printf("VOLCANO kmopen: " x "\n")
++extern int volcano_dbg;
++#define VKM(x) do { if (volcano_dbg) printf("VOLCANO kmopen: " x "\n"); } while (0)
 +#else
 +#define VKM(x) do { } while (0)
 +#endif
  #include <sys/param.h>
  #include <sys/tty.h>
  
-@@ -79,8 +87,14 @@ kmopen(dev_t dev, __unused int flag, __unused int devtype, proc_t pp)
+@@ -79,8 +88,14 @@ kmopen(dev_t dev, __unused int flag, __unused int devtype, proc_t pp)
  	}
  
  	tp = km_tty[unit];
@@ -61,7 +67,7 @@ index fd7a94b..27f56a5 100644
  
  	tp->t_oproc = kmstart;
  	tp->t_param = NULL;
-@@ -102,6 +116,7 @@ kmopen(dev_t dev, __unused int flag, __unused int devtype, proc_t pp)
+@@ -102,6 +117,7 @@ kmopen(dev_t dev, __unused int flag, __unused int devtype, proc_t pp)
  	tp->t_state |= TS_CARR_ON;      /* lie and say carrier exists and is
  	                                 * on. */
  	ret = ((*linesw[tp->t_line].l_open)(dev, tp));
@@ -69,7 +75,7 @@ index fd7a94b..27f56a5 100644
  	{
  		PE_Video        video;
  		wp = &tp->t_winsize;
-@@ -116,8 +131,10 @@ kmopen(dev_t dev, __unused int flag, __unused int devtype, proc_t pp)
+@@ -116,8 +132,10 @@ kmopen(dev_t dev, __unused int flag, __unused int devtype, proc_t pp)
  
  		bzero(&video, sizeof(video));
  		PE_current_console(&video);
@@ -749,10 +755,10 @@ index bb2a2bf..6f259fc 100644
  }
  
 diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
-index 94b4383..b3dd52a 100644
+index 94b4383..ba4e5b8 100644
 --- a/bsd/vfs/vfs_lookup.c
 +++ b/bsd/vfs/vfs_lookup.c
-@@ -72,6 +72,13 @@
+@@ -72,6 +72,14 @@
   * Version 2.0.
   */
  
@@ -760,13 +766,14 @@ index 94b4383..b3dd52a 100644
 +#include <pexpert/arm64/board_config.h>
 +#endif
 +#if defined(VOLCANO)
-+#define VOLCANO_PID1(ctx) (proc_pid(vfs_context_proc(ctx)) == 1)
++extern int volcano_dbg;
++#define VOLCANO_PID1(ctx) (volcano_dbg && proc_pid(vfs_context_proc(ctx)) == 1)
 +static unsigned int volcano_lk_count;
 +#endif
  #include <sys/param.h>
  #include <sys/systm.h>
  #include <sys/syslimits.h>
-@@ -165,6 +172,11 @@ extern lck_rw_t rootvnode_rw_lock;
+@@ -165,6 +173,11 @@ extern lck_rw_t rootvnode_rw_lock;
  int
  namei(struct nameidata *ndp)
  {
@@ -778,7 +785,7 @@ index 94b4383..b3dd52a 100644
  	struct vnode *dp;       /* the directory we are searching */
  	struct vnode *usedvp = ndp->ni_dvp;  /* store pointer to vp in case we must loop due to
  	                                      *                                          heavy vnode pressure */
-@@ -1321,7 +1333,19 @@ unionlookup:
+@@ -1321,7 +1334,19 @@ unionlookup:
  	 * not fix whether or not you should or should not get /tmp/a vs. /foo/b.
  	 */
  
@@ -798,7 +805,7 @@ index 94b4383..b3dd52a 100644
  
  	if (error) {
  lookup_error:
-@@ -1587,6 +1611,12 @@ restart:
+@@ -1587,6 +1612,12 @@ restart:
  		}
  
  
@@ -811,7 +818,7 @@ index 94b4383..b3dd52a 100644
  		if (vfs_busy(mp, vbusyflags)) {
  			mount_dropcrossref(mp, dp, 0);
  			if (vbusyflags == LK_NOWAIT) {
-@@ -1598,6 +1628,11 @@ restart:
+@@ -1598,6 +1629,11 @@ restart:
  		}
  
  		error = VFS_ROOT(mp, &tdp, ctx);
@@ -824,32 +831,35 @@ index 94b4383..b3dd52a 100644
  		mount_dropcrossref(mp, dp, 0);
  		vfs_unbusy(mp);
 diff --git a/bsd/vfs/vfs_vnops.c b/bsd/vfs/vfs_vnops.c
-index 3a94ed4..cf04f36 100644
+index 3a94ed4..7b47b02 100644
 --- a/bsd/vfs/vfs_vnops.c
 +++ b/bsd/vfs/vfs_vnops.c
-@@ -73,6 +73,9 @@
+@@ -73,6 +73,12 @@
   * Version 2.0.
   */
  
 +#if defined(__arm64__)
 +#include <pexpert/arm64/board_config.h>
 +#endif
++#if defined(VOLCANO)
++extern int volcano_dbg;
++#endif
  #include <sys/param.h>
  #include <sys/types.h>
  #include <sys/systm.h>
-@@ -654,7 +657,18 @@ continue_create_lookup:
+@@ -654,7 +660,18 @@ continue_create_lookup:
  			}
  		}
  
 +#if defined(VOLCANO)
-+		if (proc_pid(vfs_context_proc(ctx)) == 1) {
++		if (volcano_dbg && proc_pid(vfs_context_proc(ctx)) == 1) {
 +			printf("VOLCANO vn_open: VNOP_OPEN vp %p type %d rdev 0x%x\n", vp, (int)vnode_vtype(vp),
 +			    (vnode_vtype(vp) == VCHR || vnode_vtype(vp) == VBLK) ? vnode_specrdev(vp) : 0);
 +		}
 +#endif
  		error = VNOP_OPEN(vp, fmode, ctx);
 +#if defined(VOLCANO)
-+		if (proc_pid(vfs_context_proc(ctx)) == 1) {
++		if (volcano_dbg && proc_pid(vfs_context_proc(ctx)) == 1) {
 +			printf("VOLCANO vn_open: VNOP_OPEN -> %d\n", error);
 +		}
 +#endif
@@ -1179,10 +1189,10 @@ index d7a25f2..68e1db0 100644
  static inline void sweet_early_mark(unsigned int stage, const char *label)
  {
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
-index 437adb1..190faa0 100644
+index 437adb1..f71f90d 100644
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1155,9 +1155,89 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+@@ -1155,9 +1155,99 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
  	__builtin_unreachable();
  }
  
@@ -1199,6 +1209,10 @@ index 437adb1..190faa0 100644
 +extern thread_t volcano_watched;
 +thread_t volcano_watched;
 +static int volcano_watch_ev;
++static uint32_t volcano_watch_secs = 60;
++/* vdbg=0: no per-call traces of PID 1 (namei, vn_open, console open) */
++extern int volcano_dbg;
++int volcano_dbg = 1;
 +
 +static void
 +volcano_watch_bt(thread_t t)
@@ -1230,7 +1244,7 @@ index 437adb1..190faa0 100644
 +volcano_watch(__unused void *arg, __unused wait_result_t wr)
 +{
 +	printf("VOLCANO watch: started, slide 0x%lx\n", (unsigned long)vm_kernel_slide);
-+	for (unsigned int i = 1; i <= 6; i++) {
++	for (unsigned int i = 1; i <= volcano_watch_secs / 10; i++) {
 +		assert_wait_timeout((event_t)&volcano_watch_ev, THREAD_UNINT, 10, NSEC_PER_SEC);
 +		thread_block(THREAD_CONTINUE_NULL);
 +		thread_t t = volcano_watched;
@@ -1244,7 +1258,7 @@ index 437adb1..190faa0 100644
 +		    t->wait_result, t->sched_pri);
 +		volcano_watch_bt(t);
 +	}
-+	printf("VOLCANO watch: 60 s up, PSCI reset to Android\n");
++	printf("VOLCANO watch: %u s up, PSCI reset to Android\n", volcano_watch_secs);
 +	volcano_psci_reset(2);
 +}
 +
@@ -1253,6 +1267,12 @@ index 437adb1..190faa0 100644
 +volcano_watch_start(void)
 +{
 +	thread_t w;
++	PE_parse_boot_argn("vdbg", &volcano_dbg, sizeof(volcano_dbg));
++	PE_parse_boot_argn("vwatch", &volcano_watch_secs, sizeof(volcano_watch_secs));
++	if (volcano_watch_secs == 0) {
++		printf("VOLCANO watch: off (vwatch=0)\n");
++		return;
++	}
 +	if (kernel_thread_start_priority(volcano_watch, NULL, MAXPRI_KERNEL, &w) == KERN_SUCCESS) {
 +		thread_deallocate(w);
 +	} else {
