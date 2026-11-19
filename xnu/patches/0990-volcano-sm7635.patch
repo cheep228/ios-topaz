@@ -162,7 +162,7 @@ index 370d18b..2c3564d 100644
  	if (st.started) {
  		return;
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 143db60..d372153 100644
+index 143db60..e865e79 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -39,6 +39,7 @@
@@ -394,7 +394,31 @@ index 143db60..d372153 100644
  }
  
  static int
-@@ -782,9 +895,28 @@ sweet_ufs_init(void)
+@@ -736,6 +849,23 @@ sweet_gpt_watch(__unused void *arg, __unused wait_result_t wr)
+ 	}
+ }
+ 
++#if defined(VOLCANO)
++/*
++ * sweetpanic=N: panic N seconds after the root is found, so a boot that
++ * hangs (no USB, no keys yet) still comes back to Android with its console
++ * in ramoops.
++ */
++static uint32_t sweet_panic_secs;
++
++static void
++sweet_panic_timer(__unused void *arg, __unused wait_result_t wr)
++{
++	assert_wait_timeout((event_t)&sweet_panic_secs, THREAD_UNINT, sweet_panic_secs, NSEC_PER_SEC);
++	thread_block(THREAD_CONTINUE_NULL);
++	panic("VOLCANO: sweetpanic=%u seconds elapsed, back to Android", sweet_panic_secs);
++}
++#endif
++
+ static int
+ sweet_ufs_init(void)
+ {
+@@ -782,9 +912,28 @@ sweet_ufs_init(void)
  		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
  		}
  	}
@@ -423,7 +447,7 @@ index 143db60..d372153 100644
  	lck_mtx_unlock(&sweet_ufs_lock);
  	if (error) {
  		return error;
-@@ -805,7 +937,7 @@ sweet_ufs_init(void)
+@@ -805,7 +954,7 @@ sweet_ufs_init(void)
  	su.writable = (rw != 0);
  	su.ready = true;
  	printf("SWEET UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
@@ -432,7 +456,7 @@ index 143db60..d372153 100644
  	    su.writable ? "read-write" : "read-only", su.dma_pa);
  	sweet_log_start();
  	sweet_sample_start();
-@@ -821,6 +953,11 @@ sweet_ufs_init(void)
+@@ -821,6 +970,18 @@ sweet_ufs_init(void)
  	 */
  	int hw = 0;
  	(void)PE_parse_boot_argn("sweethw", &hw, sizeof(hw));
@@ -440,11 +464,18 @@ index 143db60..d372153 100644
 +	/* volcano: touch, keys and USB above are SM6225/SM7150 MMIO, not ported */
 +	(void)hw;
 +	printf("SWEET UFS: volcano, touch/keys/USB skipped\n");
++	if (PE_parse_boot_argn("sweetpanic", &sweet_panic_secs, sizeof(sweet_panic_secs)) && sweet_panic_secs) {
++		thread_t pt;
++		if (kernel_thread_start(sweet_panic_timer, NULL, &pt) == KERN_SUCCESS) {
++			thread_deallocate(pt);
++			printf("SWEET UFS: panic in %u s (sweetpanic)\n", sweet_panic_secs);
++		}
++	}
 +#else
  	sweet_touch_init();
  	sweet_keys_init();
  	if (hw == 1) {
-@@ -828,6 +965,7 @@ sweet_ufs_init(void)
+@@ -828,6 +989,7 @@ sweet_ufs_init(void)
  	} else {
  		printf("SWEET UFS: USB skipped (topaz, sweethw=0)\n");
  	}
@@ -452,7 +483,7 @@ index 143db60..d372153 100644
  	return 0;
  }
  
-@@ -961,7 +1099,7 @@ sweet_log_start(void)
+@@ -961,7 +1123,7 @@ sweet_log_start(void)
  	thread_t thread;
  
  	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
@@ -461,7 +492,7 @@ index 143db60..d372153 100644
  		return;
  	}
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
-@@ -973,6 +1111,207 @@ sweet_log_start(void)
+@@ -973,6 +1135,207 @@ sweet_log_start(void)
  	}
  }
  
