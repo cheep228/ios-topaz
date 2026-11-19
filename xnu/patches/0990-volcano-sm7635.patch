@@ -168,7 +168,7 @@ index 370d18b..2c3564d 100644
  	if (st.started) {
  		return;
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 143db60..e865e79 100644
+index 143db60..3b5ef3d 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -39,6 +39,7 @@
@@ -400,7 +400,7 @@ index 143db60..e865e79 100644
  }
  
  static int
-@@ -736,6 +849,23 @@ sweet_gpt_watch(__unused void *arg, __unused wait_result_t wr)
+@@ -736,6 +849,30 @@ sweet_gpt_watch(__unused void *arg, __unused wait_result_t wr)
  	}
  }
  
@@ -411,12 +411,19 @@ index 143db60..e865e79 100644
 + * in ramoops.
 + */
 +static uint32_t sweet_panic_secs;
++extern void sweet_fb_snapshot(uint32_t scale);   /* SweetFramebuffer.cpp */
 +
 +static void
 +sweet_panic_timer(__unused void *arg, __unused wait_result_t wr)
 +{
 +	assert_wait_timeout((event_t)&sweet_panic_secs, THREAD_UNINT, sweet_panic_secs, NSEC_PER_SEC);
 +	thread_block(THREAD_CONTINUE_NULL);
++	/* sweetshot=N (default 8, 0 = off): the panel, 1/N size, into the log first */
++	uint32_t shot = 8;
++	PE_parse_boot_argn("sweetshot", &shot, sizeof(shot));
++	if (shot != 0) {
++		sweet_fb_snapshot(shot);
++	}
 +	panic("VOLCANO: sweetpanic=%u seconds elapsed, back to Android", sweet_panic_secs);
 +}
 +#endif
@@ -424,7 +431,7 @@ index 143db60..e865e79 100644
  static int
  sweet_ufs_init(void)
  {
-@@ -782,9 +912,28 @@ sweet_ufs_init(void)
+@@ -782,9 +919,28 @@ sweet_ufs_init(void)
  		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
  		}
  	}
@@ -453,7 +460,7 @@ index 143db60..e865e79 100644
  	lck_mtx_unlock(&sweet_ufs_lock);
  	if (error) {
  		return error;
-@@ -805,7 +954,7 @@ sweet_ufs_init(void)
+@@ -805,7 +961,7 @@ sweet_ufs_init(void)
  	su.writable = (rw != 0);
  	su.ready = true;
  	printf("SWEET UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
@@ -462,7 +469,7 @@ index 143db60..e865e79 100644
  	    su.writable ? "read-write" : "read-only", su.dma_pa);
  	sweet_log_start();
  	sweet_sample_start();
-@@ -821,6 +970,18 @@ sweet_ufs_init(void)
+@@ -821,6 +977,18 @@ sweet_ufs_init(void)
  	 */
  	int hw = 0;
  	(void)PE_parse_boot_argn("sweethw", &hw, sizeof(hw));
@@ -481,7 +488,7 @@ index 143db60..e865e79 100644
  	sweet_touch_init();
  	sweet_keys_init();
  	if (hw == 1) {
-@@ -828,6 +989,7 @@ sweet_ufs_init(void)
+@@ -828,6 +996,7 @@ sweet_ufs_init(void)
  	} else {
  		printf("SWEET UFS: USB skipped (topaz, sweethw=0)\n");
  	}
@@ -489,7 +496,7 @@ index 143db60..e865e79 100644
  	return 0;
  }
  
-@@ -961,7 +1123,7 @@ sweet_log_start(void)
+@@ -961,7 +1130,7 @@ sweet_log_start(void)
  	thread_t thread;
  
  	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
@@ -498,7 +505,7 @@ index 143db60..e865e79 100644
  		return;
  	}
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
-@@ -973,6 +1135,207 @@ sweet_log_start(void)
+@@ -973,6 +1142,207 @@ sweet_log_start(void)
  	}
  }
  
@@ -951,10 +958,20 @@ index 96c557b..208c1f2 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1d3ee17..6480a7d 100644
+index 1d3ee17..09a1e40 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -352,11 +352,12 @@ AppleCLCD::start(IOService *provider)
+@@ -280,6 +280,9 @@ class IOAcceleratorES : public IOService {
+ 
+ OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
++#if defined(VOLCANO)
++static AppleCLCD *sweet_fb_main;
++#endif
+ 
+ class IOMobileFramebufferUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
+@@ -352,11 +355,12 @@ AppleCLCD::start(IOService *provider)
  		IOLog("SWEET FB: no vsync timer\n");
  		return false;
  	}
@@ -970,7 +987,7 @@ index 1d3ee17..6480a7d 100644
  	fDsiBuf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
  	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, page_size, 0x00000000fffff000ull);
  	fDsiBufPhys = fDsiBuf ? fDsiBuf->getPhysicalSegment(0, NULL, kIOMemoryMapperNone) : 0;
-@@ -399,7 +400,7 @@ AppleCLCD::start(IOService *provider)
+@@ -399,7 +403,7 @@ AppleCLCD::start(IOService *provider)
  	}
  	OSSafeReleaseNULL(accel);
  	/* dpu sm6115 catalog: intf_1 at mdp+0x6a800, mdp at 0x5e01000 */
@@ -979,6 +996,74 @@ index 1d3ee17..6480a7d 100644
  	if (fIntf1 != NULL) {
  		volatile uint32_t *r = fIntf1 + 0x800 / 4;
  		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
+@@ -472,6 +476,9 @@ AppleCLCD::start(IOService *provider)
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
++#if defined(VOLCANO)
++	sweet_fb_main = this;
++#endif
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+ 	return true;
+@@ -1638,3 +1645,57 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 	return ret;
+ }
+ #endif /* SWEET */
++
++#if defined(VOLCANO)
++/*
++ * volcano: nobody looks at the panel during an unattended boot. Print the
++ * panel memory to the console, downscaled by SCALE (block average) as RGB444,
++ * one row per line: "SHOT y rgbrgb...". tools/shot2png.py turns the ramoops
++ * copy back into a picture. Called before sweetpanic's panic.
++ */
++extern "C" void sweet_fb_snapshot(uint32_t scale);
++extern "C" void
++sweet_fb_snapshot(uint32_t scale)
++{
++	static char line[3 * 512 + 1];
++	static const char hx[] = "0123456789abcdef";
++	AppleCLCD *fb = sweet_fb_main;
++
++	if (fb == NULL || fb->fPixels == 0) {
++		IOLog("SHOT none\n");
++		return;
++	}
++	if (scale < 2) {
++		scale = 8;
++	}
++	uint32_t ow = fb->fWidth / scale, oh = fb->fHeight / scale;
++	if (ow > 512) {
++		ow = 512;
++	}
++	IOLog("SHOT begin %u %u scale %u src %ux%u\n", ow, oh, scale, fb->fWidth, fb->fHeight);
++	for (uint32_t oy = 0; oy < oh; oy++) {
++		for (uint32_t ox = 0; ox < ow; ox++) {
++			uint32_t r = 0, g = 0, b = 0, n = 0;
++			for (uint32_t y = oy * scale; y < oy * scale + scale; y += 2) {
++				const volatile uint32_t *row = (const volatile uint32_t *)(fb->fPixels + (uint64_t)y * fb->fRowBytes);
++				for (uint32_t x = ox * scale; x < ox * scale + scale; x += 2) {
++					uint32_t p = row[x];
++					b += p & 0xff;
++					g += (p >> 8) & 0xff;
++					r += (p >> 16) & 0xff;
++					n++;
++				}
++			}
++			r /= n;
++			g /= n;
++			b /= n;
++			line[3 * ox] = hx[r >> 4];
++			line[3 * ox + 1] = hx[g >> 4];
++			line[3 * ox + 2] = hx[b >> 4];
++		}
++		line[3 * ow] = 0;
++		IOLog("SHOT %u %s\n", oy, line);
++	}
++	IOLog("SHOT end\n");
++}
++#endif /* VOLCANO */
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index b926886..d1837aa 100644
 --- a/osfmk/arm64/arm_vm_init.c
