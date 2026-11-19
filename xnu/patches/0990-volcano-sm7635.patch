@@ -162,7 +162,7 @@ index 370d18b..2c3564d 100644
  	if (st.started) {
  		return;
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 143db60..0e9b646 100644
+index 143db60..dd85e57 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -39,6 +39,7 @@
@@ -173,7 +173,39 @@ index 143db60..0e9b646 100644
  
  extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
  /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
-@@ -821,6 +822,11 @@ sweet_ufs_init(void)
+@@ -76,6 +77,7 @@ extern void sweet_usb_probe(void);
+ #define CMD_TIMEOUT_NS  (5ull * NSEC_PER_SEC)
+ #define CMD_SPIN_NS     (50ull * NSEC_PER_USEC)
+ #define CMD_SLEEP_NS    (200ull * NSEC_PER_USEC)
++static uint64_t ufs_cmd_timeout_ns = CMD_TIMEOUT_NS;
+ 
+ struct utrd {
+ 	uint32_t dw0, dw1, dw2, dw3;
+@@ -206,7 +208,7 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 
+ 	ufs_wr(REG_UTRLDBR, 1);
+ 	uint64_t deadline;
+-	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++	nanoseconds_to_absolutetime(ufs_cmd_timeout_ns, &deadline);
+ 	deadline += mach_absolute_time();
+ 	bool sleepable = su.wait && su.ready && ml_get_interrupts_enabled() &&
+ 	    !ml_at_interrupt_context() && get_preemption_level() == 0;
+@@ -249,8 +251,12 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 
+ 	uint32_t ocs = utrd->dw2 & 0xff;
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+-		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+-		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
++		/* Response UPIU: sense data length at 32 (BE), fixed-format sense from 34. */
++		const uint8_t *sd = &ucd->resp[34];
++		printf("SWEET UFS: command 0x%02x lun 0x%x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x"
++		    " devinfo 0x%x sense len %u: %02x key 0x%x asc 0x%02x ascq 0x%02x\n",
++		    cdb[0], su.lun, ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7], ucd->resp[9],
++		    (unsigned)(ucd->resp[32] << 8 | ucd->resp[33]), sd[0], sd[2] & 0xf, sd[12], sd[13]);
+ 		return EIO;
+ 	}
+ 	return 0;
+@@ -821,6 +827,11 @@ sweet_ufs_init(void)
  	 */
  	int hw = 0;
  	(void)PE_parse_boot_argn("sweethw", &hw, sizeof(hw));
@@ -185,7 +217,7 @@ index 143db60..0e9b646 100644
  	sweet_touch_init();
  	sweet_keys_init();
  	if (hw == 1) {
-@@ -828,6 +834,7 @@ sweet_ufs_init(void)
+@@ -828,6 +839,7 @@ sweet_ufs_init(void)
  	} else {
  		printf("SWEET UFS: USB skipped (topaz, sweethw=0)\n");
  	}
@@ -193,7 +225,7 @@ index 143db60..0e9b646 100644
  	return 0;
  }
  
-@@ -973,6 +980,133 @@ sweet_log_start(void)
+@@ -973,6 +985,207 @@ sweet_log_start(void)
  	}
  }
  
@@ -271,6 +303,77 @@ index 143db60..0e9b646 100644
 +	}
 +}
 +
++/*
++ * The UFS Device well-known LU (0xD0 in the UPIU LUN field) takes the power
++ * mode commands. ufsprobe=3 also sends START STOP UNIT with POWER CONDITION
++ * 1h (Active), as Linux does on every resume: a power mode change only, no
++ * medium access.
++ */
++static void
++ufs_probe_wlun(uint32_t mode)
++{
++	static const uint8_t tur[6] = { 0x00 };
++	static const uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
++	int error = 0;
++
++	su.lun = 0;                             /* LUN 0 as ABL left it, for the sense data */
++	(void)ufs_scsi(tur, sizeof(tur), 0, false);
++	su.lun = 0xd0;
++	for (int i = 0; i < 3; i++) {
++		error = ufs_scsi(tur, sizeof(tur), 0, false);
++		if (error != EIO) {
++			break;
++		}
++	}
++	printf("VOLCANO UFS: device W-LUN: test unit ready %d\n", error);
++	if (mode & 2) {
++		ufs_cmd_timeout_ns = 30ull * NSEC_PER_SEC;
++		for (int i = 0; i < 3; i++) {
++			error = ufs_scsi(ssu, sizeof(ssu), 0, false);
++			if (error != EIO) {
++				break;
++			}
++		}
++		ufs_cmd_timeout_ns = CMD_TIMEOUT_NS;
++		printf("VOLCANO UFS: device W-LUN: start stop unit (active) %d\n", error);
++	}
++}
++
++/*
++ * What ABL left in its own transfer request list (still in RAM): command
++ * type, OCS, LUN, CDB and SCSI status of each used slot. Read only; UCD
++ * addresses outside DRAM are skipped.
++ */
++static void
++ufs_probe_abl(uint64_t list)
++{
++	if (list < 0x80000000ull || list >= 0x240000000ull) {
++		return;
++	}
++	uint64_t base = list & ~(uint64_t)PAGE_MASK;
++	vm_offset_t v = ml_io_map(base, 2 * PAGE_SIZE);
++	const volatile uint32_t *t = (const volatile uint32_t *)(v + (list - base));
++	unsigned shown = 0;
++	for (unsigned slot = 0; slot < 32 && shown < 6; slot++, t += 8) {
++		uint64_t ucd = (uint64_t)t[5] << 32 | (t[4] & ~0x7fu);
++		if (t[0] == 0 || ucd < 0x80000000ull || ucd >= 0x240000000ull) {
++			continue;
++		}
++		uint64_t ub = ucd & ~(uint64_t)PAGE_MASK;
++		vm_offset_t uv = ml_io_map(ub, 2 * PAGE_SIZE);
++		const volatile uint8_t *c = (const volatile uint8_t *)(uv + (ucd - ub));
++		unsigned ro = (t[6] >> 16) * 4;         /* response UPIU offset, DWORDs */
++		if (ro < 32 || ro > 4096) {
++			ro = 512;
++		}
++		printf("VOLCANO UFS: ABL slot %u dw0 %#x ocs %#x: upiu %02x lun %02x cdb %02x %02x %02x %02x %02x %02x"
++		    " -> %02x resp %02x status %02x sense %02x/%02x/%02x\n",
++		    slot, t[0], t[2] & 0xff, c[0], c[2], c[16], c[17], c[18], c[19], c[20], c[21],
++		    c[ro], c[ro + 6], c[ro + 7], c[ro + 36] & 0xf, c[ro + 46], c[ro + 47]);
++		shown++;
++	}
++}
++
 +void
 +sweet_ufs_probe(void)
 +{
@@ -295,6 +398,7 @@ index 143db60..0e9b646 100644
 +	    ufs_rd(REG_IS), ufs_rd(REG_IE));
 +	printf("VOLCANO UFS: utrl %#x:%#x dbr %#x rsr %#x\n",
 +	    ufs_rd(REG_UTRLBAU), ufs_rd(REG_UTRLBA), ufs_rd(REG_UTRLDBR), ufs_rd(REG_UTRLRSR));
++	uint64_t abl_list = (uint64_t)ufs_rd(REG_UTRLBAU) << 32 | (ufs_rd(REG_UTRLBA) & ~0x3ffu);
 +	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
 +	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 +		printf("VOLCANO UFS: no contiguous DMA memory\n");
@@ -314,12 +418,14 @@ index 143db60..0e9b646 100644
 +	printf("VOLCANO UFS: take over: %d\n", error);
 +	if (!error) {
 +		unsigned timeouts = 0;
++		ufs_probe_wlun(on);
 +		for (uint8_t lun = 0; lun < 8 && timeouts < 2; lun++) {
 +			ufs_probe_lun(lun, &timeouts);
 +		}
 +	}
 +	su.lun = 0;
 +	lck_mtx_unlock(&sweet_ufs_lock);
++	ufs_probe_abl(abl_list);
 +	printf("VOLCANO UFS: probe done\n");
 +}
 +#endif /* VOLCANO */
