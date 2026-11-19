@@ -515,7 +515,7 @@ index 9fd1cb9..8734854 100644
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index 9429767..5c862cf 100644
+index 9429767..aa886a2 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
 @@ -14,11 +14,11 @@
@@ -532,7 +532,7 @@ index 9429767..5c862cf 100644
  #define EARLY_STRIDE (4320u / 4)
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
-@@ -43,9 +43,59 @@ sweet_early_clear_row(void)
+@@ -43,9 +43,64 @@ sweet_early_clear_row(void)
  	}
  }
  
@@ -558,7 +558,12 @@ index 9429767..5c862cf 100644
 +		return;
 +	}
 +	base[12 + n] = (uint8_t)c;
-+	h[1] = n + 1;
++	/*
++	 * start = 0: Linux then reads data[0..size) as-is. With start == size a
++	 * single bit flipped in start during the warm reset (seen: 11251 vs
++	 * 12275) makes start > size and Linux drops the whole record.
++	 */
++	h[1] = 0;
 +	h[2] = n + 1;
 +}
 +
@@ -592,7 +597,7 @@ index 9429767..5c862cf 100644
  	if (early_disabled) {
  		return;
  	}
-@@ -133,6 +183,9 @@ void
+@@ -133,6 +188,9 @@ void
  sweet_early_relocate(uint64_t base)
  {
  	sweet_early_mark(8, "leaving bootstrap TTBR0");
