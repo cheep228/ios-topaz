@@ -958,7 +958,7 @@ index 96c557b..208c1f2 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1d3ee17..09a1e40 100644
+index 1d3ee17..c9406b4 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -280,6 +280,9 @@ class IOAcceleratorES : public IOService {
@@ -1006,7 +1006,7 @@ index 1d3ee17..09a1e40 100644
  	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
  	return true;
-@@ -1638,3 +1645,57 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1638,3 +1645,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  	return ret;
  }
  #endif /* SWEET */
@@ -1015,7 +1015,7 @@ index 1d3ee17..09a1e40 100644
 +/*
 + * volcano: nobody looks at the panel during an unattended boot. Print the
 + * panel memory to the console, downscaled by SCALE (block average) as RGB444,
-+ * one row per line: "SHOT y rgbrgb...". tools/shot2png.py turns the ramoops
++ * rows as "SHOT y x0 rgbrgb..." (64 pixels a line). tools/shot2png.py turns the ramoops
 + * copy back into a picture. Called before sweetpanic's panic.
 + */
 +extern "C" void sweet_fb_snapshot(uint32_t scale);
@@ -1058,8 +1058,14 @@ index 1d3ee17..09a1e40 100644
 +			line[3 * ox + 1] = hx[g >> 4];
 +			line[3 * ox + 2] = hx[b >> 4];
 +		}
-+		line[3 * ow] = 0;
-+		IOLog("SHOT %u %s\n", oy, line);
++		/* IOLog cuts a line after ~256 bytes: 64 pixels (192 digits) a line */
++		for (uint32_t x0 = 0; x0 < ow; x0 += 64) {
++			uint32_t n = ow - x0 < 64 ? ow - x0 : 64;
++			char save = line[3 * (x0 + n)];
++			line[3 * (x0 + n)] = 0;
++			IOLog("SHOT %u %u %s\n", oy, x0, line + 3 * x0);
++			line[3 * (x0 + n)] = save;
++		}
 +	}
 +	IOLog("SHOT end\n");
 +}
