@@ -162,7 +162,7 @@ index 370d18b..2c3564d 100644
  	if (st.started) {
  		return;
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 143db60..48a4980 100644
+index 143db60..d372153 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -39,6 +39,7 @@
@@ -202,7 +202,7 @@ index 143db60..48a4980 100644
 + * the table and nothing else of the partition can be read through it or
 + * written at all.
 + */
-+#define UFS_MAX_EXT     1024
++#define UFS_MAX_EXT     8192            /* a 16 GiB file in a 42% full /data: 4354 */
 +static struct ufs_ext {
 +	uint64_t lblk, pblk, n;
 +} su_ext[UFS_MAX_EXT];
