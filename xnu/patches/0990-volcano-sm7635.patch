@@ -1273,6 +1273,21 @@ index d7a25f2..68e1db0 100644
  #else
  static inline void sweet_early_mark(unsigned int stage, const char *label)
  {
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index d97cba8..2d231e9 100644
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -315,6 +315,10 @@ _cnputs(char *c, int size, bool poll)
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	sweet_log_append(c, size);
+ 	if (sweet_console_muted && !panic_active()) {
++#if defined(VOLCANO)
++		extern void volcano_ramlog_puts(const char *s, int n);   /* pexpert/arm/pe_serial.c */
++		volcano_ramlog_puts(c, size);
++#endif
+ 		return;
+ 	}
+ 	if (sweet_log_filter < 0) {
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 index 437adb1..f71f90d 100644
 --- a/osfmk/kern/debug.c
@@ -1419,30 +1434,47 @@ index 6089db9..0d8cce3 100644
  
  #define gicd_read32(offset) (_gic_read32(gicd_base + (offset)))
 diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
-index 19f27cd..523f537 100644
+index 19f27cd..7c76d71 100644
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -718,6 +718,9 @@ extern unsigned char iso_font[256 * 16];
+@@ -718,6 +718,23 @@ extern unsigned char iso_font[256 * 16];
  #define FBCON_BG        0xff000000u
  
  static volatile uint32_t *fbcon_base;
 +#if defined(VOLCANO)
 +static volatile uint8_t *fbcon_log;     /* ramoops console mirror */
++extern int sweet_console_muted;         /* osfmk/console/serial_console.c */
++
++/* console text while sweetfb_noconsole mutes the panel: to ramoops only */
++void volcano_ramlog_puts(const char *s, int n);
++void
++volcano_ramlog_puts(const char *s, int n)
++{
++	if (fbcon_log == NULL) {
++		return;
++	}
++	for (int i = 0; i < n; i++) {
++		volcano_log_putc(fbcon_log, s[i]);
++	}
++}
 +#endif
  static uint32_t fbcon_width, fbcon_height, fbcon_stride;
  static uint32_t fbcon_cols, fbcon_rows, fbcon_col, fbcon_row;
  
-@@ -761,6 +764,9 @@ fbcon_transmit_ready(void)
+@@ -761,6 +778,12 @@ fbcon_transmit_ready(void)
  static void
  fbcon_transmit_data(uint8_t c)
  {
 +#if defined(VOLCANO)
 +	volcano_log_putc(fbcon_log, (char)c);
++	if (sweet_console_muted) {
++		return;         /* the GUI owns the panel; the text went to ramoops */
++	}
 +#endif
  	if (c == '\r') {
  		fbcon_col = 0;
  		return;
-@@ -837,6 +843,9 @@ fbcon_probe(void)
+@@ -837,6 +860,9 @@ fbcon_probe(void)
  	sweet_early_mark(17, "fbcon config read; mapping");
  	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
  	sweet_early_mark(18, "fbcon mapping returned");
