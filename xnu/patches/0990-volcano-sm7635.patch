@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..3849bf6 100644
+index 370d18b..0a8047b 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..3849bf6 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1345 @@ out:
+@@ -740,10 +744,1357 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -830,6 +830,18 @@ index 370d18b..3849bf6 100644
 +}
 +
 +/* tight watch after a doorbell: last line before a reset shows how far it got */
++static void g_qtb(const char *why) {
++	static const uint32_t pa[2] = {0x171b000u, 0x16f1000u};
++	for (unsigned k = 0; k < 2; ++k) {
++		vm_offset_t q = ml_io_map(pa[k], 0x1000);
++		if (!q) continue;
++		for (unsigned o = 0; o < 0x1000u; o += 16u) {
++			uint32_t a = touch_rd(q, o), b = touch_rd(q, o + 4), c = touch_rd(q, o + 8), d = touch_rd(q, o + 12);
++			if (a | b | c | d)
++				printf("SWEET TOUCH: qtb %s a%u %03x: %08x %08x %08x %08x\n", why, 2u - k, o, a, b, c, d);
++		}
++	}
++}
 +static void
 +g_watch(const char *why, unsigned n, unsigned us)
 +{
@@ -1127,6 +1139,7 @@ index 370d18b..3849bf6 100644
 +			__builtin_arm_dsb(0xf);
 +			printf("SWEET TOUCH: usf test: smr %u = %#x cr0 %#x gfsr %#x\n", g_smmu_smri, touch_rd(g_smmu_gr0, 0x800u + 4u * g_smmu_smri), touch_rd(g_smmu_gr0, 0), touch_rd(g_smmu_gr0, 0x48));
 +		}
++		g_qtb("pre");
 +		g_watch("pre", 1, 10);
 +		v_mark("gpi cfg0 unchained db");
 +		g_wr(G_CH_DB(0), (uint32_t)(vg.da + G_OFF_TX + vg.tx_wp * G_EL));
@@ -1150,9 +1163,7 @@ index 370d18b..3849bf6 100644
 +		g_wr(G_CH_DB(0), (uint32_t)(vg.da + G_OFF_TX + vg.tx_wp * G_EL));
 +		g_watch("tx", 200, 200);
 +		v_mark("tx-only watched 40ms");
-+	{ vm_offset_t q = ml_io_map(0x171a000u, 0x1000); v_mark("qtb2 map");
-+	  for (unsigned o = 0; o < 0x100u; o += 0x20u) { printf("SWEET TOUCH: qtb2 +%#x: %#x %#x %#x %#x %#x %#x %#x %#x\n", o,
-+	    touch_rd(q,o), touch_rd(q,o+4), touch_rd(q,o+8), touch_rd(q,o+12), touch_rd(q,o+16), touch_rd(q,o+20), touch_rd(q,o+24), touch_rd(q,o+28)); } }
++	g_qtb("after");
 +		v_mark("pad");
 +		flush_dcache64((addr64_t)(vg.dma + G_OFF_EV), 64, FALSE);
 +		{
@@ -1619,6 +1630,7 @@ index 370d18b..3849bf6 100644
 +			int sn = sweet_rpmh_bcm_vote(sn_bcm[i], 0x100u, 0x100u);
 +			printf("SWEET TOUCH: BCM SN%u vote -> %d\n", i, sn);
 +		}
++		{ int acv = sweet_rpmh_bcm_vote(0x50068u, 0u, 1u); printf("SWEET TOUCH: BCM ACV vote -> %d\n", acv); }
 +		if (be) {
 +			goto out;
 +		}
@@ -1743,7 +1755,7 @@ index 370d18b..3849bf6 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2096,9 @@ sweet_touch_init(void)
+@@ -757,7 +2108,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
