@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..c6e7d72 100644
+index 370d18b..429e2f0 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -740,10 +740,574 @@ out:
@@ -402,7 +402,7 @@ index 370d18b..c6e7d72 100644
 + */
 +#define V_SE_PA          0x00a80000u
 +#define V_GCC_PA         0x00100000u
-+#define V_TLMM_PA        0x0f000000u
++#define V_TLMM_PA        0x0f100000u /* TLMM 0xf000000 + REG_BASE 0x100000 (pinctrl-volcano) */
 +#define V_GCC_VOTE       0x52008u
 +#define V_GCC_BITS       (0x1fu << 18)
 +#define V_S0_CBCR        0x18004u
