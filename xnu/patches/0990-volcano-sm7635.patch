@@ -908,7 +908,7 @@ index 370d18b..18b490d 100644
  		thread_deallocate(thread);
  	} else {
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 143db60..3b5ef3d 100644
+index 143db60..eeeb211 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -39,6 +39,7 @@
@@ -1209,14 +1209,15 @@ index 143db60..3b5ef3d 100644
  	    su.writable ? "read-write" : "read-only", su.dma_pa);
  	sweet_log_start();
  	sweet_sample_start();
-@@ -821,6 +977,18 @@ sweet_ufs_init(void)
+@@ -821,6 +977,19 @@ sweet_ufs_init(void)
  	 */
  	int hw = 0;
  	(void)PE_parse_boot_argn("sweethw", &hw, sizeof(hw));
 +#if defined(VOLCANO)
-+	/* volcano: touch, keys and USB above are SM6225/SM7150 MMIO, not ported */
++	/* volcano: keys and USB above are SM6225/SM7150 MMIO, not ported; touch is FT3681 SPI */
 +	(void)hw;
-+	printf("SWEET UFS: volcano, touch/keys/USB skipped\n");
++	printf("SWEET UFS: volcano, keys/USB skipped, touch FT3681\n");
++	sweet_touch_init();
 +	if (PE_parse_boot_argn("sweetpanic", &sweet_panic_secs, sizeof(sweet_panic_secs)) && sweet_panic_secs) {
 +		thread_t pt;
 +		if (kernel_thread_start(sweet_panic_timer, NULL, &pt) == KERN_SUCCESS) {
@@ -1228,7 +1229,7 @@ index 143db60..3b5ef3d 100644
  	sweet_touch_init();
  	sweet_keys_init();
  	if (hw == 1) {
-@@ -828,6 +996,7 @@ sweet_ufs_init(void)
+@@ -828,6 +997,7 @@ sweet_ufs_init(void)
  	} else {
  		printf("SWEET UFS: USB skipped (topaz, sweethw=0)\n");
  	}
@@ -1236,7 +1237,7 @@ index 143db60..3b5ef3d 100644
  	return 0;
  }
  
-@@ -961,7 +1130,7 @@ sweet_log_start(void)
+@@ -961,7 +1131,7 @@ sweet_log_start(void)
  	thread_t thread;
  
  	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
@@ -1245,7 +1246,7 @@ index 143db60..3b5ef3d 100644
  		return;
  	}
  	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
-@@ -973,6 +1142,207 @@ sweet_log_start(void)
+@@ -973,6 +1143,207 @@ sweet_log_start(void)
  	}
  }
  
