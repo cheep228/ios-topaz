@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..f3de546 100644
+index 370d18b..5ec5e91 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..f3de546 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1382 @@ out:
+@@ -740,10 +744,1400 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -968,6 +968,24 @@ index 370d18b..f3de546 100644
 +	}
 +	touch_wr(s, 0x800u + 4u * freei, exids ? V_GPI_SID : ((1u << 31) | V_GPI_SID));
 +	g_smmu_smri = freei;
++	/*
++	 * Android: SMR1 = 0x80000563 (QUPv3_0 wrapper, s2cr 0x301). In GSI mode the
++	 * SPI data buffers are mapped through the wrapper device (SID 0x563), not the
++	 * GPI one: the SE side masters with SID 0x563. Route it to the same CB.
++	 */
++	for (unsigned j = freei + 1u; j < n; ++j) {
++		uint32_t smr2 = touch_rd(s, 0x800u + 4u * j), s2c2 = touch_rd(s, 0xc00u + 4u * j);
++		bool v2 = exids ? ((s2c2 >> 10) & 1u) : (smr2 >> 31);
++		if (v2) {
++			continue;
++		}
++		touch_wr(s, 0xc00u + 4u * j, touch_rd(s, 0xc00u + 4u * freei));
++		touch_wr(s, 0x800u + 4u * j, exids ? 0x563u : ((1u << 31) | 0x563u));
++		__builtin_arm_dsb(0xf);
++		printf("SWEET TOUCH: smmu SID 0x563 (qup wrapper) at %u: smr=%#x s2cr=%#x\n", j,
++		    touch_rd(s, 0x800u + 4u * j), touch_rd(s, 0xc00u + 4u * j));
++		break;
++	}
 +	printf("SWEET TOUCH: smmu SID %#x shares UFS context at %u: smr=%#x s2cr=%#x\n", V_GPI_SID, freei,
 +	    touch_rd(s, 0x800u + 4u * freei), touch_rd(s, 0xc00u + 4u * freei));
 +	if (((touch_rd(s, 0xc00u + 4u * freei) >> 16) & 3u) == 2u) {
@@ -1780,7 +1798,7 @@ index 370d18b..f3de546 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2133,9 @@ sweet_touch_init(void)
+@@ -757,7 +2151,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
