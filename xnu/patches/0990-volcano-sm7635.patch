@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..8ca75cc 100644
+index 370d18b..2dae2fc 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..8ca75cc 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1333 @@ out:
+@@ -740,10 +744,1332 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -810,8 +810,7 @@ index 370d18b..8ca75cc 100644
 +	*cbo = cb;
 +	if (sweet_gpi_iova) {
 +		vg.da = da;
-+		printf("SWEET TOUCH: gpi uses iova %#llx for pa %#llx
-+", da, pa);
++		printf("SWEET TOUCH: gpi uses iova %#llx for pa %#llx\n", da, pa);
 +	}
 +	return true;
 +}
@@ -1731,7 +1730,7 @@ index 370d18b..8ca75cc 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2084,9 @@ sweet_touch_init(void)
+@@ -757,7 +2083,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
