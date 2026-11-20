@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..01c7691 100644
+index 370d18b..1c589c4 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..01c7691 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1442 @@ out:
+@@ -740,10 +744,1443 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -1126,7 +1126,7 @@ index 370d18b..01c7691 100644
 +	uint8_t *txb = (uint8_t *)(vg.dma + G_OFF_TXB), *rxb = (uint8_t *)(vg.dma + G_OFF_RXB);
 +	memcpy(txb, tx, n);
 +	memset(rxb, 0xee, n);
-+	if (!vg.xfers) {
++	if (0 && !vg.xfers) { /* run 56: SID 0x563 mapped, go straight to CONFIG0+GO+DMA */
 +		/*
 +		 * Run 38: CONFIG0 alone and an RX doorbell are harmless; CONFIG0 +
 +		 * GO + DMA reset the SoC. Next bisect: TX-only (GO cmd 1), so the
@@ -1315,6 +1315,7 @@ index 370d18b..01c7691 100644
 +	printf("SWEET TOUCH: gpi xfer %u len %u failed tx %d rx %d codes %#x tre tx %u..%u rx %u..%u\n",
 +	    vg.xfers, n, txd, rxd, codes, tx0, vg.tx_wp, rx0, vg.rx_wp);
 +	g_dump("xfer");
++	if (vg.fails <= 1u) { g_dbg("xfer"); g_sedump("xfer"); g_smmu_poll("xfer"); }
 +	if (vg.fails >= 8u && vg.fails == vg.xfers) {
 +		printf("SWEET TOUCH: gpi never completes; giving up\n");
 +		st.dead = true;
@@ -1823,10 +1824,10 @@ index 370d18b..01c7691 100644
 +	touch_swipe_one(1);
 +	if (tap) {
 +		touch_wait(15000);
-+		printf("SWEET SWIPE: tap 170,330\n");
-+		sweet_hid_touch(0, 1, 170, 330);
++		printf("SWEET SWIPE: tap 152,280\n");
++		sweet_hid_touch(0, 1, 152, 280);
 +		touch_wait(60);
-+		sweet_hid_touch(0, 0, 170, 330);
++		sweet_hid_touch(0, 0, 152, 280);
 +	}
 +	(void)thread_terminate(current_thread());
 +	thread_block(THREAD_CONTINUE_NULL);
@@ -1840,7 +1841,7 @@ index 370d18b..01c7691 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2193,17 @@ sweet_touch_init(void)
+@@ -757,7 +2194,17 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
