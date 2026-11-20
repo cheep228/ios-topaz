@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..459750b 100644
+index 370d18b..ff8bcd2 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..459750b 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1041 @@ out:
+@@ -740,10 +744,1056 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -560,7 +560,7 @@ index 370d18b..459750b 100644
 +#define V_GPI_PA         0x00a00000u
 +#define V_GPI_SIZE       0x60000u
 +#define V_GPI_EE         0x10000u
-+#define V_GPII           1u
++#define V_GPII           0u      /* Android: static GPII 0 for SE0 SPI */
 +#define G_N              (0x4000u * V_GPII)
 +#define G_CH_CNTXT(k)    (0x20000u + G_N + 0x80u * (k))
 +#define G_CH_QOS(k)      (0x2005cu + G_N + 0x80u * (k))
@@ -710,6 +710,19 @@ index 370d18b..459750b 100644
 +	}
 +	v_mark("smmu read");
 +	uint32_t cr0 = touch_rd(s, 0x0), idr0 = touch_rd(s, 0x20), gfsr = touch_rd(s, 0x48);
++	{
++		uint32_t idr1 = touch_rd(s, 0x24);
++		uint32_t pg = (idr1 >> 31) ? 0x10000u : 0x1000u;
++		uint32_t np = 1u << (((idr1 >> 28) & 7u) + 1u);
++		vm_offset_t g1 = ml_io_map(V_SMMU_PA + pg, 0x1000);
++		vm_offset_t c0 = ml_io_map(V_SMMU_PA + np * pg, 0x1000);
++		printf("SWEET TOUCH: smmu idr1=%#x pg=%#x np=%u ncb=%u\n", idr1, pg, np, idr1 & 0xffu);
++		if (g1 && c0) {
++			printf("SWEET TOUCH: smmu cb0 cbar=%#x cba2r=%#x sctlr=%#x tcr=%#x ttbr0=%#x_%08x fsr=%#x far=%#x_%08x\n",
++			    touch_rd(g1, 0x0), touch_rd(g1, 0x800), touch_rd(c0, 0x0), touch_rd(c0, 0x30),
++			    touch_rd(c0, 0x24), touch_rd(c0, 0x20), touch_rd(c0, 0x58), touch_rd(c0, 0x64), touch_rd(c0, 0x60));
++		}
++	}
 +	unsigned n = idr0 & 0xffu, used = 0, freei = 0xffffu, hit = 0xffffu, ufs = 0xffffu;
 +	bool exids = (cr0 >> 3) & 1u;
 +	if (n > 128u) {
@@ -1315,6 +1328,8 @@ index 370d18b..459750b 100644
 +	{
 +		int be = sweet_rpmh_bcm_vote(V_BCM_QUP0, V_BCM_QUP0_VOTE, V_BCM_QUP0_VOTE);
 +		printf("SWEET TOUCH: BCM QUP0 vote %u -> %d\n", V_BCM_QUP0_VOTE, be);
++		int sn = sweet_rpmh_bcm_vote(0x50010u, 0x100u, 0x100u);  /* cmd-db SN0 */
++		printf("SWEET TOUCH: BCM SN0 vote -> %d\n", sn);
 +		if (be) {
 +			goto out;
 +		}
@@ -1439,7 +1454,7 @@ index 370d18b..459750b 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1792,9 @@ sweet_touch_init(void)
+@@ -757,7 +1807,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
