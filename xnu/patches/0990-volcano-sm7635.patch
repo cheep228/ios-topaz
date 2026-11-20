@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..71a6628 100644
+index 370d18b..033a345 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..71a6628 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1117 @@ out:
+@@ -740,10 +744,1136 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -544,6 +544,12 @@ index 370d18b..71a6628 100644
 +	}
 +	if (vt.div > 255u) {
 +		vt.div = 255u;
++	}
++	if (dfs & 1u) {
++		/* Android: "setup_config0_tre: ... freq 12000000 idx 2 div 4" */
++		vt.level = 2u;
++		vt.se_hz = 48000000u;
++		vt.div = 4u;
 +	}
 +	printf("SWEET TOUCH: SE0 clock level %u = %u Hz, div %u -> SCLK %u Hz\n",
 +	    vt.level, vt.se_hz, vt.div, vt.se_hz / vt.div);
@@ -835,12 +841,12 @@ index 370d18b..71a6628 100644
 +	}
 +
 +	/* interrupts: masked at the source (polled), IRQ not MSI */
-+	g_wr(G_TYPE_MSK, 0);
-+	g_wr(G_IEOB_MSK, 0);
-+	g_wr(G_SRC_CH_MSK, 0);
-+	g_wr(G_SRC_EV_MSK, 0);
-+	g_wr(G_GLOB_EN, 0);
-+	g_wr(G_GPII_EN, 0);
++	g_wr(G_TYPE_MSK, 0x4fu);
++	g_wr(G_IEOB_MSK, 1u);
++	g_wr(G_SRC_CH_MSK, 3u);
++	g_wr(G_SRC_EV_MSK, 1u);
++	g_wr(G_GLOB_EN, 1u);
++	g_wr(G_GPII_EN, 0xfu);
 +	g_wr(G_INTSET, 1);
 +	g_wr(G_SRC_CH_CLR, 3u);
 +	g_wr(G_SRC_EV_CLR, 1u);
@@ -1065,12 +1071,25 @@ index 370d18b..71a6628 100644
 +	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
 +	touch_wr(st.se, 0x648, 0xffffffffu);
 +	touch_wr(st.se, 0xe1c, 0);
-+	touch_wr(st.se, SE_IRQ_EN, touch_rd(st.se, SE_IRQ_EN) &
-+	    ~(1u | (1u << 30) | (1u << 26) | (1u << 27)));
++	printf("SWEET TOUCH: se0 before: m-irq-en=%#x s-irq-en=%#x mclk=%#x clksel=%#x pack=%#x/%#x wl=%#x e14=%#x e20=%#x\n",
++	    touch_rd(st.se, SE_IRQ_EN), touch_rd(st.se, 0x644), touch_rd(st.se, SE_MCLK),
++	    touch_rd(st.se, SE_CLK_SEL), touch_rd(st.se, 0x260), touch_rd(st.se, 0x264),
++	    touch_rd(st.se, 0x268), touch_rd(st.se, 0xe14), touch_rd(st.se, 0xe20));
++	/* values read live from Android (gpidump.ko) with the touch running */
++	touch_wr(st.se, SE_IRQ_EN, 0x33c0007eu);
++	touch_wr(st.se, 0x644, 0x03001e36u);
++	touch_wr(st.se, 0x260, 0x0007f8feu);
++	touch_wr(st.se, 0x264, 0x000ffefeu);
++	touch_wr(st.se, 0x268, 4u);
 +	touch_wr(st.se, SE_DMA, 1);
-+	touch_wr(st.se, 0xe18, touch_rd(st.se, 0xe18) | 0xfu);
++	touch_wr(st.se, 0xe18, 0xfu);
 +	touch_wr(st.se, SE_CLK_SEL, vt.level);
 +	touch_wr(st.se, SE_MCLK, (vt.div << 4) | 1u);
++	__asm__ volatile("dsb sy" ::: "memory");
++	printf("SWEET TOUCH: se0 after: m-irq-en=%#x s-irq-en=%#x mclk=%#x clksel=%#x pack=%#x/%#x wl=%#x\n",
++	    touch_rd(st.se, SE_IRQ_EN), touch_rd(st.se, 0x644), touch_rd(st.se, SE_MCLK),
++	    touch_rd(st.se, SE_CLK_SEL), touch_rd(st.se, 0x260), touch_rd(st.se, 0x264),
++	    touch_rd(st.se, 0x268));
 +	printf("SWEET TOUCH: se0 GSI mode: dma=%#x gsi-ev=%#x m-irq-en=%#x\n",
 +	    touch_rd(st.se, SE_DMA), touch_rd(st.se, 0xe18), touch_rd(st.se, SE_IRQ_EN));
 +}
@@ -1515,7 +1534,7 @@ index 370d18b..71a6628 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1868,9 @@ sweet_touch_init(void)
+@@ -757,7 +1887,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
