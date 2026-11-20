@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..b191059 100644
+index 370d18b..459750b 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..b191059 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1023 @@ out:
+@@ -740,10 +744,1041 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -699,6 +699,8 @@ index 370d18b..b191059 100644
 +#define V_SMMU_PA        0x15000000u
 +#define V_GPI_SID        0x576u
 +
++static bool g_smmu_fault;
++
 +static void
 +g_smmu(void)
 +{
@@ -753,11 +755,24 @@ index 370d18b..b191059 100644
 +		return;
 +	}
 +	v_mark("smmu write");
-+	/* S2CR: TYPE=bypass (1 << 16), then SMR valid for exactly SID 0x576 */
-+	touch_wr(s, 0xc00u + 4u * freei, (1u << 16) | (exids ? (1u << 10) : 0u));
++	/*
++	 * Run 33: the hypervisor turns a bypass S2CR into TYPE=fault (reads back
++	 * 0x20000) and the first doorbell reset the SoC. UFS (SID 0x60) works
++	 * through translation context bank of its own S2CR: share that one.
++	 */
++	if (ufs == 0xffffu) {
++		printf("SWEET TOUCH: smmu no UFS stream to share\n");
++		g_smmu_fault = true;
++		return;
++	}
++	touch_wr(s, 0xc00u + 4u * freei, touch_rd(s, 0xc00u + 4u * ufs));
 +	touch_wr(s, 0x800u + 4u * freei, exids ? V_GPI_SID : ((1u << 31) | V_GPI_SID));
-+	printf("SWEET TOUCH: smmu bypass SID %#x at %u: smr=%#x s2cr=%#x\n", V_GPI_SID, freei,
++	printf("SWEET TOUCH: smmu SID %#x shares UFS context at %u: smr=%#x s2cr=%#x\n", V_GPI_SID, freei,
 +	    touch_rd(s, 0x800u + 4u * freei), touch_rd(s, 0xc00u + 4u * freei));
++	if (((touch_rd(s, 0xc00u + 4u * freei) >> 16) & 3u) == 2u) {
++		printf("SWEET TOUCH: smmu S2CR forced to fault; no GPI DMA\n");
++		g_smmu_fault = true;
++	}
 +}
 +
 +static bool
@@ -781,6 +796,9 @@ index 370d18b..b191059 100644
 +	}
 +	vg.pa = ptoa_64(pn);
 +	g_smmu();
++	if (g_smmu_fault) {
++		return false;
++	}
 +	g_sync(0, G_DMA_SIZE);
 +	v_mark("gpi read");
 +	g_dump("before");
@@ -1421,7 +1439,7 @@ index 370d18b..b191059 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1774,9 @@ sweet_touch_init(void)
+@@ -757,7 +1792,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
