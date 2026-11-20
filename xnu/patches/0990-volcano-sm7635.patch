@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..a787b78 100644
+index 370d18b..f3de546 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..a787b78 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1381 @@ out:
+@@ -740,10 +744,1382 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -1654,6 +1654,7 @@ index 370d18b..a787b78 100644
 +			int sn = sweet_rpmh_bcm_vote(sn_bcm[i], 0x100u, 0x100u);
 +			printf("SWEET TOUCH: BCM SN%u vote -> %d\n", i, sn);
 +		}
++		{ int ip0 = sweet_rpmh_bcm_vote(0x50038u, 0u, 1u); printf("SWEET TOUCH: BCM IP0 (aggre2 noc clk) vote -> %d\n", ip0); }
 +		{ int acv = sweet_rpmh_bcm_vote(0x50068u, 0u, 1u); printf("SWEET TOUCH: BCM ACV vote -> %d\n", acv); }
 +		if (be) {
 +			goto out;
@@ -1779,7 +1780,7 @@ index 370d18b..a787b78 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2132,9 @@ sweet_touch_init(void)
+@@ -757,7 +2133,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
