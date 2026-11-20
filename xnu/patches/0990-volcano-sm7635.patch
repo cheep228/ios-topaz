@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..475fafd 100644
+index 370d18b..b0304dc 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..475fafd 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1335 @@ out:
+@@ -740,10 +744,1344 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -709,6 +709,7 @@ index 370d18b..475fafd 100644
 +
 +static bool g_smmu_fault;
 +static vm_offset_t g_smmu_gr0, g_smmu_cbr;
++static unsigned g_smmu_smri = 0xffffu;
 +static int sweet_gpi_iova = 1;
 +static unsigned g_smmu_cb = 0xffffu;
 +
@@ -934,6 +935,7 @@ index 370d18b..475fafd 100644
 +		touch_wr(s, 0xc00u + 4u * freei, touch_rd(s, 0xc00u + 4u * ufs));
 +	}
 +	touch_wr(s, 0x800u + 4u * freei, exids ? V_GPI_SID : ((1u << 31) | V_GPI_SID));
++	g_smmu_smri = freei;
 +	printf("SWEET TOUCH: smmu SID %#x shares UFS context at %u: smr=%#x s2cr=%#x\n", V_GPI_SID, freei,
 +	    touch_rd(s, 0x800u + 4u * freei), touch_rd(s, 0xc00u + 4u * freei));
 +	if (((touch_rd(s, 0xc00u + 4u * freei) >> 16) & 3u) == 2u) {
@@ -1118,11 +1120,18 @@ index 370d18b..475fafd 100644
 +		    (vt.div & 0xfffu) | ((vt.level & 0xfu) << 16), TRE_TYPE(0x22) | TRE_IEOT);
 +		g_sync(G_OFF_TX, G_CH_N * G_EL);
 +		g_sync(G_OFF_EV, G_EV_N * G_EL);
++		if (g_smmu_gr0 && g_smmu_smri != 0xffffu) {
++			/* run 48: unmatch the GPI stream; any GPI AXI access must now raise a global USF fault */
++			touch_wr(g_smmu_gr0, 0x800u + 4u * g_smmu_smri, 0);
++			__builtin_arm_dsb(0xf);
++			printf("SWEET TOUCH: usf test: smr %u = %#x cr0 %#x gfsr %#x\n", g_smmu_smri, touch_rd(g_smmu_gr0, 0x800u + 4u * g_smmu_smri), touch_rd(g_smmu_gr0, 0), touch_rd(g_smmu_gr0, 0x48));
++		}
 +		g_watch("pre", 1, 10);
 +		v_mark("gpi cfg0 unchained db");
 +		g_wr(G_CH_DB(0), (uint32_t)(vg.da + G_OFF_TX + vg.tx_wp * G_EL));
 +		g_watch("cfg0", 30, 300);
 +		g_smmu_poll("cfg0");
++		if (g_smmu_gr0) printf("SWEET TOUCH: usf result gfsr %#x gfsynr0 %#x gfsynr1 %#x gfsynr2 %#x gfar %#x_%08x\n", touch_rd(g_smmu_gr0, 0x48), touch_rd(g_smmu_gr0, 0x50), touch_rd(g_smmu_gr0, 0x54), touch_rd(g_smmu_gr0, 0x58), touch_rd(g_smmu_gr0, 0x44), touch_rd(g_smmu_gr0, 0x40));
 +		flush_dcache64((addr64_t)(vg.dma + G_OFF_EV), 64, FALSE);
 +		{
 +			volatile uint32_t *e = (volatile uint32_t *)(vg.dma + G_OFF_EV);
@@ -1733,7 +1742,7 @@ index 370d18b..475fafd 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2086,9 @@ sweet_touch_init(void)
+@@ -757,7 +2095,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
