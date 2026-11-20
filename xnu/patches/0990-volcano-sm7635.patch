@@ -380,10 +380,20 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..429e2f0 100644
+index 370d18b..566ca51 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -740,10 +740,574 @@ out:
+@@ -16,6 +16,9 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+@@ -740,10 +743,946 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -537,6 +547,370 @@ index 370d18b..429e2f0 100644
 +	return true;
 +}
 +
++/*
++ * volcano SE0 has its FIFO interface fused off (GENI_IF_DISABLE_RO = 1), so
++ * the only data path is GSI: QUP0 GPI DMA at 0xa00000, ee-offset 0x10000
++ * (gpi.c: ee_base = regs - ee_offset), HLOS GPIIs 1..5. One GPII, polled
++ * (its GIC line stays masked), TX channel 0 / RX channel 1, one event ring.
++ * Ring layout and TREs follow gpi.c / spi-geni-qcom.c setup_gsi_xfer().
++ */
++#define V_GPI_PA         0x00a00000u
++#define V_GPI_SIZE       0x60000u
++#define V_GPI_EE         0x10000u
++#define V_GPII           1u
++#define G_N              (0x4000u * V_GPII)
++#define G_CH_CNTXT(k)    (0x20000u + G_N + 0x80u * (k))
++#define G_CH_QOS(k)      (0x2005cu + G_N + 0x80u * (k))
++#define G_CH_SCR(k, i)   (0x20060u + G_N + 0x80u * (k) + 4u * (i))
++#define G_EV_CNTXT       (0x21000u + G_N)
++#define G_CH_DB(k)       (0x22000u + G_N + 8u * (k))
++#define G_EV_DB          (0x22100u + G_N)
++#define G_CH_CMD         (0x23008u + G_N)
++#define G_EV_CMD         (0x23010u + G_N)
++#define G_TYPE_IRQ       (0x23080u + G_N)
++#define G_TYPE_MSK       (0x23088u + G_N)
++#define G_SRC_CH         (0x23090u + G_N)
++#define G_SRC_EV         (0x23094u + G_N)
++#define G_SRC_CH_MSK     (0x23098u + G_N)
++#define G_SRC_EV_MSK     (0x2309cu + G_N)
++#define G_SRC_CH_CLR     (0x230a0u + G_N)
++#define G_SRC_EV_CLR     (0x230a4u + G_N)
++#define G_IEOB_MSK       (0x230b8u + G_N)
++#define G_IEOB_CLR       (0x230c0u + G_N)
++#define G_GLOB_STTS      (0x23100u + G_N)
++#define G_GLOB_EN        (0x23108u + G_N)
++#define G_GLOB_CLR       (0x23110u + G_N)
++#define G_GPII_STTS      (0x23118u + G_N)
++#define G_GPII_EN        (0x23120u + G_N)
++#define G_GPII_CLR       (0x23128u + G_N)
++#define G_INTSET         (0x23180u + G_N)
++#define G_ERRLOG         (0x23200u + G_N)
++#define G_EL             16u
++#define G_EV_N           128u
++#define G_CH_N           64u
++#define G_OFF_EV         0x0000u
++#define G_OFF_TX         0x0800u
++#define G_OFF_RX         0x0c00u
++#define G_OFF_TXB        0x1000u
++#define G_OFF_RXB        0x2000u
++#define G_BUF_MAX        0x1000u
++#define G_DMA_SIZE       0x4000u
++#define TRE_CHAIN        (1u << 0)
++#define TRE_IEOB         (1u << 8)
++#define TRE_IEOT         (1u << 9)
++#define TRE_LINK         (1u << 11)
++#define TRE_TYPE(t)      ((uint32_t)(t) << 16)
++
++static struct {
++	bool on;
++	vm_offset_t regs;       /* ee_base: mapping - V_GPI_EE */
++	vm_offset_t dma;
++	uint64_t pa;
++	unsigned ev_rp, tx_wp, rx_wp;   /* element indexes */
++	unsigned xfers, fails, logged;
++} vg;
++
++static uint32_t
++g_rd(uint32_t off)
++{
++	return touch_rd(vg.regs, off);
++}
++
++static void
++g_wr(uint32_t off, uint32_t v)
++{
++	touch_wr(vg.regs, off, v);
++}
++
++static void
++g_sync(uint32_t off, uint32_t len)
++{
++	flush_dcache64((addr64_t)(vg.pa + off), len, TRUE);
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++static unsigned
++g_ch_state(unsigned k)
++{
++	return (g_rd(G_CH_CNTXT(k)) >> 20) & 0xfu;
++}
++
++static unsigned
++g_ev_state(void)
++{
++	return (g_rd(G_EV_CNTXT) >> 20) & 0xfu;
++}
++
++static void
++g_dump(const char *why)
++{
++	printf("SWEET TOUCH: gpi %s: ch0 %#x rp %#x ch1 %#x rp %#x ev %#x rp %#x type %#x src ch %#x ev %#x glob %#x gpii %#x err %#x\n",
++	    why, g_rd(G_CH_CNTXT(0)), g_rd(G_CH_CNTXT(0) + 0x10u),
++	    g_rd(G_CH_CNTXT(1)), g_rd(G_CH_CNTXT(1) + 0x10u),
++	    g_rd(G_EV_CNTXT), g_rd(G_EV_CNTXT + 0x10u),
++	    g_rd(G_TYPE_IRQ), g_rd(G_SRC_CH), g_rd(G_SRC_EV),
++	    g_rd(G_GLOB_STTS), g_rd(G_GPII_STTS), g_rd(G_ERRLOG));
++}
++
++/* commands complete by a state change in the context (gpi_cmd_info[]) */
++static bool
++g_cmd(bool ev, unsigned k, unsigned op, unsigned want)
++{
++	if (ev) {
++		g_wr(G_EV_CMD, (op << 24) | 0u);
++	} else {
++		g_wr(G_CH_CMD, (op << 24) | k);
++	}
++	for (unsigned i = 0; i < 20000; ++i) {
++		unsigned s = ev ? g_ev_state() : g_ch_state(k);
++		if (want == 0xffu || s == want) {
++			if (want == 0xffu) {
++				delay(100);
++			}
++			g_wr(G_SRC_CH_CLR, 3u);
++			g_wr(G_SRC_EV_CLR, 1u);
++			return true;
++		}
++		delay(10);
++	}
++	printf("SWEET TOUCH: gpi cmd %s%u op %u: state %u, want %u\n",
++	    ev ? "ev" : "ch", k, op, ev ? g_ev_state() : g_ch_state(k), want);
++	g_dump("cmd timeout");
++	return false;
++}
++
++static void
++g_ev_db(void)
++{
++	/* the ring is "full" of free event slots up to one before our RP */
++	unsigned wp = (vg.ev_rp + G_EV_N - 1u) % G_EV_N;
++	g_wr(G_EV_DB, (uint32_t)(vg.pa + G_OFF_EV + wp * G_EL));
++}
++
++static bool
++g_init(void)
++{
++	v_mark("gpi map");
++	vm_offset_t m = ml_io_map(V_GPI_PA, V_GPI_SIZE);
++	if (!m) {
++		printf("SWEET TOUCH: GPI mapping failed\n");
++		return false;
++	}
++	vg.regs = m - V_GPI_EE;
++	if (kmem_alloc_contig(kernel_map, &vg.dma, G_DMA_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET TOUCH: no contiguous DMA memory\n");
++		return false;
++	}
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)vg.dma);
++	if (!pn) {
++		return false;
++	}
++	vg.pa = ptoa_64(pn);
++	g_sync(0, G_DMA_SIZE);
++	v_mark("gpi read");
++	g_dump("before");
++	printf("SWEET TOUCH: gpi gpii%u dma va %#lx pa %#llx\n", V_GPII, (unsigned long)vg.dma, vg.pa);
++
++	/* inherited state: stop/reset/free whatever is there */
++	for (unsigned k = 0; k < 2; ++k) {
++		unsigned s = g_ch_state(k);
++		if (s == 2u) {
++			(void)g_cmd(false, k, 2, 3);
++			s = g_ch_state(k);
++		}
++		if (s != 0u) {
++			(void)g_cmd(false, k, 9, 1);
++			(void)g_cmd(false, k, 10, 0);
++		}
++	}
++	if (g_ev_state() != 0u) {
++		(void)g_cmd(true, 0, 9, 0xffu);
++		(void)g_cmd(true, 0, 10, 0);
++	}
++
++	/* interrupts: masked at the source (polled), IRQ not MSI */
++	g_wr(G_TYPE_MSK, 0);
++	g_wr(G_IEOB_MSK, 0);
++	g_wr(G_SRC_CH_MSK, 0);
++	g_wr(G_SRC_EV_MSK, 0);
++	g_wr(G_GLOB_EN, 0);
++	g_wr(G_GPII_EN, 0);
++	g_wr(G_INTSET, 1);
++	g_wr(G_SRC_CH_CLR, 3u);
++	g_wr(G_SRC_EV_CLR, 1u);
++	g_wr(G_IEOB_CLR, 1u);
++	g_wr(G_GLOB_CLR, 0xffffffffu);
++	g_wr(G_GPII_CLR, 0xffffffffu);
++
++	v_mark("gpi ev alloc");
++	if (!g_cmd(true, 0, 0, 1)) {
++		return false;
++	}
++	uint64_t ev = vg.pa + G_OFF_EV;
++	g_wr(G_EV_CNTXT + 0x00u, (G_EL << 24) | (1u << 16) | 2u);
++	g_wr(G_EV_CNTXT + 0x04u, G_EV_N * G_EL);
++	g_wr(G_EV_CNTXT + 0x08u, (uint32_t)ev);
++	g_wr(G_EV_CNTXT + 0x0cu, (uint32_t)(ev >> 32));
++	g_wr(G_EV_DB + 4u, (uint32_t)(ev >> 32));
++	g_wr(G_EV_CNTXT + 0x20u, 0);
++	g_wr(G_EV_CNTXT + 0x28u, 0);
++	g_wr(G_EV_CNTXT + 0x2cu, 0);
++	g_wr(G_EV_CNTXT + 0x30u, 0);
++	g_wr(G_EV_CNTXT + 0x34u, 0);
++	vg.ev_rp = 0;
++	g_ev_db();
++
++	v_mark("gpi ch alloc");
++	for (unsigned k = 0; k < 2; ++k) {
++		uint64_t r = vg.pa + (k ? G_OFF_RX : G_OFF_TX);
++		if (!g_cmd(false, k, 0, 1)) {
++			return false;
++		}
++		/* TX = OUT (dir 1), RX = IN; event ring 0; protocol GPI */
++		g_wr(G_CH_CNTXT(k) + 0x00u, (G_EL << 24) | ((k ? 0u : 1u) << 3) | 2u);
++		g_wr(G_CH_CNTXT(k) + 0x04u, G_CH_N * G_EL);
++		g_wr(G_CH_CNTXT(k) + 0x08u, (uint32_t)r);
++		g_wr(G_CH_CNTXT(k) + 0x0cu, (uint32_t)(r >> 32));
++		g_wr(G_CH_DB(k) + 4u, (uint32_t)(r >> 32));
++		/* pair channel, protocol 1 = SPI, SE id 0 */
++		g_wr(G_CH_SCR(k, 0), ((k ? 0u : 1u) << 16) | (1u << 4) | 0u);
++		g_wr(G_CH_SCR(k, 1), 0);
++		g_wr(G_CH_SCR(k, 2), 0);
++		g_wr(G_CH_SCR(k, 3), 0);
++		g_wr(G_CH_QOS(k), 1);
++	}
++	vg.tx_wp = vg.rx_wp = 0;
++	v_mark("gpi start");
++	for (unsigned k = 0; k < 2; ++k) {
++		if (!g_cmd(false, k, 1, 2)) {
++			return false;
++		}
++	}
++	g_dump("started");
++	vg.on = true;
++	return true;
++}
++
++static void
++g_tre(unsigned off, unsigned *wp, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
++{
++	volatile uint32_t *t = (volatile uint32_t *)(vg.dma + off + *wp * G_EL);
++	t[0] = d0;
++	t[1] = d1;
++	t[2] = d2;
++	t[3] = d3;
++	*wp = (*wp + 1u) % G_CH_N;
++}
++
++/* One full-duplex SPI transfer through GSI: CONFIG0 + GO + DMA on TX, DMA on RX. */
++static int
++v_gpi_spi(const uint8_t *tx, uint8_t *rx, unsigned n)
++{
++	if (!vg.on || st.dead || !n || n > G_BUF_MAX) {
++		return EIO;
++	}
++	uint8_t *txb = (uint8_t *)(vg.dma + G_OFF_TXB), *rxb = (uint8_t *)(vg.dma + G_OFF_RXB);
++	memcpy(txb, tx, n);
++	memset(rxb, 0xee, n);
++	unsigned tx0 = vg.tx_wp, rx0 = vg.rx_wp;
++	uint64_t ta = vg.pa + G_OFF_TXB, ra = vg.pa + G_OFF_RXB;
++	/* CONFIG0: 8-bit words (8 - MIN_WORD_LEN 4), mode 0, tx/rx packing */
++	g_tre(G_OFF_TX, &vg.tx_wp, (8u - 4u) | (1u << 24) | (1u << 25), 0,
++	    (vt.div & 0xfffu) | ((vt.level & 0xfu) << 16), TRE_TYPE(0x22) | TRE_CHAIN);
++	/* GO: SPI_DUPLEX (3), CS0, rx_len n */
++	g_tre(G_OFF_TX, &vg.tx_wp, 3u, 0, n & 0xffffffu, TRE_TYPE(0x20) | TRE_CHAIN | TRE_LINK);
++	g_tre(G_OFF_TX, &vg.tx_wp, (uint32_t)ta, (uint32_t)(ta >> 32), n, TRE_TYPE(0x10) | TRE_IEOT);
++	g_tre(G_OFF_RX, &vg.rx_wp, (uint32_t)ra, (uint32_t)(ra >> 32), n, TRE_TYPE(0x10));
++	g_sync(G_OFF_TX, G_CH_N * G_EL);
++	g_sync(G_OFF_RX, G_CH_N * G_EL);
++	g_sync(G_OFF_TXB, n);
++	g_sync(G_OFF_RXB, n);
++	/* RX first so the RX channel is ready when the GO starts the clock */
++	g_wr(G_CH_DB(1), (uint32_t)(vg.pa + G_OFF_RX + vg.rx_wp * G_EL));
++	g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
++
++	bool txd = false, rxd = false;
++	unsigned codes = 0;
++	int err = 0;
++	for (unsigned i = 0; i < 20000 && !(txd && rxd); ++i) {
++		uint32_t hw = g_rd(G_EV_CNTXT + 0x10u);
++		unsigned hwi = (unsigned)(((uint64_t)hw - (uint32_t)(vg.pa + G_OFF_EV)) / G_EL) % G_EV_N;
++		if (hwi == vg.ev_rp) {
++			/* RX may finish without an event: its RP passing our WP */
++			if (txd && g_rd(G_CH_CNTXT(1) + 0x10u) == (uint32_t)(vg.pa + G_OFF_RX + vg.rx_wp * G_EL)) {
++				rxd = true;
++				break;
++			}
++			delay(2);
++			continue;
++		}
++		g_sync(G_OFF_EV, G_EV_N * G_EL);
++		while (vg.ev_rp != hwi) {
++			volatile uint32_t *e = (volatile uint32_t *)(vg.dma + G_OFF_EV + vg.ev_rp * G_EL);
++			uint32_t d2 = e[2], d3 = e[3];
++			unsigned code = (d2 >> 24) & 0xffu, type = (d3 >> 16) & 0xffu, chid = (d3 >> 24) & 0xffu;
++			if (vg.logged < 6u) {
++				vg.logged++;
++				printf("SWEET TOUCH: gpi event %08x %08x %08x %08x (type %#x ch %u code %u len %u)\n",
++				    e[0], e[1], d2, d3, type, chid, code, d2 & 0xffffffu);
++			}
++			if (type == 0x22u) {
++				codes |= code;
++				if (code & 16u) {
++					err = EIO;
++				}
++				if (chid == 0u) {
++					txd = true;
++				} else if (chid == 1u) {
++					rxd = true;
++				}
++			}
++			vg.ev_rp = (vg.ev_rp + 1u) % G_EV_N;
++		}
++		g_ev_db();
++		if (err) {
++			break;
++		}
++	}
++	vg.xfers++;
++	if (!err && txd && rxd) {
++		g_sync(G_OFF_RXB, n);
++		memcpy(rx, rxb, n);
++		return 0;
++	}
++	vg.fails++;
++	printf("SWEET TOUCH: gpi xfer %u len %u failed tx %d rx %d codes %#x tre tx %u..%u rx %u..%u\n",
++	    vg.xfers, n, txd, rxd, codes, tx0, vg.tx_wp, rx0, vg.rx_wp);
++	g_dump("xfer");
++	if (vg.fails >= 8u && vg.fails == vg.xfers) {
++		printf("SWEET TOUCH: gpi never completes; giving up\n");
++		st.dead = true;
++	}
++	return err ? err : ETIMEDOUT;
++}
++
++static void
++v_se_gsi(void)
++{
++	/* geni_se_select_gpi_mode() */
++	touch_wr(st.se, 0x28, touch_rd(st.se, 0x28) | 0x7fu);
++	touch_wr(st.se, 0xe30, touch_rd(st.se, 0xe30) | 0x0fu);
++	touch_wr(st.se, 0x24, 0x7f);
++	touch_wr(st.se, 0x20, 1);
++	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
++	touch_wr(st.se, 0x648, 0xffffffffu);
++	touch_wr(st.se, 0xe1c, 0);
++	touch_wr(st.se, SE_IRQ_EN, touch_rd(st.se, SE_IRQ_EN) &
++	    ~(1u | (1u << 30) | (1u << 26) | (1u << 27)));
++	touch_wr(st.se, SE_DMA, 1);
++	touch_wr(st.se, 0xe18, touch_rd(st.se, 0xe18) | 0xfu);
++	touch_wr(st.se, SE_CLK_SEL, vt.level);
++	touch_wr(st.se, SE_MCLK, (vt.div << 4) | 1u);
++	printf("SWEET TOUCH: se0 GSI mode: dma=%#x gsi-ev=%#x m-irq-en=%#x\n",
++	    touch_rd(st.se, SE_DMA), touch_rd(st.se, 0xe18), touch_rd(st.se, SE_IRQ_EN));
++}
++
 +static bool
 +v_se_init(void)
 +{
@@ -555,8 +929,13 @@ index 370d18b..429e2f0 100644
 +		return false;
 +	}
 +	if (ifdis & 1u) {
-+		printf("SWEET TOUCH: SE0 FIFO interface disabled (GSI only); stopping\n");
-+		return false;
++		printf("SWEET TOUCH: SE0 FIFO interface disabled: using GPI DMA (GSI)\n");
++		if (st.d_status & 1u) {
++			printf("SWEET TOUCH: SE0 already busy; stopping\n");
++			return false;
++		}
++		v_se_gsi();
++		return g_init();
 +	}
 +	if (((tx >> 24) & 0x3fu) != 32u || ((rx >> 24) & 0x3fu) != 32u ||
 +	    vt.depth < 4u || ((rx >> 16) & 0x3fu) < 4u) {
@@ -615,6 +994,9 @@ index 370d18b..429e2f0 100644
 +static int
 +v_spi(const uint8_t *tx, uint8_t *rx, unsigned n)
 +{
++	if (vg.on) {
++		return v_gpi_spi(tx, rx, n);
++	}
 +	if (st.dead || !n || n > 256u) {
 +		return EIO;
 +	}
@@ -959,7 +1341,7 @@ index 370d18b..429e2f0 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1321,9 @@ sweet_touch_init(void)
+@@ -757,7 +1696,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
