@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..033a345 100644
+index 370d18b..cbade64 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..033a345 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1136 @@ out:
+@@ -740,10 +744,1160 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -930,6 +930,30 @@ index 370d18b..033a345 100644
 +		 * GO + DMA reset the SoC. Next bisect: TX-only (GO cmd 1), so the
 +		 * GPI writes nothing to memory but the completion event.
 +		 */
++		/*
++		 * Run 42: does the GPI read memory at all? One RX DMA TRE, RX
++		 * doorbell (harmless in run 38), then look at the channel's fetch
++		 * pointers (ctx +0x50..0x58: Android shows RP low bits there).
++		 */
++		{
++			uint64_t ra = vg.pa + G_OFF_RXB;
++			for (unsigned i = 0; i < 2; ++i) {
++				printf("SWEET TOUCH: rx ctx pre %u: %#x %#x %#x %#x | %#x %#x %#x %#x | 50: %#x %#x %#x %#x\n", i,
++				    g_rd(G_CH_CNTXT(1)), g_rd(G_CH_CNTXT(1) + 4u), g_rd(G_CH_CNTXT(1) + 8u), g_rd(G_CH_CNTXT(1) + 12u),
++				    g_rd(G_CH_CNTXT(1) + 0x10u), g_rd(G_CH_CNTXT(1) + 0x14u), g_rd(G_CH_CNTXT(1) + 0x18u), g_rd(G_CH_CNTXT(1) + 0x1cu),
++				    g_rd(G_CH_CNTXT(1) + 0x50u), g_rd(G_CH_CNTXT(1) + 0x54u), g_rd(G_CH_CNTXT(1) + 0x58u), g_rd(G_CH_CNTXT(1) + 0x5cu));
++				if (i == 0) {
++					g_tre(G_OFF_RX, &vg.rx_wp, (uint32_t)ra, (uint32_t)(ra >> 32), 4u, TRE_TYPE(0x10) | TRE_IEOT);
++					g_sync(G_OFF_RX, G_CH_N * G_EL);
++					v_mark("gpi rx-only db");
++					g_wr(G_CH_DB(1), (uint32_t)(vg.pa + G_OFF_RX + vg.rx_wp * G_EL));
++					delay(20000);
++					v_mark("rx-only 20ms");
++				}
++			}
++			g_dump("after rx-only");
++			v_mark("rx-only checked");
++		}
 +		uint64_t a = vg.pa + G_OFF_TXB;
 +		g_tre(G_OFF_TX, &vg.tx_wp, (8u - 4u) | (1u << 24) | (1u << 25), 0,
 +		    (vt.div & 0xfffu) | ((vt.level & 0xfu) << 16), TRE_TYPE(0x22) | TRE_CHAIN);
@@ -1534,7 +1558,7 @@ index 370d18b..033a345 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1887,9 @@ sweet_touch_init(void)
+@@ -757,7 +1911,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
