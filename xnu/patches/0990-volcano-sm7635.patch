@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..1e7d2d4 100644
+index 370d18b..d4df10c 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..1e7d2d4 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1064 @@ out:
+@@ -740,10 +744,1073 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -936,6 +936,15 @@ index 370d18b..1e7d2d4 100644
 +	}
 +	/* RX first so the RX channel is ready when the GO starts the clock */
 +	g_wr(G_CH_DB(1), (uint32_t)(vg.pa + G_OFF_RX + vg.rx_wp * G_EL));
++	if (!vg.xfers) {
++		/* bisect: RX alone only fetches its DMA TRE, the SE stays idle */
++		for (unsigned i = 0; i < 20; ++i) {
++			delay(10000);
++			printf("SWEET TOUCH: after rx db %u: rx rp %#x ch1 %#x ev rp %#x gfsr %#x\n", i,
++			    g_rd(G_CH_CNTXT(1) + 0x10u), g_rd(G_CH_CNTXT(1)), g_rd(G_EV_CNTXT + 0x10u), 0u);
++		}
++		v_mark("gpi tx db");
++	}
 +	g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
 +
 +	if (!vg.xfers) {
@@ -1462,7 +1471,7 @@ index 370d18b..1e7d2d4 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1815,9 @@ sweet_touch_init(void)
+@@ -757,7 +1824,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
