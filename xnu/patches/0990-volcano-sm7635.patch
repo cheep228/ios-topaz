@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..b0304dc 100644
+index 370d18b..3849bf6 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..b0304dc 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1344 @@ out:
+@@ -740,10 +744,1345 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -758,7 +758,7 @@ index 370d18b..b0304dc 100644
 +	l2[(pa >> 21) & 0x1ffu] = (pt + 0x2000u) | 3u;
 +	for (uint64_t a = pa; a < pa + G_DMA_SIZE; a += 0x1000u) {
 +		/* page | AttrIndx 0 | AP=01 (rw) | AF */
-+		l3[(a >> 12) & 0x1ffu] = a | 3u | (1u << 6) | (1u << 10);
++		l3[(a >> 12) & 0x1ffu] = a | 3u | (1u << 2) | (1u << 6) | (3u << 8) | (1u << 10);  /* WB (attr1) ISH, as Android */
 +	}
 +	/*
 +	 * Run 46: Android hands the GPI 32-bit IOVAs (rings at 0x1db000);
@@ -787,20 +787,21 @@ index 370d18b..b0304dc 100644
 +	touch_wr(g1, 0x800u + 4u * cb, 1u);              /* CBA2R: VA64 */
 +	touch_wr(g1, 4u * cb, 0x0001f300u);             /* CBAR: S1, WB memattr, NSH (as Android) */
 +	touch_wr(c, 0x10, (7u << 15) | 2u);              /* TCR2: SEP upstream, PASize 40 */
-+	touch_wr(c, 0x38, 0x0004ff44u);                  /* MAIR0: NC, WB, device */
++	touch_wr(c, 0x38, 0xf404ff44u);                  /* MAIR0: NC, WB, device */
 +	touch_wr(c, 0x3c, 0);
 +	touch_wr(c, 0x20, (uint32_t)pt);                 /* TTBR0, ASID 0 */
 +	touch_wr(c, 0x24, (uint32_t)(pt >> 32));
 +	touch_wr(c, 0x28, 0);
 +	touch_wr(c, 0x2c, 0);
-+	touch_wr(c, 0x30, 28u | (1u << 23));             /* TCR: T0SZ 28 (36 bit), 4K, NC walks, EPD1 */
++	touch_wr(c, 0x30, 0x0080351cu);  /* Android CB4: WBWA ISH walks */             /* TCR: T0SZ 28 (36 bit), 4K, NC walks, EPD1 */
 +	touch_wr(c, 0x58, 0xffffffffu);                  /* clear FSR */
 +	touch_wr(c, 0x618, 0);                           /* TLBIALL */
 +	touch_wr(c, 0x7f0, 0);                           /* TLBSYNC */
 +	for (unsigned i = 0; i < 1000 && (touch_rd(c, 0x7f4) & 1u); ++i) {
 +		delay(1);
 +	}
-+	touch_wr(c, 0x0, 0x67u);                         /* M TRE AFE CFRE CFIE */
++	touch_wr(c, 0x4, 3u);                           /* ACTLR as Android CB4 */
++	touch_wr(c, 0x0, 0x0a5f0067u);                   /* Android CB4 SCTLR minus stall */                         /* M TRE AFE CFRE CFIE */
 +	__asm__ volatile("dsb sy" ::: "memory");
 +	printf("SWEET TOUCH: smmu cb%u s1: cbar=%#x cba2r=%#x sctlr=%#x tcr=%#x tcr2=%#x ttbr0=%#x_%08x mair=%#x fsr=%#x pte=%#llx\n",
 +	    cb, touch_rd(g1, 4u * cb), touch_rd(g1, 0x800u + 4u * cb), touch_rd(c, 0), touch_rd(c, 0x30),
@@ -1120,7 +1121,7 @@ index 370d18b..b0304dc 100644
 +		    (vt.div & 0xfffu) | ((vt.level & 0xfu) << 16), TRE_TYPE(0x22) | TRE_IEOT);
 +		g_sync(G_OFF_TX, G_CH_N * G_EL);
 +		g_sync(G_OFF_EV, G_EV_N * G_EL);
-+		if (g_smmu_gr0 && g_smmu_smri != 0xffffu) {
++		if (0 && g_smmu_gr0 && g_smmu_smri != 0xffffu) {
 +			/* run 48: unmatch the GPI stream; any GPI AXI access must now raise a global USF fault */
 +			touch_wr(g_smmu_gr0, 0x800u + 4u * g_smmu_smri, 0);
 +			__builtin_arm_dsb(0xf);
@@ -1742,7 +1743,7 @@ index 370d18b..b0304dc 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2095,9 @@ sweet_touch_init(void)
+@@ -757,7 +2096,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
