@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..2dae2fc 100644
+index 370d18b..475fafd 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..2dae2fc 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1332 @@ out:
+@@ -740,10 +744,1335 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -1140,6 +1140,9 @@ index 370d18b..2dae2fc 100644
 +		g_wr(G_CH_DB(0), (uint32_t)(vg.da + G_OFF_TX + vg.tx_wp * G_EL));
 +		g_watch("tx", 200, 200);
 +		v_mark("tx-only watched 40ms");
++	{ vm_offset_t q = ml_io_map(0x171a000u, 0x1000); v_mark("qtb2 map");
++	  for (unsigned o = 0; o < 0x100u; o += 0x20u) { printf("SWEET TOUCH: qtb2 +%#x: %#x %#x %#x %#x %#x %#x %#x %#x\n", o,
++	    touch_rd(q,o), touch_rd(q,o+4), touch_rd(q,o+8), touch_rd(q,o+12), touch_rd(q,o+16), touch_rd(q,o+20), touch_rd(q,o+24), touch_rd(q,o+28)); } }
 +		v_mark("pad");
 +		flush_dcache64((addr64_t)(vg.dma + G_OFF_EV), 64, FALSE);
 +		{
@@ -1601,7 +1604,7 @@ index 370d18b..2dae2fc 100644
 +		 * -> gem -> ebi: vote every system NoC BCM (cmd-db SN0..SN5);
 +		 * UFS rides on aggre1 whose BCM the bootloader left on.
 +		 */
-+		static const uint32_t sn_bcm[] = {0x50010u, 0x50014u, 0x50018u, 0x5001cu, 0x50020u, 0x50024u};
++		static const uint32_t sn_bcm[] = {0x50010u, 0x50014u, 0x50018u, 0x5001cu, 0x50020u, 0x50024u, 0x50000u, 0x50004u, 0x50030u};
 +		for (unsigned i = 0; i < sizeof(sn_bcm) / sizeof(sn_bcm[0]); ++i) {
 +			int sn = sweet_rpmh_bcm_vote(sn_bcm[i], 0x100u, 0x100u);
 +			printf("SWEET TOUCH: BCM SN%u vote -> %d\n", i, sn);
@@ -1730,7 +1733,7 @@ index 370d18b..2dae2fc 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2083,9 @@ sweet_touch_init(void)
+@@ -757,7 +2086,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
