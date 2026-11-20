@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..d4df10c 100644
+index 370d18b..38274fb 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..d4df10c 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1073 @@ out:
+@@ -740,10 +744,1087 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -918,6 +918,26 @@ index 370d18b..d4df10c 100644
 +	uint8_t *txb = (uint8_t *)(vg.dma + G_OFF_TXB), *rxb = (uint8_t *)(vg.dma + G_OFF_RXB);
 +	memcpy(txb, tx, n);
 +	memset(rxb, 0xee, n);
++	if (!vg.xfers) {
++		g_tre(G_OFF_TX, &vg.tx_wp, (8u - 4u) | (1u << 24) | (1u << 25), 0,
++		    (vt.div & 0xfffu) | ((vt.level & 0xfu) << 16), TRE_TYPE(0x22) | TRE_IEOT);
++		g_sync(G_OFF_TX, G_CH_N * G_EL);
++		g_sync(G_OFF_EV, G_EV_N * G_EL);
++		v_mark("gpi cfg0 only");
++		g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
++		for (unsigned i = 0; i < 20; ++i) {
++			delay(10000);
++			flush_dcache64((addr64_t)(vg.dma + G_OFF_EV), 64, FALSE);
++			volatile uint32_t *e = (volatile uint32_t *)(vg.dma + G_OFF_EV + vg.ev_rp * G_EL);
++			printf("SWEET TOUCH: after cfg0 %u: tx rp %#x ch0 %#x ev rp %#x ev %#x %#x %#x %#x\n", i,
++			    g_rd(G_CH_CNTXT(0) + 0x10u), g_rd(G_CH_CNTXT(0)), g_rd(G_EV_CNTXT + 0x10u), e[0], e[1], e[2], e[3]);
++		}
++		/* consume whatever events arrived */
++		uint32_t hw = g_rd(G_EV_CNTXT + 0x10u);
++		vg.ev_rp = (unsigned)(((uint64_t)hw - (uint32_t)(vg.pa + G_OFF_EV)) / G_EL) % G_EV_N;
++		g_ev_db();
++		v_mark("gpi cfg0 survived");
++	}
 +	unsigned tx0 = vg.tx_wp, rx0 = vg.rx_wp;
 +	uint64_t ta = vg.pa + G_OFF_TXB, ra = vg.pa + G_OFF_RXB;
 +	/* CONFIG0: 8-bit words (8 - MIN_WORD_LEN 4), mode 0, tx/rx packing */
@@ -937,12 +957,6 @@ index 370d18b..d4df10c 100644
 +	/* RX first so the RX channel is ready when the GO starts the clock */
 +	g_wr(G_CH_DB(1), (uint32_t)(vg.pa + G_OFF_RX + vg.rx_wp * G_EL));
 +	if (!vg.xfers) {
-+		/* bisect: RX alone only fetches its DMA TRE, the SE stays idle */
-+		for (unsigned i = 0; i < 20; ++i) {
-+			delay(10000);
-+			printf("SWEET TOUCH: after rx db %u: rx rp %#x ch1 %#x ev rp %#x gfsr %#x\n", i,
-+			    g_rd(G_CH_CNTXT(1) + 0x10u), g_rd(G_CH_CNTXT(1)), g_rd(G_EV_CNTXT + 0x10u), 0u);
-+		}
 +		v_mark("gpi tx db");
 +	}
 +	g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
@@ -1471,7 +1485,7 @@ index 370d18b..d4df10c 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1824,9 @@ sweet_touch_init(void)
+@@ -757,7 +1838,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
