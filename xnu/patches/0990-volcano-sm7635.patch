@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..cbade64 100644
+index 370d18b..c259a7f 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..cbade64 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1160 @@ out:
+@@ -740,10 +744,1277 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -603,7 +603,8 @@ index 370d18b..cbade64 100644
 +#define G_OFF_TXB        0x1000u
 +#define G_OFF_RXB        0x2000u
 +#define G_BUF_MAX        0x1000u
-+#define G_DMA_SIZE       0x4000u
++#define G_DMA_SIZE       0x8000u /* 0x4000.. : SMMU stage-1 tables */
++#define G_OFF_PT         0x4000u
 +#define TRE_CHAIN        (1u << 0)
 +#define TRE_IEOB         (1u << 8)
 +#define TRE_IEOT         (1u << 9)
@@ -706,6 +707,105 @@ index 370d18b..cbade64 100644
 +#define V_GPI_SID        0x576u
 +
 +static bool g_smmu_fault;
++static vm_offset_t g_smmu_gr0, g_smmu_cbr;
++static unsigned g_smmu_cb = 0xffffu;
++
++/*
++ * Android puts SID 0x576 in a context bank of its own with stage-1 tables
++ * (SMR 4 -> S2CR 0x304 -> CB4, IOVA 0x1d9000..). Sharing the UFS bank with
++ * S1 bypass resets the SoC on the first GPI fetch (run 42: an RX doorbell
++ * alone). Do what Android does: a free CB, identity-mapped 4K tables over
++ * our DMA block, MAIR attr0 = Normal non-cacheable (we clean by hand).
++ */
++static bool
++g_smmu_s1(vm_offset_t s, uint32_t pg, uint32_t np, unsigned ncb, unsigned nsmr, unsigned *cbo)
++{
++	uint8_t used[128] = {0};
++	for (unsigned i = 0; i < nsmr; ++i) {
++		uint32_t smr = touch_rd(s, 0x800u + 4u * i), s2cr = touch_rd(s, 0xc00u + 4u * i);
++		printf("SWEET TOUCH: smmu smr %u = %#x s2cr %#x\n", i, smr, s2cr);
++		if ((smr >> 31) && ((s2cr >> 16) & 3u) == 0u) {
++			used[s2cr & 0x7fu] = 1;
++		}
++	}
++	unsigned cb = 0xffffu;
++	for (unsigned i = 1; i < ncb && i < 128u; ++i) {
++		if (!used[i]) {
++			cb = i;
++			break;
++		}
++	}
++	if (cb == 0xffffu) {
++		printf("SWEET TOUCH: smmu no free context bank\n");
++		return false;
++	}
++	uint64_t pa = vg.pa;
++	if ((pa >> 21) != ((pa + G_DMA_SIZE - 1u) >> 21) || (pa >> 36)) {
++		printf("SWEET TOUCH: smmu dma block %#llx crosses 2M or >36 bit\n", pa);
++		return false;
++	}
++	volatile uint64_t *l1 = (volatile uint64_t *)(vg.dma + G_OFF_PT);
++	volatile uint64_t *l2 = (volatile uint64_t *)(vg.dma + G_OFF_PT + 0x1000u);
++	volatile uint64_t *l3 = (volatile uint64_t *)(vg.dma + G_OFF_PT + 0x2000u);
++	uint64_t pt = pa + G_OFF_PT;
++	for (unsigned i = 0; i < 512u * 3u; ++i) {
++		l1[i] = 0;
++	}
++	l1[(pa >> 30) & 0x3fu] = (pt + 0x1000u) | 3u;
++	l2[(pa >> 21) & 0x1ffu] = (pt + 0x2000u) | 3u;
++	for (uint64_t a = pa; a < pa + G_DMA_SIZE; a += 0x1000u) {
++		/* page | AttrIndx 0 | AP=01 (rw) | AF */
++		l3[(a >> 12) & 0x1ffu] = a | 3u | (1u << 6) | (1u << 10);
++	}
++	flush_dcache64((addr64_t)pt, 0x3000u, TRUE);
++	__asm__ volatile("dsb sy" ::: "memory");
++
++	vm_offset_t g1 = ml_io_map(V_SMMU_PA + pg, 0x1000);
++	vm_offset_t c = ml_io_map(V_SMMU_PA + (np + cb) * pg, 0x1000);
++	if (!g1 || !c) {
++		return false;
++	}
++	printf("SWEET TOUCH: smmu cb%u before: cbar=%#x sctlr=%#x\n", cb, touch_rd(g1, 4u * cb), touch_rd(c, 0));
++	touch_wr(c, 0x0, 0);                            /* SCTLR off while programming */
++	touch_wr(g1, 0x800u + 4u * cb, 1u);              /* CBA2R: VA64 */
++	touch_wr(g1, 4u * cb, 0x0001f300u);             /* CBAR: S1, WB memattr, NSH (as Android) */
++	touch_wr(c, 0x10, (7u << 15) | 2u);              /* TCR2: SEP upstream, PASize 40 */
++	touch_wr(c, 0x38, 0x0004ff44u);                  /* MAIR0: NC, WB, device */
++	touch_wr(c, 0x3c, 0);
++	touch_wr(c, 0x20, (uint32_t)pt);                 /* TTBR0, ASID 0 */
++	touch_wr(c, 0x24, (uint32_t)(pt >> 32));
++	touch_wr(c, 0x28, 0);
++	touch_wr(c, 0x2c, 0);
++	touch_wr(c, 0x30, 28u | (1u << 23));             /* TCR: T0SZ 28 (36 bit), 4K, NC walks, EPD1 */
++	touch_wr(c, 0x58, 0xffffffffu);                  /* clear FSR */
++	touch_wr(c, 0x618, 0);                           /* TLBIALL */
++	touch_wr(c, 0x7f0, 0);                           /* TLBSYNC */
++	for (unsigned i = 0; i < 1000 && (touch_rd(c, 0x7f4) & 1u); ++i) {
++		delay(1);
++	}
++	touch_wr(c, 0x0, 0x67u);                         /* M TRE AFE CFRE CFIE */
++	__asm__ volatile("dsb sy" ::: "memory");
++	printf("SWEET TOUCH: smmu cb%u s1: cbar=%#x cba2r=%#x sctlr=%#x tcr=%#x tcr2=%#x ttbr0=%#x_%08x mair=%#x fsr=%#x pte=%#llx\n",
++	    cb, touch_rd(g1, 4u * cb), touch_rd(g1, 0x800u + 4u * cb), touch_rd(c, 0), touch_rd(c, 0x30),
++	    touch_rd(c, 0x10), touch_rd(c, 0x24), touch_rd(c, 0x20), touch_rd(c, 0x38), touch_rd(c, 0x58),
++	    (unsigned long long)l3[(pa >> 12) & 0x1ffu]);
++	g_smmu_cbr = c;
++	g_smmu_cb = cb;
++	*cbo = cb;
++	return true;
++}
++
++static void
++g_smmu_poll(const char *why)
++{
++	if (!g_smmu_gr0) {
++		return;
++	}
++	printf("SWEET TOUCH: smmu %s: gfsr=%#x gfsynr0=%#x gfsynr1=%#x cb%u fsr=%#x far=%#x_%08x fsynr0=%#x\n", why,
++	    touch_rd(g_smmu_gr0, 0x48), touch_rd(g_smmu_gr0, 0x50), touch_rd(g_smmu_gr0, 0x54), g_smmu_cb,
++	    g_smmu_cbr ? touch_rd(g_smmu_cbr, 0x58) : 0u, g_smmu_cbr ? touch_rd(g_smmu_cbr, 0x64) : 0u,
++	    g_smmu_cbr ? touch_rd(g_smmu_cbr, 0x60) : 0u, g_smmu_cbr ? touch_rd(g_smmu_cbr, 0x68) : 0u);
++}
 +
 +static void
 +g_smmu(void)
@@ -784,7 +884,21 @@ index 370d18b..cbade64 100644
 +		g_smmu_fault = true;
 +		return;
 +	}
-+	touch_wr(s, 0xc00u + 4u * freei, touch_rd(s, 0xc00u + 4u * ufs));
++	g_smmu_gr0 = s;
++	unsigned s1 = 1, cb = 0;
++	(void)PE_parse_boot_argn("sweetgpis1", &s1, sizeof(s1));
++	if (s1) {
++		uint32_t idr1 = touch_rd(s, 0x24);
++		uint32_t pg = (idr1 >> 31) ? 0x10000u : 0x1000u;
++		uint32_t np = 1u << (((idr1 >> 28) & 7u) + 1u);
++		if (!g_smmu_s1(s, pg, np, idr1 & 0xffu, n, &cb)) {
++			g_smmu_fault = true;
++			return;
++		}
++		touch_wr(s, 0xc00u + 4u * freei, 0x300u | cb);  /* translate via our CB (Android: 0x304) */
++	} else {
++		touch_wr(s, 0xc00u + 4u * freei, touch_rd(s, 0xc00u + 4u * ufs));
++	}
 +	touch_wr(s, 0x800u + 4u * freei, exids ? V_GPI_SID : ((1u << 31) | V_GPI_SID));
 +	printf("SWEET TOUCH: smmu SID %#x shares UFS context at %u: smr=%#x s2cr=%#x\n", V_GPI_SID, freei,
 +	    touch_rd(s, 0x800u + 4u * freei), touch_rd(s, 0xc00u + 4u * freei));
@@ -947,7 +1061,10 @@ index 370d18b..cbade64 100644
 +					g_sync(G_OFF_RX, G_CH_N * G_EL);
 +					v_mark("gpi rx-only db");
 +					g_wr(G_CH_DB(1), (uint32_t)(vg.pa + G_OFF_RX + vg.rx_wp * G_EL));
-+					delay(20000);
++					for (unsigned t = 0; t < 10; ++t) {
++						delay(2000);
++						g_smmu_poll("rx-only");
++					}
 +					v_mark("rx-only 20ms");
 +				}
 +			}
@@ -1558,7 +1675,7 @@ index 370d18b..cbade64 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1911,9 @@ sweet_touch_init(void)
+@@ -757,7 +2028,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
