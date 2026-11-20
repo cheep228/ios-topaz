@@ -155,10 +155,10 @@ index 65970f9..f4fdb31 100644
  	if (keys_started) {
  		return;
 diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
-index 4da50d8..c21ce04 100644
+index 4da50d8..1e80ec0 100644
 --- a/bsd/dev/sweet_rpmh.c
 +++ b/bsd/dev/sweet_rpmh.c
-@@ -355,4 +355,185 @@ out:
+@@ -355,4 +355,220 @@ out:
  	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
  	return error;
  }
@@ -248,9 +248,9 @@ index 4da50d8..c21ce04 100644
 +	    vr_rd(b + vr_wait) == 0 && !(vr_rd(VR_TCS_OFF + RH_IRQ_STATUS) & (1u << t));
 +}
 +
-+/* One ACTIVE request: voltage, mode, enable of one VRM, waiting for the ack. */
++/* One ACTIVE request of n commands (n <= 3), waiting for completion of all. */
 +static int
-+vr_send(uint32_t address, unsigned mv, unsigned mode)
++vr_send_cmds(unsigned n, const uint32_t *addrs, const uint32_t *values)
 +{
 +	int chosen = -1;
 +	for (unsigned t = 0; t < VR_ACTIVE_N; ++t) {
@@ -271,17 +271,16 @@ index 4da50d8..c21ce04 100644
 +		return EIO;
 +	}
 +	vr_poisoned = true;
-+	const uint32_t offsets[3] = {0, 8, 4};
-+	const uint32_t values[3] = {mv, mode, 1};
-+	for (unsigned c = 0; c < 3; ++c) {
++	uint32_t mask = (1u << n) - 1u;
++	for (unsigned c = 0; c < n; ++c) {
 +		uint32_t cmd = b + c * vr_cmd_stride;
 +		if (!vr_sync(cmd + vr_msgid, RH_WRITE_ACK) ||
-+		    !vr_sync(cmd + vr_addr, address + offsets[c]) ||
++		    !vr_sync(cmd + vr_addr, addrs[c]) ||
 +		    !vr_sync(cmd + vr_data, values[c])) {
 +			return EIO;
 +		}
 +	}
-+	if (!vr_sync(b + vr_wait, 7) || !vr_sync(b + vr_enable, 7) ||
++	if (!vr_sync(b + vr_wait, mask) || !vr_sync(b + vr_enable, mask) ||
 +	    !vr_sync(b + vr_control, 0) || !vr_sync(b + vr_control, RH_AMC_EN)) {
 +		return EIO;
 +	}
@@ -292,7 +291,7 @@ index 4da50d8..c21ce04 100644
 +		irq = vr_rd(VR_TCS_OFF + RH_IRQ_STATUS);
 +		idle = vr_rd(b + vr_status);
 +		bool complete = true;
-+		for (unsigned c = 0; c < 3; ++c) {
++		for (unsigned c = 0; c < n; ++c) {
 +			status[c] = vr_rd(b + vr_cmd_status + c * vr_cmd_stride);
 +			complete &= status[c] != 0xffffffffu &&
 +			    (status[c] & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
@@ -305,8 +304,8 @@ index 4da50d8..c21ce04 100644
 +		}
 +		delay(1);
 +	}
-+	printf("SWEET RPMH: %#x %u mV mode %u TCS%u done=%d irq=%#x idle=%#x cmd-status=%#x/%#x/%#x\n",
-+	    address, mv, mode, t, done, irq, idle, status[0], status[1], status[2]);
++	printf("SWEET RPMH: %#x=%#x (+%u) TCS%u done=%d irq=%#x idle=%#x cmd-status=%#x/%#x/%#x\n",
++	    addrs[0], values[0], n - 1u, t, done, irq, idle, status[0], status[1], status[2]);
 +	if (!done) {
 +		return ETIMEDOUT;
 +	}
@@ -322,7 +321,43 @@ index 4da50d8..c21ce04 100644
 +	return 0;
 +}
 +
++/* VRM: voltage, mode, enable (rpmh-regulator command order). */
++static int
++vr_send(uint32_t address, unsigned mv, unsigned mode)
++{
++	const uint32_t addrs[3] = {address, address + 8u, address + 4u};
++	const uint32_t values[3] = {mv, mode, 1};
++	return vr_send_cmds(3, addrs, values);
++}
++
 +int sweet_rpmh_vrm_enable(uint32_t address, unsigned mv, unsigned mode);
++int sweet_rpmh_bcm_vote(uint32_t address, unsigned x, unsigned y);
++
++/*
++ * BCM vote (icc-rpmh BCM_TCS_CMD: commit 30, valid 29, x << 14, y), e.g.
++ * QUP0 0x5003c: Linux keeps it on (keepalive); without it the QUP0 core
++ * clock may be off and any SE register access stalls the bus.
++ */
++int
++sweet_rpmh_bcm_vote(uint32_t address, unsigned x, unsigned y)
++{
++	if ((address >> 16) != 5u || (address & 3u) || x > 0x3fffu || y > 0x3fffu) {
++		return EINVAL;
++	}
++	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++		return EBUSY;
++	}
++	int error = vr_poisoned ? EIO : vr_map();
++	if (!error) {
++		uint32_t data = (1u << 30) | (1u << 29) | (x << 14) | y;
++		error = vr_send_cmds(1, &address, &data);
++	}
++	if (error) {
++		printf("SWEET RPMH: BCM %#x vote failed errno=%d\n", address, error);
++	}
++	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++	return error;
++}
 +
 +int
 +sweet_rpmh_vrm_enable(uint32_t address, unsigned mv, unsigned mode)
@@ -345,10 +380,10 @@ index 4da50d8..c21ce04 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..18b490d 100644
+index 370d18b..c6e7d72 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -740,10 +740,546 @@ out:
+@@ -740,10 +740,574 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -392,6 +427,26 @@ index 370d18b..18b490d 100644
 +#define V_SCLK_MAX       6000000u
 +
 +extern int sweet_rpmh_vrm_enable(uint32_t address, unsigned mv, unsigned mode);
++extern int sweet_rpmh_bcm_vote(uint32_t address, unsigned x, unsigned y);
++#define V_BCM_QUP0       0x5003cu        /* cmd-db "QUP0" (clk_virt qup0_core) */
++#define V_BCM_QUP0_VOTE  3840u           /* GENI 76.8 MB/s, width 4 / unit 20 */
++
++/*
++ * A bus stall freezes the only CPU and ramoops loses the last ~1 KiB, so
++ * after each stage line push it out of that window (sweetfb_noconsole).
++ */
++static void
++v_mark(const char *stage)
++{
++	static char pad[1281];
++	if (!pad[0]) {
++		for (unsigned i = 0; i < 1280; ++i) {
++			pad[i] = (i % 80u) == 79u ? '\n' : ' ';
++		}
++	}
++	st.stage = stage;
++	printf("SWEET TOUCH: stage %s\n%s", stage, pad);
++}
 +
 +static struct {
 +	vm_offset_t tlmm;
@@ -762,7 +817,7 @@ index 370d18b..18b490d 100644
 +	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
 +	printf("SWEET TOUCH: volcano FT3681 SPI, starting in %u s\n", delay_s);
 +	touch_wait(delay_s * 1000u);
-+	st.stage = "map";
++	v_mark("map");
 +	st.gcc = ml_io_map(V_GCC_PA, 0x60000);
 +	vt.tlmm = ml_io_map(V_TLMM_PA, 0x16000);
 +	st.se = ml_io_map(V_SE_PA, 0x4000);
@@ -776,15 +831,23 @@ index 370d18b..18b490d 100644
 +	    touch_rd(vt.tlmm, TOUCH_GPIO_CFG(2)), touch_rd(vt.tlmm, TOUCH_GPIO_CFG(3)),
 +	    touch_rd(vt.tlmm, TOUCH_GPIO_CFG(V_PIN_IRQ)), touch_rd(vt.tlmm, TOUCH_GPIO_IO(V_PIN_IRQ)),
 +	    touch_rd(vt.tlmm, TOUCH_GPIO_CFG(V_PIN_RESET)), touch_rd(vt.tlmm, TOUCH_GPIO_IO(V_PIN_RESET)));
-+	st.stage = "clocks";
++	v_mark("bcm");
++	{
++		int be = sweet_rpmh_bcm_vote(V_BCM_QUP0, V_BCM_QUP0_VOTE, V_BCM_QUP0_VOTE);
++		printf("SWEET TOUCH: BCM QUP0 vote %u -> %d\n", V_BCM_QUP0_VOTE, be);
++		if (be) {
++			goto out;
++		}
++	}
++	v_mark("clocks");
 +	if (!v_clocks()) {
 +		goto out;
 +	}
-+	st.stage = "se0 init";
++	v_mark("se0 init");
 +	if (!v_se_init()) {
 +		goto out;
 +	}
-+	st.stage = "power/reset";
++	v_mark("power/reset");
 +	/* fts_power_source_ctrl(): reset low, vci, vddio, 2 ms, reset high, 200 ms */
 +	touch_gpio(V_PIN_RESET, 0, 0, 1, true, false);
 +	touch_gpio(V_PIN_IRQ, 0, 3, 0, false, false);
@@ -802,7 +865,7 @@ index 370d18b..18b490d 100644
 +	    touch_rd(vt.tlmm, TOUCH_GPIO_CFG(0)),
 +	    touch_rd(vt.tlmm, TOUCH_GPIO_CFG(V_PIN_IRQ)), touch_rd(vt.tlmm, TOUCH_GPIO_IO(V_PIN_IRQ)),
 +	    touch_rd(vt.tlmm, TOUCH_GPIO_CFG(V_PIN_RESET)), touch_rd(vt.tlmm, TOUCH_GPIO_IO(V_PIN_RESET)));
-+	st.stage = "probe";
++	v_mark("probe");
 +	uint8_t id1 = 0, id2 = 0, fw = 0, vendor = 0, mode = 0;
 +	int e1 = EIO, e2 = EIO;
 +	for (unsigned tries = 0; tries < 5 && !st.dead; ++tries) {
@@ -829,7 +892,7 @@ index 370d18b..18b490d 100644
 +		goto out;
 +	}
 +	st.kind = TOUCH_FTS;
-+	st.stage = "polling";
++	v_mark("polling");
 +	printf("SWEET TOUCH: polling FT3681 1080x2392 every 4 ms (IRQ GPIO%u hint)\n", V_PIN_IRQ);
 +	{
 +		unsigned ticks = 0, errors = 0, idle = 0;
@@ -896,7 +959,7 @@ index 370d18b..18b490d 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1293,9 @@ sweet_touch_init(void)
+@@ -757,7 +1321,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
