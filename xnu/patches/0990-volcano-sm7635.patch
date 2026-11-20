@@ -380,10 +380,10 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..566ca51 100644
+index 370d18b..c0421d0 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -16,6 +16,9 @@
+@@ -16,8 +16,12 @@
  #include <kern/sched_prim.h>
  #include <machine/machine_routines.h>
  #include <pexpert/pexpert.h>
@@ -392,8 +392,11 @@ index 370d18b..566ca51 100644
 +#include <vm/vm_kern.h>
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
-@@ -740,10 +743,946 @@ out:
+ extern kern_return_t thread_terminate(thread_t);
+ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+@@ -740,10 +744,946 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -1341,7 +1344,7 @@ index 370d18b..566ca51 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1696,9 @@ sweet_touch_init(void)
+@@ -757,7 +1697,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
