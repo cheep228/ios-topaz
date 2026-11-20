@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..c259a7f 100644
+index 370d18b..655e511 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..c259a7f 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1277 @@ out:
+@@ -740,10 +744,1278 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -955,12 +955,13 @@ index 370d18b..c259a7f 100644
 +	}
 +
 +	/* interrupts: masked at the source (polled), IRQ not MSI */
-+	g_wr(G_TYPE_MSK, 0x4fu);
-+	g_wr(G_IEOB_MSK, 1u);
-+	g_wr(G_SRC_CH_MSK, 3u);
-+	g_wr(G_SRC_EV_MSK, 1u);
-+	g_wr(G_GLOB_EN, 1u);
-+	g_wr(G_GPII_EN, 0xfu);
++	/* polled: nothing raises the GPII's GIC line (no handler under XNU) */
++	g_wr(G_TYPE_MSK, 0);
++	g_wr(G_IEOB_MSK, 0);
++	g_wr(G_SRC_CH_MSK, 0);
++	g_wr(G_SRC_EV_MSK, 0);
++	g_wr(G_GLOB_EN, 0);
++	g_wr(G_GPII_EN, 0);
 +	g_wr(G_INTSET, 1);
 +	g_wr(G_SRC_CH_CLR, 3u);
 +	g_wr(G_SRC_EV_CLR, 1u);
@@ -1675,7 +1676,7 @@ index 370d18b..c259a7f 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2028,9 @@ sweet_touch_init(void)
+@@ -757,7 +2029,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
