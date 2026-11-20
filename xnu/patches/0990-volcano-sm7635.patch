@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..6a4d925 100644
+index 370d18b..8ca75cc 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..6a4d925 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1311 @@ out:
+@@ -740,10 +744,1333 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -616,6 +616,7 @@ index 370d18b..6a4d925 100644
 +	vm_offset_t regs;       /* ee_base: mapping - V_GPI_EE */
 +	vm_offset_t dma;
 +	uint64_t pa;
++	uint64_t da;     /* address the GPI uses: 32-bit IOVA via our S1 CB, else pa */
 +	unsigned ev_rp, tx_wp, rx_wp;   /* element indexes */
 +	unsigned xfers, fails, logged;
 +} vg;
@@ -694,7 +695,7 @@ index 370d18b..6a4d925 100644
 +{
 +	/* the ring is "full" of free event slots up to one before our RP */
 +	unsigned wp = (vg.ev_rp + G_EV_N - 1u) % G_EV_N;
-+	g_wr(G_EV_DB, (uint32_t)(vg.pa + G_OFF_EV + wp * G_EL));
++	g_wr(G_EV_DB, (uint32_t)(vg.da + G_OFF_EV + wp * G_EL));
 +}
 +
 +/*
@@ -708,6 +709,7 @@ index 370d18b..6a4d925 100644
 +
 +static bool g_smmu_fault;
 +static vm_offset_t g_smmu_gr0, g_smmu_cbr;
++static int sweet_gpi_iova = 1;
 +static unsigned g_smmu_cb = 0xffffu;
 +
 +/*
@@ -757,7 +759,21 @@ index 370d18b..6a4d925 100644
 +		/* page | AttrIndx 0 | AP=01 (rw) | AF */
 +		l3[(a >> 12) & 0x1ffu] = a | 3u | (1u << 6) | (1u << 10);
 +	}
-+	flush_dcache64((addr64_t)pt, 0x3000u, TRUE);
++	/*
++	 * Run 46: Android hands the GPI 32-bit IOVAs (rings at 0x1db000);
++	 * ours were 36-bit PAs and the GPI never fetched a TRE. Also map
++	 * the block at IOVA 0x40000000 + (pa & 0x1fffff) and use that.
++	 */
++	uint64_t da = 0x40000000ull | (pa & 0x1fffffull);
++	if (sweet_gpi_iova) {
++		l1[(da >> 30) & 0x3fu] = (pt + 0x3000u) | 3u;
++		volatile uint64_t *m2 = (volatile uint64_t *)(vg.dma + G_OFF_PT + 0x3000u);
++		for (unsigned i = 0; i < 512u; ++i) {
++			m2[i] = 0;
++		}
++		m2[(da >> 21) & 0x1ffu] = (pt + 0x2000u) | 3u;  /* same L3: offsets within 2M match */
++	}
++	flush_dcache64((addr64_t)pt, 0x4000u, TRUE);
 +	__asm__ volatile("dsb sy" ::: "memory");
 +
 +	vm_offset_t g1 = ml_io_map(V_SMMU_PA + pg, 0x1000);
@@ -792,6 +808,11 @@ index 370d18b..6a4d925 100644
 +	g_smmu_cbr = c;
 +	g_smmu_cb = cb;
 +	*cbo = cb;
++	if (sweet_gpi_iova) {
++		vg.da = da;
++		printf("SWEET TOUCH: gpi uses iova %#llx for pa %#llx
++", da, pa);
++	}
 +	return true;
 +}
 +
@@ -813,8 +834,8 @@ index 370d18b..6a4d925 100644
 +{
 +	for (unsigned i = 0; i < n; ++i) {
 +		delay(us);
-+		printf("SWEET TOUCH: w %s %u: txrp %#x rxrp %#x ch0 %#x evrp %#x se st %#x mirq %#x sirq %#x dma %#x fsr %#x gfsr %#x\n",
-+		    why, i, g_rd(G_CH_CNTXT(0) + 0x10u), g_rd(G_CH_CNTXT(1) + 0x10u), g_rd(G_CH_CNTXT(0)),
++		printf("SWEET TOUCH: w %s %u: f %#x %#x %#x txrp %#x rxrp %#x ch0 %#x evrp %#x se st %#x mirq %#x sirq %#x dma %#x fsr %#x gfsr %#x\n",
++		    why, i, g_rd(G_CH_CNTXT(0) + 0x50u), g_rd(G_CH_CNTXT(0) + 0x54u), g_rd(G_CH_CNTXT(0) + 0x58u), g_rd(G_CH_CNTXT(0) + 0x10u), g_rd(G_CH_CNTXT(1) + 0x10u), g_rd(G_CH_CNTXT(0)),
 +		    g_rd(G_EV_CNTXT + 0x10u), touch_rd(st.se, 0x40u), touch_rd(st.se, 0x610u), touch_rd(st.se, 0x640u),
 +		    touch_rd(st.se, 0xc10u),
 +		    g_smmu_cbr ? touch_rd(g_smmu_cbr, 0x58) : 0u, g_smmu_gr0 ? touch_rd(g_smmu_gr0, 0x48) : 0u);
@@ -942,6 +963,7 @@ index 370d18b..6a4d925 100644
 +		return false;
 +	}
 +	vg.pa = ptoa_64(pn);
++	vg.da = vg.pa;
 +	g_smmu();
 +	if (g_smmu_fault) {
 +		return false;
@@ -987,7 +1009,7 @@ index 370d18b..6a4d925 100644
 +	if (!g_cmd(true, 0, 0, 1)) {
 +		return false;
 +	}
-+	uint64_t ev = vg.pa + G_OFF_EV;
++	uint64_t ev = vg.da + G_OFF_EV;
 +	g_wr(G_EV_CNTXT + 0x00u, (G_EL << 24) | (1u << 16) | 2u);
 +	g_wr(G_EV_CNTXT + 0x04u, G_EV_N * G_EL);
 +	g_wr(G_EV_CNTXT + 0x08u, (uint32_t)ev);
@@ -1003,7 +1025,7 @@ index 370d18b..6a4d925 100644
 +
 +	v_mark("gpi ch alloc");
 +	for (unsigned k = 0; k < 2; ++k) {
-+		uint64_t r = vg.pa + (k ? G_OFF_RX : G_OFF_TX);
++		uint64_t r = vg.da + (k ? G_OFF_RX : G_OFF_TX);
 +		if (!g_cmd(false, k, 0, 1)) {
 +			return false;
 +		}
@@ -1065,7 +1087,7 @@ index 370d18b..6a4d925 100644
 +		 * pointers (ctx +0x50..0x58: Android shows RP low bits there).
 +		 */
 +		{
-+			uint64_t ra = vg.pa + G_OFF_RXB;
++			uint64_t ra = vg.da + G_OFF_RXB;
 +			for (unsigned i = 0; i < 2; ++i) {
 +				printf("SWEET TOUCH: rx ctx pre %u: %#x %#x %#x %#x | %#x %#x %#x %#x | 50: %#x %#x %#x %#x\n", i,
 +				    g_rd(G_CH_CNTXT(1)), g_rd(G_CH_CNTXT(1) + 4u), g_rd(G_CH_CNTXT(1) + 8u), g_rd(G_CH_CNTXT(1) + 12u),
@@ -1075,7 +1097,7 @@ index 370d18b..6a4d925 100644
 +					g_tre(G_OFF_RX, &vg.rx_wp, (uint32_t)ra, (uint32_t)(ra >> 32), 4u, TRE_TYPE(0x10) | TRE_IEOT);
 +					g_sync(G_OFF_RX, G_CH_N * G_EL);
 +					v_mark("gpi rx-only db");
-+					g_wr(G_CH_DB(1), (uint32_t)(vg.pa + G_OFF_RX + vg.rx_wp * G_EL));
++					g_wr(G_CH_DB(1), (uint32_t)(vg.da + G_OFF_RX + vg.rx_wp * G_EL));
 +					for (unsigned t = 0; t < 10; ++t) {
 +						delay(2000);
 +						g_smmu_poll("rx-only");
@@ -1086,7 +1108,7 @@ index 370d18b..6a4d925 100644
 +			g_dump("after rx-only");
 +			v_mark("rx-only checked");
 +		}
-+		uint64_t a = vg.pa + G_OFF_TXB;
++		uint64_t a = vg.da + G_OFF_TXB;
 +		/*
 +		 * Run 45: in every survivor so far the GPI never consumed a TRE
 +		 * (CONFIG0 was chained, RX waits for the SE). An unchained
@@ -1099,7 +1121,7 @@ index 370d18b..6a4d925 100644
 +		g_sync(G_OFF_EV, G_EV_N * G_EL);
 +		g_watch("pre", 1, 10);
 +		v_mark("gpi cfg0 unchained db");
-+		g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
++		g_wr(G_CH_DB(0), (uint32_t)(vg.da + G_OFF_TX + vg.tx_wp * G_EL));
 +		g_watch("cfg0", 30, 300);
 +		g_smmu_poll("cfg0");
 +		flush_dcache64((addr64_t)(vg.dma + G_OFF_EV), 64, FALSE);
@@ -1116,7 +1138,7 @@ index 370d18b..6a4d925 100644
 +		g_sync(G_OFF_TXB, 4);
 +		g_sync(G_OFF_EV, G_EV_N * G_EL);
 +		v_mark("gpi tx-only");
-+		g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
++		g_wr(G_CH_DB(0), (uint32_t)(vg.da + G_OFF_TX + vg.tx_wp * G_EL));
 +		g_watch("tx", 200, 200);
 +		v_mark("tx-only watched 40ms");
 +		v_mark("pad");
@@ -1145,12 +1167,12 @@ index 370d18b..6a4d925 100644
 +			    touch_rd(st.se, 0x40u), touch_rd(st.se, 0x610u));
 +		}
 +		uint32_t hw = g_rd(G_EV_CNTXT + 0x10u);
-+		vg.ev_rp = (unsigned)(((uint64_t)hw - (uint32_t)(vg.pa + G_OFF_EV)) / G_EL) % G_EV_N;
++		vg.ev_rp = (unsigned)(((uint64_t)hw - (uint32_t)(vg.da + G_OFF_EV)) / G_EL) % G_EV_N;
 +		g_ev_db();
 +		v_mark("gpi tx-only survived");
 +	}
 +	unsigned tx0 = vg.tx_wp, rx0 = vg.rx_wp;
-+	uint64_t ta = vg.pa + G_OFF_TXB, ra = vg.pa + G_OFF_RXB;
++	uint64_t ta = vg.da + G_OFF_TXB, ra = vg.da + G_OFF_RXB;
 +	/* CONFIG0: 8-bit words (8 - MIN_WORD_LEN 4), mode 0, tx/rx packing */
 +	g_tre(G_OFF_TX, &vg.tx_wp, (8u - 4u) | (1u << 24) | (1u << 25), 0,
 +	    (vt.div & 0xfffu) | ((vt.level & 0xfu) << 16), TRE_TYPE(0x22) | TRE_CHAIN);
@@ -1166,11 +1188,11 @@ index 370d18b..6a4d925 100644
 +		v_mark("gpi db");
 +	}
 +	/* RX first so the RX channel is ready when the GO starts the clock */
-+	g_wr(G_CH_DB(1), (uint32_t)(vg.pa + G_OFF_RX + vg.rx_wp * G_EL));
++	g_wr(G_CH_DB(1), (uint32_t)(vg.da + G_OFF_RX + vg.rx_wp * G_EL));
 +	if (!vg.xfers) {
 +		v_mark("gpi tx db");
 +	}
-+	g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
++	g_wr(G_CH_DB(0), (uint32_t)(vg.da + G_OFF_TX + vg.tx_wp * G_EL));
 +
 +	if (!vg.xfers) {
 +		v_mark("gpi wait");
@@ -1180,10 +1202,10 @@ index 370d18b..6a4d925 100644
 +	int err = 0;
 +	for (unsigned i = 0; i < 20000 && !(txd && rxd); ++i) {
 +		uint32_t hw = g_rd(G_EV_CNTXT + 0x10u);
-+		unsigned hwi = (unsigned)(((uint64_t)hw - (uint32_t)(vg.pa + G_OFF_EV)) / G_EL) % G_EV_N;
++		unsigned hwi = (unsigned)(((uint64_t)hw - (uint32_t)(vg.da + G_OFF_EV)) / G_EL) % G_EV_N;
 +		if (hwi == vg.ev_rp) {
 +			/* RX may finish without an event: its RP passing our WP */
-+			if (txd && g_rd(G_CH_CNTXT(1) + 0x10u) == (uint32_t)(vg.pa + G_OFF_RX + vg.rx_wp * G_EL)) {
++			if (txd && g_rd(G_CH_CNTXT(1) + 0x10u) == (uint32_t)(vg.da + G_OFF_RX + vg.rx_wp * G_EL)) {
 +				rxd = true;
 +				break;
 +			}
@@ -1709,7 +1731,7 @@ index 370d18b..6a4d925 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2062,9 @@ sweet_touch_init(void)
+@@ -757,7 +2084,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
