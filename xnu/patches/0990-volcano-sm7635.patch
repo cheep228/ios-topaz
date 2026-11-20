@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..3586727 100644
+index 370d18b..71a6628 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..3586727 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1097 @@ out:
+@@ -740,10 +744,1117 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -935,7 +935,27 @@ index 370d18b..3586727 100644
 +		g_sync(G_OFF_EV, G_EV_N * G_EL);
 +		v_mark("gpi tx-only");
 +		g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
-+		for (unsigned i = 0; i < 20; ++i) {
++		/* no MMIO for a while: does the CPU survive at all? */
++		delay(300000);
++		v_mark("tx-only slept 300ms (no mmio)");
++		v_mark("pad");
++		flush_dcache64((addr64_t)(vg.dma + G_OFF_EV), 64, FALSE);
++		{
++			volatile uint32_t *e = (volatile uint32_t *)(vg.dma + G_OFF_EV);
++			printf("SWEET TOUCH: ev mem %#x %#x %#x %#x | %#x %#x %#x %#x\n",
++			    e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
++		}
++		v_mark("ev mem read");
++		v_mark("pad");
++		uint32_t gs = touch_rd(st.se, 0x40u);
++		printf("SWEET TOUCH: se status %#x\n", gs);
++		v_mark("se mmio ok");
++		v_mark("pad");
++		uint32_t trp = g_rd(G_CH_CNTXT(0) + 0x10u);
++		printf("SWEET TOUCH: tx rp %#x\n", trp);
++		v_mark("gpi mmio ok");
++		v_mark("pad");
++		for (unsigned i = 0; i < 5; ++i) {
 +			delay(10000);
 +			flush_dcache64((addr64_t)(vg.dma + G_OFF_EV), 64, FALSE);
 +			volatile uint32_t *e = (volatile uint32_t *)(vg.dma + G_OFF_EV + vg.ev_rp * G_EL);
@@ -1495,7 +1515,7 @@ index 370d18b..3586727 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1848,9 @@ sweet_touch_init(void)
+@@ -757,7 +1868,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
