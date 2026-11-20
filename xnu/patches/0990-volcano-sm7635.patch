@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..655e511 100644
+index 370d18b..6a4d925 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..655e511 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1278 @@ out:
+@@ -740,10 +744,1311 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -807,6 +807,20 @@ index 370d18b..655e511 100644
 +	    g_smmu_cbr ? touch_rd(g_smmu_cbr, 0x60) : 0u, g_smmu_cbr ? touch_rd(g_smmu_cbr, 0x68) : 0u);
 +}
 +
++/* tight watch after a doorbell: last line before a reset shows how far it got */
++static void
++g_watch(const char *why, unsigned n, unsigned us)
++{
++	for (unsigned i = 0; i < n; ++i) {
++		delay(us);
++		printf("SWEET TOUCH: w %s %u: txrp %#x rxrp %#x ch0 %#x evrp %#x se st %#x mirq %#x sirq %#x dma %#x fsr %#x gfsr %#x\n",
++		    why, i, g_rd(G_CH_CNTXT(0) + 0x10u), g_rd(G_CH_CNTXT(1) + 0x10u), g_rd(G_CH_CNTXT(0)),
++		    g_rd(G_EV_CNTXT + 0x10u), touch_rd(st.se, 0x40u), touch_rd(st.se, 0x610u), touch_rd(st.se, 0x640u),
++		    touch_rd(st.se, 0xc10u),
++		    g_smmu_cbr ? touch_rd(g_smmu_cbr, 0x58) : 0u, g_smmu_gr0 ? touch_rd(g_smmu_gr0, 0x48) : 0u);
++	}
++}
++
 +static void
 +g_smmu(void)
 +{
@@ -1073,8 +1087,28 @@ index 370d18b..655e511 100644
 +			v_mark("rx-only checked");
 +		}
 +		uint64_t a = vg.pa + G_OFF_TXB;
++		/*
++		 * Run 45: in every survivor so far the GPI never consumed a TRE
++		 * (CONFIG0 was chained, RX waits for the SE). An unchained
++		 * CONFIG0 + IEOT makes the GPI fetch, hand the config to the SE
++		 * and write one event, with no serial activity.
++		 */
 +		g_tre(G_OFF_TX, &vg.tx_wp, (8u - 4u) | (1u << 24) | (1u << 25), 0,
-+		    (vt.div & 0xfffu) | ((vt.level & 0xfu) << 16), TRE_TYPE(0x22) | TRE_CHAIN);
++		    (vt.div & 0xfffu) | ((vt.level & 0xfu) << 16), TRE_TYPE(0x22) | TRE_IEOT);
++		g_sync(G_OFF_TX, G_CH_N * G_EL);
++		g_sync(G_OFF_EV, G_EV_N * G_EL);
++		g_watch("pre", 1, 10);
++		v_mark("gpi cfg0 unchained db");
++		g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
++		g_watch("cfg0", 30, 300);
++		g_smmu_poll("cfg0");
++		flush_dcache64((addr64_t)(vg.dma + G_OFF_EV), 64, FALSE);
++		{
++			volatile uint32_t *e = (volatile uint32_t *)(vg.dma + G_OFF_EV);
++			printf("SWEET TOUCH: cfg0 ev mem %#x %#x %#x %#x | %#x %#x %#x %#x\n",
++			    e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
++		}
++		v_mark("cfg0 survived");
 +		g_tre(G_OFF_TX, &vg.tx_wp, 1u, 0, 0, TRE_TYPE(0x20) | TRE_CHAIN);
 +		g_tre(G_OFF_TX, &vg.tx_wp, (uint32_t)a, (uint32_t)(a >> 32), 4u, TRE_TYPE(0x10) | TRE_IEOT);
 +		memset((void *)(vg.dma + G_OFF_TXB), 0, 4);
@@ -1083,9 +1117,8 @@ index 370d18b..655e511 100644
 +		g_sync(G_OFF_EV, G_EV_N * G_EL);
 +		v_mark("gpi tx-only");
 +		g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
-+		/* no MMIO for a while: does the CPU survive at all? */
-+		delay(300000);
-+		v_mark("tx-only slept 300ms (no mmio)");
++		g_watch("tx", 200, 200);
++		v_mark("tx-only watched 40ms");
 +		v_mark("pad");
 +		flush_dcache64((addr64_t)(vg.dma + G_OFF_EV), 64, FALSE);
 +		{
@@ -1676,7 +1709,7 @@ index 370d18b..655e511 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2029,9 @@ sweet_touch_init(void)
+@@ -757,7 +2062,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
