@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..1c589c4 100644
+index 370d18b..f9fe265 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..1c589c4 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1443 @@ out:
+@@ -740,10 +744,1449 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -1801,12 +1801,18 @@ index 370d18b..1c589c4 100644
 +touch_swipe_one(unsigned rep)
 +{
 +	int x = 540, y = 2360;
++	printf("SWEET SWIPE: %u wake tap\n", rep);
++	sweet_hid_touch(0, 1, 540, 1400);
++	touch_wait(60);
++	sweet_hid_touch(0, 0, 540, 1400);
++	touch_wait(1500);
 +	printf("SWEET SWIPE: %u start\n", rep);
 +	for (unsigned i = 0; i < 24; ++i) {
 +		y = 2360 - (int)i * 60;
 +		sweet_hid_touch(0, 1, x, y);
-+		touch_wait(12);
++		touch_wait(16);
 +	}
++	touch_wait(30);
 +	sweet_hid_touch(0, 0, x, y);
 +	printf("SWEET SWIPE: %u done at %d,%d\n", rep, x, y);
 +}
@@ -1841,7 +1847,7 @@ index 370d18b..1c589c4 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2194,17 @@ sweet_touch_init(void)
+@@ -757,7 +2200,17 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
