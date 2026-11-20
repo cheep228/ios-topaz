@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..c0421d0 100644
+index 370d18b..b191059 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..c0421d0 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,946 @@ out:
+@@ -740,10 +744,1023 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -690,6 +690,76 @@ index 370d18b..c0421d0 100644
 +	g_wr(G_EV_DB, (uint32_t)(vg.pa + G_OFF_EV + wp * G_EL));
 +}
 +
++/*
++ * apps SMMU (qsmmu-v500 = SMMUv2 programming model) at 0x15000000. UFS
++ * (SID 0x60) works under XNU, GPI is SID 0x576 (DT iommus). Run 32 reset
++ * the SoC on the first GPI transfer: an unmatched stream with USFCFG=1 is a
++ * global fault. If nothing matches 0x576, add a bypass stream mapping.
++ */
++#define V_SMMU_PA        0x15000000u
++#define V_GPI_SID        0x576u
++
++static void
++g_smmu(void)
++{
++	vm_offset_t s = ml_io_map(V_SMMU_PA, 0x1000);
++	if (!s) {
++		return;
++	}
++	v_mark("smmu read");
++	uint32_t cr0 = touch_rd(s, 0x0), idr0 = touch_rd(s, 0x20), gfsr = touch_rd(s, 0x48);
++	unsigned n = idr0 & 0xffu, used = 0, freei = 0xffffu, hit = 0xffffu, ufs = 0xffffu;
++	bool exids = (cr0 >> 3) & 1u;
++	if (n > 128u) {
++		n = 128u;
++	}
++	for (unsigned i = 0; i < n; ++i) {
++		uint32_t smr = touch_rd(s, 0x800u + 4u * i), s2cr = touch_rd(s, 0xc00u + 4u * i);
++		bool valid = exids ? ((s2cr >> 10) & 1u) : (smr >> 31);
++		uint32_t id = smr & (exids ? 0xffffu : 0x7fffu), mask = (smr >> 16) & (exids ? 0xffffu : 0x7fffu);
++		if (!valid) {
++			if (freei == 0xffffu) {
++				freei = i;
++			}
++			continue;
++		}
++		used++;
++		if (((V_GPI_SID ^ id) & ~mask) == 0) {
++			hit = i;
++		}
++		if (((0x60u ^ id) & ~mask) == 0) {
++			ufs = i;
++		}
++	}
++	printf("SWEET TOUCH: smmu cr0=%#x idr0=%#x gfsr=%#x gfsynr0=%#x smrs %u used %u free %u exids %d ufs %u%s gpi %u\n",
++	    cr0, idr0, gfsr, touch_rd(s, 0x50), n, used, freei, exids, ufs,
++	    ufs != 0xffffu ? "" : " (none)", hit);
++	if (ufs != 0xffffu) {
++		printf("SWEET TOUCH: smmu ufs smr=%#x s2cr=%#x\n",
++		    touch_rd(s, 0x800u + 4u * ufs), touch_rd(s, 0xc00u + 4u * ufs));
++	}
++	if (hit != 0xffffu) {
++		printf("SWEET TOUCH: smmu gpi smr=%#x s2cr=%#x (left alone)\n",
++		    touch_rd(s, 0x800u + 4u * hit), touch_rd(s, 0xc00u + 4u * hit));
++		return;
++	}
++	if ((cr0 & 1u) || !(cr0 & (1u << 10))) {
++		/* CLIENTPD=1 or USFCFG=0: unmatched streams bypass */
++		printf("SWEET TOUCH: smmu unmatched streams bypass (USFCFG=0)\n");
++		return;
++	}
++	if (freei == 0xffffu) {
++		printf("SWEET TOUCH: smmu no free SMR\n");
++		return;
++	}
++	v_mark("smmu write");
++	/* S2CR: TYPE=bypass (1 << 16), then SMR valid for exactly SID 0x576 */
++	touch_wr(s, 0xc00u + 4u * freei, (1u << 16) | (exids ? (1u << 10) : 0u));
++	touch_wr(s, 0x800u + 4u * freei, exids ? V_GPI_SID : ((1u << 31) | V_GPI_SID));
++	printf("SWEET TOUCH: smmu bypass SID %#x at %u: smr=%#x s2cr=%#x\n", V_GPI_SID, freei,
++	    touch_rd(s, 0x800u + 4u * freei), touch_rd(s, 0xc00u + 4u * freei));
++}
++
 +static bool
 +g_init(void)
 +{
@@ -710,6 +780,7 @@ index 370d18b..c0421d0 100644
 +		return false;
 +	}
 +	vg.pa = ptoa_64(pn);
++	g_smmu();
 +	g_sync(0, G_DMA_SIZE);
 +	v_mark("gpi read");
 +	g_dump("before");
@@ -829,10 +900,16 @@ index 370d18b..c0421d0 100644
 +	g_sync(G_OFF_RX, G_CH_N * G_EL);
 +	g_sync(G_OFF_TXB, n);
 +	g_sync(G_OFF_RXB, n);
++	if (!vg.xfers) {
++		v_mark("gpi db");
++	}
 +	/* RX first so the RX channel is ready when the GO starts the clock */
 +	g_wr(G_CH_DB(1), (uint32_t)(vg.pa + G_OFF_RX + vg.rx_wp * G_EL));
 +	g_wr(G_CH_DB(0), (uint32_t)(vg.pa + G_OFF_TX + vg.tx_wp * G_EL));
 +
++	if (!vg.xfers) {
++		v_mark("gpi wait");
++	}
 +	bool txd = false, rxd = false;
 +	unsigned codes = 0;
 +	int err = 0;
@@ -1344,7 +1421,7 @@ index 370d18b..c0421d0 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +1697,9 @@ sweet_touch_init(void)
+@@ -757,7 +1774,9 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
