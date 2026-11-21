@@ -2494,7 +2494,7 @@ index 143db60..eeeb211 100644
  int sweet_ufs_rootdev(dev_t *dev);
  
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index bb2a2bf..6f259fc 100644
+index bb2a2bf..98b6752 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -79,6 +79,9 @@
@@ -2507,7 +2507,90 @@ index bb2a2bf..6f259fc 100644
  #include <sys/param.h>
  #include <sys/filedesc.h>
  #include <sys/kernel.h>
-@@ -873,6 +876,16 @@ bsd_init(void)
+@@ -473,6 +476,82 @@ bsd_rooted_ramdisk(void)
+  * of the tro_ucred field so that the uthread structure can be
+  * used like any other.
+  */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/fcntl.h>
++/*
++ * SWEET: seed the mobile user's Accessibility preferences once (Reduce
++ * Transparency + Reduce Motion). Without a GPU, CoreAnimation renders on the
++ * CPU (CA::OGL::SW) and the backdrop blurs of the dock, folders, Control
++ * Center and the lock screen cost most of each frame. The kernel writes the
++ * plist before launchd starts, because the HFS+ root cannot be mounted
++ * read-write on the build machine. A marker file makes it one-shot, so a
++ * change made later in Settings stays. Boot-arg sweetax=0 skips it,
++ * sweetax=2 rewrites it again.
++ */
++static int
++sweet_write_file(const char *path, const char *data, int len, int uid, int gid, int mode)
++{
++	vfs_context_t ctx = vfs_context_kernel();
++	vnode_t vp = NULLVP;
++	int resid = 0;
++	int err = vnode_open(path, FWRITE | O_CREAT | O_TRUNC, mode, 0, &vp, ctx);
++	if (err) {
++		return err;
++	}
++	if (len > 0) {
++		err = vn_rdwr(UIO_WRITE, vp, (caddr_t)(uintptr_t)data, len, 0, UIO_SYSSPACE,
++		    IO_SYNC | IO_NOAUTH, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
++		if (!err && resid) {
++			err = EIO;
++		}
++	}
++	if (!err) {
++		struct vnode_attr va;
++		VATTR_INIT(&va);
++		VATTR_SET(&va, va_uid, uid);
++		VATTR_SET(&va, va_gid, gid);
++		VATTR_SET(&va, va_mode, mode);
++		err = vnode_setattr(vp, &va, ctx);
++	}
++	if (!err) {
++		err = VNOP_FSYNC(vp, MNT_WAIT, ctx);
++	}
++	vnode_close(vp, FWRITE, ctx);
++	return err;
++}
++
++static void
++sweet_seed_ax_prefs(void)
++{
++	static const char marker[] = "/private/var/mobile/Library/Preferences/.sweet-ax-seeded";
++	static const char plist[] = "/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist";
++	static const char body[] =
++	    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++	    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
++	    "<plist version=\"1.0\">\n<dict>\n"
++	    "\t<key>EnhancedBackgroundContrastEnabled</key>\n\t<true/>\n"
++	    "\t<key>ReduceMotionEnabled</key>\n\t<true/>\n"
++	    "\t<key>ReduceMotionReduceSlideTransitionsPreference</key>\n\t<true/>\n"
++	    "</dict>\n</plist>\n";
++	int ax = 1;
++	vnode_t vp = NULLVP;
++	PE_parse_boot_argn("sweetax", &ax, sizeof(ax));
++	if (ax == 0) {
++		return;
++	}
++	if (ax == 1 && vnode_lookup(marker, 0, &vp, vfs_context_kernel()) == 0) {
++		vnode_put(vp);
++		printf("SWEET AX: preferences already seeded\n");
++		return;
++	}
++	int err = sweet_write_file(plist, body, (int)sizeof(body) - 1, 501, 501, 0600);
++	if (!err) {
++		err = sweet_write_file(marker, "", 0, 0, 0, 0644);
++	}
++	printf("SWEET AX: Reduce Transparency + Reduce Motion seeded: error %d\n", err);
++}
++#endif
++
+ void
+ bsd_init(void)
+ {
+@@ -873,6 +952,16 @@ bsd_init(void)
  		int err;
  
  		bsd_init_kprintf("calling setconf\n");
@@ -2524,7 +2607,19 @@ index bb2a2bf..6f259fc 100644
  		setconf();
  #if CONFIG_NETBOOT
  		netboot = (mountroot == netboot_mountroot);
-@@ -1098,7 +1111,16 @@ bsdinit_task(void)
+@@ -915,6 +1004,11 @@ bsd_init(void)
+ 	set_rootvnode(init_rootvnode);
+ 	lck_rw_unlock_exclusive(&rootvnode_rw_lock);
+ 	init_rootvnode = NULLVP;  /* use rootvnode after this point */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (vfs_isrdwr(rootvnode->v_mount)) {
++		sweet_seed_ax_prefs();
++	}
++#endif
+ 
+ 
+ 	if (!bsd_rooted_ramdisk()) {
+@@ -1098,7 +1192,16 @@ bsdinit_task(void)
  
  	bsd_init_kprintf("bsd_do_post - done");
  
@@ -2738,7 +2833,7 @@ index 96c557b..208c1f2 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1d3ee17..687c669 100644
+index 1d3ee17..1be4b75 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -53,6 +53,9 @@ bool topaz_surface_drawn(SweetSurface *surface, uint64_t milliseconds);   /* Red
@@ -2796,7 +2891,30 @@ index 1d3ee17..687c669 100644
  	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
  	return true;
-@@ -1590,9 +1600,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -590,7 +600,22 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		fb->flipBack();
+ 	}
+ 	if (rec != NULL) {
++		uint64_t pt0 = mach_absolute_time(), pns = 0;
+ 		fb->present(rec);
++		absolutetime_to_nanoseconds(mach_absolute_time() - pt0, &pns);
++		{
++			/* SWEET PRESENT: the copy into the panel runs on the vsync timer, which it holds up */
++			static uint64_t psum, pmax;
++			static uint32_t pn;
++			psum += pns;
++			pmax = pns > pmax ? pns : pmax;
++			if (++pn == 100) {
++				IOLog("SWEET PRESENT: 100 frames, avg %llu us, max %llu us, dst %s\n", psum / 100000, pmax / 1000,
++				    fb->fFlip[0] != NULL ? "flip" : "panel");
++				psum = pmax = 0;
++				pn = 0;
++			}
++		}
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+ 		IOLockLock(fb->fLock);
+ 		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
+@@ -1590,9 +1615,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			 */
  			int stayon = 0;
  			if (off && PE_parse_boot_argn("sweetfb_stayon", &stayon, sizeof(stayon)) && stayon) {
@@ -2810,7 +2928,7 @@ index 1d3ee17..687c669 100644
  			IOLockLock(fFB->fLock);
  			bool changed = off != fFB->fPowerOff;
  			if (changed) {
-@@ -1638,3 +1652,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1638,3 +1667,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  	return ret;
  }
  #endif /* SWEET */
