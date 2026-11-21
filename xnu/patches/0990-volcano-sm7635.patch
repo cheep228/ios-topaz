@@ -129,14 +129,79 @@ index 7fd9be1..f61e54a 100644
  
  #if CONFIG_MACF
 diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
-index 94c7552..d96e3fc 100644
+index 94c7552..0d55dfa 100644
 --- a/bsd/dev/sweet_cpufreq.c
 +++ b/bsd/dev/sweet_cpufreq.c
-@@ -21,7 +21,7 @@ int sweet_cpufreq_max(void);
+@@ -8,6 +8,8 @@
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/arm64/board_config.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ int sweet_cpufreq_max(void);
+@@ -18,10 +20,63 @@ int sweet_cpufreq_max(void);
+ #define CPUFREQ_PERF_STATE      0x920u
+ #define CPUFREQ_LUT_MAX         12
+ 
++#if defined(VOLCANO)
++/*
++ * volcano (SM7635): qcom,cpufreq-epss, three frequency domains at 0x17d91000,
++ * 0x17d92000, 0x17d93000 (Linux qcom-cpufreq-hw.c epss_soc_data): enable at
++ * +0x0, current state +0x20, LUT +0x100 (4-byte rows, 40 at most), PERF_STATE
++ * +0x320. Every domain goes to its top LUT entry (sweetcpufreq=0 leaves them).
++ */
++static int
++volcano_epss_max(void)
++{
++	static const uint32_t pa[3] = { 0x17d91000u, 0x17d92000u, 0x17d93000u };
++	for (int d = 0; d < 3; d++) {
++		vm_offset_t b = ml_io_map(pa[d], 0x1000);
++		if (b == 0) {
++			continue;
++		}
++		uint32_t en = *(volatile uint32_t *)(b + 0x0u);
++		uint32_t best = 0, bestKHz = 0, prevKHz = 0, n = 0;
++		for (uint32_t i = 0; i < 40; i++) {
++			uint32_t v = *(volatile uint32_t *)(b + 0x100u + 4u * i);
++			uint32_t src = (v >> 30) & 3u, lval = v & 0xffu;
++			uint32_t khz = src ? 19200u * lval : 300000u;
++			if (i > 0 && khz == prevKHz) {
++				break;
++			}
++			prevKHz = khz;
++			n = i + 1;
++			if (khz > bestKHz) {
++				bestKHz = khz;
++				best = i;
++			}
++		}
++		uint32_t old = *(volatile uint32_t *)(b + 0x320u);
++		uint32_t state = *(volatile uint32_t *)(b + 0x20u);
++		if ((en & 1u) && bestKHz > 300000u) {
++			__asm__ volatile("dsb sy" ::: "memory");
++			*(volatile uint32_t *)(b + 0x320u) = best;
++			__asm__ volatile("dsb sy" ::: "memory");
++		}
++		printf("SWEET CPUFREQ: epss%d en=%#x state=%#x lut=%u perf %u -> %u (%u MHz)\n",
++		    d, en, state, n, old, *(volatile uint32_t *)(b + 0x320u), bestKHz / 1000);
++	}
++	return 0;
++}
++#endif
++
  int
  sweet_cpufreq_max(void)
  {
 -	int on = 1;
++#if defined(VOLCANO)
++	{
++		int von = 1;
++		PE_parse_boot_argn("sweetcpufreq", &von, sizeof(von));
++		return von ? volcano_epss_max() : 0;
++	}
++#endif
 +	int on = 0;     /* volcano: EPSS layout differs from SM6115; off until ported */
  	PE_parse_boot_argn("sweetcpufreq", &on, sizeof(on));
  	if (!on) {
