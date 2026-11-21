@@ -3166,7 +3166,7 @@ index 1d3ee17..62438a2 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..0fe77ca 100644
+index 8aa0c2f..2fb00d9 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -28,7 +28,7 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -3178,13 +3178,14 @@ index 8aa0c2f..0fe77ca 100644
  #define SCM_FN(svc, cmd)    (0x42000000u | ((uint32_t)(svc) << 8) | (uint32_t)(cmd))
  #define SCM_SVC_PIL         0x02
  #define PIL_INIT_IMAGE      0x01
-@@ -44,22 +44,45 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -44,22 +44,46 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
  #define MDT_RELOCATABLE     (1u << 27)
  
  /* middle DDR bank, RAM the kernel does not manage; below 0xF0000000 for TZ/the modem */
 -#define MODEM_POOL_BASE     0xE0000000ull
+-#define MODEM_POOL_SIZE     0x01000000ull       /* 16 MB: metadata, SCM args, rmtfs, CE rings, WMI memory */
 +#define MODEM_POOL_BASE     v_pool_base
- #define MODEM_POOL_SIZE     0x01000000ull       /* 16 MB: metadata, SCM args, rmtfs, CE rings, WMI memory */
++#define MODEM_POOL_SIZE     v_pool_size         /* 16 MB (64 MB volcano): metadata, SCM args, rmtfs, CE rings, WMI memory */
  
 -#define SMEM_PA             0x46000000ull
 +#define SMEM_PA             v_smem_pa
@@ -3217,6 +3218,7 @@ index 8aa0c2f..0fe77ca 100644
 + */
 +static bool volcano;
 +static uint32_t v_pas_id = 4;
++static uint64_t v_pool_size = 0x01000000ull;
 +static uint64_t v_pool_base = 0xE0000000ull, v_smem_pa = 0x46000000ull, v_tcsr_pa = 0x00340000ull;
 +static uint16_t v_item_out = 428, v_item_in = 435, v_item_crash = 421, v_rpid = 1;
 +static uint32_t v_carve = 0x4AB00000u, v_carve_size = 0x6900000u;
@@ -3230,7 +3232,7 @@ index 8aa0c2f..0fe77ca 100644
  #define SMP2P_MAGIC         0x504D5324u         /* "$SMP" */
  #define SMP2P_MAX_ENTRY     16
  
-@@ -208,6 +231,217 @@ static const struct { const char *name; uint32_t off, size, crc; } fw_files[] =
+@@ -208,6 +232,217 @@ static const struct { const char *name; uint32_t off, size, crc; } fw_files[] =
  	{ "modem.mdt", 0x4a6d000, 0x238c, 0x8742d22b },
  };
  
@@ -3448,7 +3450,7 @@ index 8aa0c2f..0fe77ca 100644
  static int
  fw_find(const char *name)
  {
-@@ -222,6 +456,12 @@ fw_find(const char *name)
+@@ -222,6 +457,12 @@ fw_find(const char *name)
  static int64_t
  fw_size(const char *name)
  {
@@ -3461,7 +3463,7 @@ index 8aa0c2f..0fe77ca 100644
  	int i = fw_find(name);
  	return i < 0 ? -1 : (int64_t)fw_files[i].size;
  }
-@@ -230,6 +470,11 @@ fw_size(const char *name)
+@@ -230,6 +471,11 @@ fw_size(const char *name)
  static int64_t
  fw_read(const char *name, void *dst, uint64_t max)
  {
@@ -3473,7 +3475,7 @@ index 8aa0c2f..0fe77ca 100644
  	int i = fw_find(name), err;
  
  	if (i < 0 || fw_files[i].size > max) {
-@@ -359,14 +604,27 @@ smem_alloc(struct smem_part_hdr *p, uint16_t item, uint32_t size)
+@@ -359,14 +605,27 @@ smem_alloc(struct smem_part_hdr *p, uint16_t item, uint32_t size)
  
  /* ---------------------------------------------------------------- SMP2P */
  
@@ -3503,7 +3505,7 @@ index 8aa0c2f..0fe77ca 100644
  static struct smp2p_hdr *
  smp2p_create_out(struct smem_part_hdr *p)
  {
-@@ -378,7 +636,7 @@ smp2p_create_out(struct smem_part_hdr *p)
+@@ -378,7 +637,7 @@ smp2p_create_out(struct smem_part_hdr *p)
  	}
  	o->magic = SMP2P_MAGIC;
  	o->local_pid = 0;
@@ -3512,7 +3514,7 @@ index 8aa0c2f..0fe77ca 100644
  	o->total = SMP2P_MAX_ENTRY;
  	o->valid = 0;
  	o->features[0] = 1;                         /* SSR_ACK */
-@@ -443,7 +701,6 @@ extern "C" void read_random(void *buffer, unsigned int numBytes);
+@@ -443,7 +702,6 @@ extern "C" void read_random(void *buffer, unsigned int numBytes);
  #define SMEM_GLINK_FIFO_TX  479
  #define SMEM_GLINK_FIFO_RX  480
  #define GLINK_TX_SIZE       0x4000u
@@ -3520,7 +3522,7 @@ index 8aa0c2f..0fe77ca 100644
  #define GLINK_FEATURES      1                   /* INTENT_REUSE */
  
  #define CMD_VERSION         0
-@@ -574,8 +831,7 @@ tx_write(const void *hdr, uint32_t hlen, const void *data, uint32_t dlen)
+@@ -574,8 +832,7 @@ tx_write(const void *hdr, uint32_t hlen, const void *data, uint32_t dlen)
  	mb();
  	g_desc[1] = head;
  	mb();
@@ -3530,7 +3532,7 @@ index 8aa0c2f..0fe77ca 100644
  	g_tx_msgs++;
  	return true;
  }
-@@ -907,8 +1163,7 @@ rx_one(void)
+@@ -907,8 +1164,7 @@ rx_one(void)
  		break;
  	case CMD_READ_NOTIF:
  		rx_advance(8);
@@ -3540,7 +3542,7 @@ index 8aa0c2f..0fe77ca 100644
  		break;
  	case CMD_TX_DATA:
  	case CMD_TX_DATA_CONT: {
-@@ -2360,6 +2615,9 @@ static const struct { const char *path; uint32_t size; uint16_t ext, next; } fw_
+@@ -2360,6 +2616,9 @@ static const struct { const char *path; uint32_t size; uint16_t ext, next; } fw_
  static int
  fw_all_find(const char *path)
  {
@@ -3550,7 +3552,271 @@ index 8aa0c2f..0fe77ca 100644
  	for (unsigned i = 0; i < sizeof(fw_all) / sizeof(fw_all[0]); i++) {
  		if (strcmp(fw_all[i].path, path) == 0) {
  			return (int)i;
-@@ -6024,7 +6282,11 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -3058,6 +3317,10 @@ rmtfs_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t
+ #define WLFW_MSA_INFO       0x2D
+ #define WLFW_MSA_READY      0x2E
+ #define WLFW_HOST_CAP       0x34
++#define WLFW_REQUEST_MEM_IND 0x35               /* ath11k (WCN6750 / volcano) flow from here */
++#define WLFW_RESPOND_MEM    0x36
++#define WLFW_FW_MEM_READY_IND 0x37
++#define WLFW_FW_INIT_DONE_IND 0x38
+ #define WLFW_MSA_BASE       0x51900000u         /* DTB wlan_msa_region, inside "PIL Reserved" */
+ #define WLFW_MSA_SIZE       0x00100000u
+ #define WLFW_CLIENT_ID      0x4b4e454c          /* ath10k ATH10K_QMI_CLIENT_ID */
+@@ -3071,6 +3334,10 @@ static bool w_msa_ind, w_cap_done, w_bdf_started, w_fw_ready, w_mission;
+ static int w_bdf_fi = -1;
+ static uint32_t w_bdf_len, w_bdf_off;
+ static const char *w_step = "not started";
++static uint8_t *w_vbuf;                         /* volcano: whole board / regdb file */
++static uint32_t w_vbuf_cap;
++static uint8_t w_bdf_type;                      /* 1 ELF board data, 4 regdb */
++static bool w_regdb_done;
+ 
+ struct wmsg { uint8_t *b; uint32_t n; };
+ 
+@@ -3168,13 +3435,18 @@ w_bdf_segment(void)
+ 	t[0] = 0x13;
+ 	memcpy(t + 1, &tl, 2);
+ 	memcpy(t + 3, &dl, 2);
+-	if (!fw_all_read(w_bdf_fi, w_bdf_off, t + 5, chunk)) {
++	if (volcano) {
++		memcpy(t + 5, w_vbuf + w_bdf_off, chunk);
++	} else if (!fw_all_read(w_bdf_fi, w_bdf_off, t + 5, chunk)) {
+ 		LOG("wlfw: board data read failed");
+ 		IOFree(m.b, WLFW_SEG + 128);
+ 		return;
+ 	}
+ 	m.n += 5 + chunk;
+ 	wm_u8(&m, 0x14, end ? 1 : 0);               /* end */
++	if (volcano) {
++		wm_u8(&m, 0x15, w_bdf_type);            /* bdf_type */
++	}
+ 	wm_send(&m);
+ 	w_bdf_off += chunk;
+ 	w_bdf_seg++;
+@@ -3182,6 +3454,80 @@ w_bdf_segment(void)
+ }
+ 
+ /* bdwlan.bNN for board ids < 0x100, bdwlan.NNN otherwise, bdwlan.bin as fallback */
++static void w_bdf_segment(void);
++
++/* volcano: load name (board data or regdb) whole and start sending it */
++static void
++w_v_load(const char *name)
++{
++	int64_t sz = fw_size(name);
++	if (sz <= 0 || sz > 0x100000) {
++		LOG("wlfw: %s: size %lld, not sent", name, sz);
++		return;
++	}
++	if (w_vbuf == NULL || w_vbuf_cap < (uint32_t)sz) {
++		if (w_vbuf != NULL) {
++			IOFree(w_vbuf, w_vbuf_cap);
++		}
++		w_vbuf_cap = (uint32_t)sz;
++		w_vbuf = (uint8_t *)IOMalloc(w_vbuf_cap);
++		if (w_vbuf == NULL) {
++			w_vbuf_cap = 0;
++			return;
++		}
++	}
++	if (fw_read(name, w_vbuf, w_vbuf_cap) != sz) {
++		LOG("wlfw: %s: read failed", name);
++		return;
++	}
++	w_bdf_len = (uint32_t)sz;
++	w_bdf_off = 0;
++	w_bdf_seg = 0;
++	LOG("t=%u ms: wlfw: %s (type %u), %u bytes", g_ms, name, w_bdf_type, w_bdf_len);
++	w_bdf_segment();
++}
++
++/* volcano REQUEST_MEM: TLV 1 = u8 n, n x { u32 size, u32 type, u8 ncfg, ncfg x { u64, u32, u8 } } */
++static void
++w_v_request_mem(const uint8_t *d, uint32_t len)
++{
++	uint16_t l = 0;
++	const uint8_t *v = qm_find(d, len, 0x01, &l);
++	uint8_t out[1 + 17 * 52];
++	uint32_t n = (v != NULL && l >= 1) ? v[0] : 0, o = 1, pos = 1, k = 0;
++	uint64_t total = 0;
++
++	LOG("t=%u ms: wlfw: REQUEST_MEM, %u segment(s)", g_ms, n);
++	for (uint32_t i = 0; i < n && i < 52 && pos + 9 <= l; i++) {
++		uint32_t size, type;
++		memcpy(&size, v + pos, 4);
++		memcpy(&type, v + pos + 4, 4);
++		uint8_t ncfg = v[pos + 8];
++		pos += 9 + 13u * ncfg;
++		uint64_t pa = 0;
++		void *va = size != 0 ? pool_alloc(size, &pa) : NULL;
++		LOG(" mem seg %u: type %u size %x cfg %u -> %llx%s", i, type, size, ncfg, pa, va == NULL ? " (NO MEMORY)" : "");
++		if (va == NULL) {
++			pa = 0;
++		}
++		total += size;
++		memcpy(out + o, &pa, 8);
++		memcpy(out + o + 8, &size, 4);
++		memcpy(out + o + 12, &type, 4);
++		out[o + 16] = 0;                        /* restore */
++		o += 17;
++		k++;
++	}
++	out[0] = (uint8_t)k;
++	LOG("wlfw: %llu KB requested", total >> 10);
++	struct wmsg m;
++	if (wm_new(&m, WLFW_RESPOND_MEM)) {
++		wm_tlv(&m, 0x01, out, (uint16_t)o);
++		wm_send(&m);
++		w_step = "respond_mem sent";
++	}
++}
++
+ static void
+ w_start_bdf(void)
+ {
+@@ -3190,6 +3536,20 @@ w_start_bdf(void)
+ 		return;
+ 	}
+ 	w_bdf_started = true;
++	if (volcano) {
++		if (w_board < 0xFF) {
++			snprintf(name, sizeof(name), "bdwlan.e%02x", w_board);
++		} else {
++			snprintf(name, sizeof(name), "bdwlan.elf");
++		}
++		if (fw_size(name) < 0) {
++			LOG("wlfw: %s missing, using bdwlan.elf", name);
++			snprintf(name, sizeof(name), "bdwlan.elf");
++		}
++		w_bdf_type = 1;
++		w_v_load(name);
++		return;
++	}
+ 	if (w_board == 0xFF) {
+ 		snprintf(name, sizeof(name), "image/bdwlan.bin");
+ 	} else if (w_board < 0x100) {
+@@ -3304,7 +3664,7 @@ wlfw_arrive(uint32_t node, uint32_t port)
+ 	if (w_arrivals++ != 0) {
+ 		/* the WLAN PD restarted (new server port): start the handshake again */
+ 		LOG("t=%u ms: WLFW back on port %x (restart %u, last step: %s): handshake again", g_ms, port, w_arrivals - 1, w_step);
+-		w_msa_ind = w_cap_done = w_bdf_started = w_fw_ready = w_mission = false;
++		w_msa_ind = w_cap_done = w_bdf_started = w_fw_ready = w_mission = w_regdb_done = false;
+ 		w_board = 0xFF;
+ 		w_cap_tries = 0;
+ 		w_cap_retry_ms = 0;
+@@ -3314,8 +3674,16 @@ wlfw_arrive(uint32_t node, uint32_t port)
+ 	struct wmsg m;
+ 	if (wm_new(&m, WLFW_IND_REGISTER)) {
+ 		wm_u8(&m, 0x10, 1);                     /* fw_ready_enable */
+-		wm_u8(&m, 0x13, 1);                     /* msa_ready_enable */
++		if (!volcano) {
++			wm_u8(&m, 0x13, 1);                 /* msa_ready_enable */
++		}
+ 		wm_u32(&m, 0x15, WLFW_CLIENT_ID);       /* client_id */
++		if (volcano) {
++			wm_u8(&m, 0x16, 1);                 /* request_mem_enable */
++			wm_u8(&m, 0x17, 1);                 /* fw_mem_ready_enable */
++			wm_u8(&m, 0x18, 1);                 /* fw_init_done_enable */
++			wm_u8(&m, 0x1B, 1);                 /* cal_done_enable */
++		}
+ 		wm_send(&m);
+ 		w_step = "ind_register sent";
+ 	}
+@@ -3339,15 +3707,25 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+ 		} else if (msg == WLFW_FW_READY_IND) {
+ 			w_fw_ready = true;
+ 			LOG("t=%u ms: *** WLAN FIRMWARE READY ***", g_ms);
+-			if (wm_new(&m, WLFW_WLAN_CFG)) {
++			if (volcano) {
++				w_step = "FW READY (volcano: wlan_cfg not yet)";
++			} else if (wm_new(&m, WLFW_WLAN_CFG)) {
+ 				wm_array(&m, 0x11, 12, w_tgt_ce, sizeof(w_tgt_ce));
+ 				wm_array(&m, 0x12, (uint8_t)(sizeof(w_svc_ce) / sizeof(w_svc_ce[0])), w_svc_ce, sizeof(w_svc_ce));
+ 				wm_array(&m, 0x13, 12, w_shadow, sizeof(w_shadow));
+ 				wm_send(&m);
+ 				w_step = "wlan_cfg sent";
+ 			}
++		} else if (volcano && msg == WLFW_REQUEST_MEM_IND) {
++			w_v_request_mem(d, len);
++		} else if (volcano && msg == WLFW_FW_MEM_READY_IND) {
++			LOG("t=%u ms: wlfw: FW_MEM_READY", g_ms);
++			w_msa_ind = true;
++			w_simple(WLFW_CAP, "cap sent");
++		} else if (volcano && msg == WLFW_FW_INIT_DONE_IND) {
++			LOG("t=%u ms: *** wlfw: FW_INIT_DONE ***", g_ms);
+ 		} else {
+-			LOG("wlfw: indication %x", msg);
++			LOG("t=%u ms: wlfw: indication %x (%u bytes)", g_ms, msg, len);
+ 		}
+ 		return;
+ 	}
+@@ -3364,7 +3742,14 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+ 		}
+ 		LOG("t=%u ms: wlfw: ind_register %s err %u, fw_status %llx", g_ms, ok ? "ok" : "FAILED", err, st);
+ 		if (wm_new(&m, WLFW_HOST_CAP)) {
+-			wm_u32(&m, 0x10, 0);                /* daemon_support = 0 */
++			if (volcano) {
++				wm_u32(&m, 0x10, 1);            /* num_clients */
++				wm_u32(&m, 0x13, 1u << 2);      /* nm_modem: HOST_CSTATE */
++				wm_u8(&m, 0x14, 1);             /* bdf_support */
++				wm_u8(&m, 0x1C, 0);             /* mem_cfg_mode: default */
++			} else {
++				wm_u32(&m, 0x10, 0);            /* daemon_support = 0 */
++			}
+ 			wm_send(&m);
+ 			w_step = "host_cap sent";
+ 		}
+@@ -3372,6 +3757,10 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+ 	}
+ 	case WLFW_HOST_CAP:
+ 		LOG("wlfw: host_cap %s err %u", ok ? "ok" : "rejected (not fatal)", err);
++		if (volcano) {
++			w_step = "waiting REQUEST_MEM";
++			break;
++		}
+ 		if (wm_new(&m, WLFW_MSA_INFO)) {
+ 			uint64_t a = WLFW_MSA_BASE;
+ 			wm_tlv(&m, 0x01, &a, 8);            /* msa_addr */
+@@ -3409,7 +3798,7 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+ 			}
+ 		}
+ 		w_cap_done = true;
+-		w_step = "waiting MSA_READY ind";
++		w_step = volcano ? "board data" : "waiting MSA_READY ind";
+ 		w_start_bdf();
+ 		break;
+ 	case WLFW_BDF_DOWNLOAD:
+@@ -3421,7 +3810,16 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+ 			w_bdf_segment();
+ 		} else {
+ 			LOG("wlfw: board data sent in %u segment(s)", w_bdf_seg);
+-			if (wm_new(&m, WLFW_CAL_REPORT)) {
++			if (volcano) {
++				if (!w_regdb_done) {
++					w_regdb_done = true;
++					w_bdf_type = 4;
++					w_v_load("regdb.bin");
++				}
++				if (w_bdf_off >= w_bdf_len) {
++					w_step = "waiting FW_READY";
++				}
++			} else if (wm_new(&m, WLFW_CAL_REPORT)) {
+ 				uint8_t none = 0;
+ 				wm_tlv(&m, 0x01, &none, 1);     /* meta_data_len = 0 */
+ 				wm_send(&m);
+@@ -3429,6 +3827,10 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+ 			}
+ 		}
+ 		break;
++	case WLFW_RESPOND_MEM:
++		LOG("t=%u ms: wlfw: respond_mem %s err %u", g_ms, ok ? "ok" : "FAILED", err);
++		w_step = "waiting FW_MEM_READY";
++		break;
+ 	case WLFW_CAL_REPORT:
+ 		LOG("wlfw: cal_report %s err %u, waiting for FW_READY", ok ? "ok" : "FAILED", err);
+ 		w_step = "waiting FW_READY";
+@@ -6024,7 +6426,11 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  		LOG("cannot create SMP2P item %u", ITEM_SMP2P_OUT);
  		return;
  	}
@@ -3563,7 +3829,7 @@ index 8aa0c2f..0fe77ca 100644
  	bool glink = false;
  	for (unsigned ms = 0; seconds == 0 || ms < seconds * 1000; ms++) {
  		if (ready && !glink) {
-@@ -6095,6 +6357,96 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -6095,6 +6501,96 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  	}
  }
  
@@ -3660,7 +3926,7 @@ index 8aa0c2f..0fe77ca 100644
  /* ---------------------------------------------------------------- PAS boot */
  
  static bool
-@@ -6112,8 +6464,8 @@ modem_boot(void)
+@@ -6112,8 +6608,8 @@ modem_boot(void)
  	uint32_t min_a = ~0u, max_a = 0, hash = ~0u;
  	bool relocate = false, ok = false;
  
@@ -3671,7 +3937,7 @@ index 8aa0c2f..0fe77ca 100644
  	if (part == NULL) {
  		return false;
  	}
-@@ -6121,24 +6473,29 @@ modem_boot(void)
+@@ -6121,24 +6617,29 @@ modem_boot(void)
  		LOG("modem SMP2P item %u already exists: modem is not cold, not touching it", ITEM_SMP2P_IN);
  		return false;
  	}
@@ -3705,7 +3971,7 @@ index 8aa0c2f..0fe77ca 100644
  			goto out;
  		}
  		struct elf32_phdr *ph = (struct elf32_phdr *)(mdt + eh->e_phoff);
-@@ -6156,8 +6513,8 @@ modem_boot(void)
+@@ -6156,8 +6657,8 @@ modem_boot(void)
  			max_a = MAX(max_a, ph[i].p_paddr + ph[i].p_memsz);
  		}
  		LOG("phdrs=%u hash=%u region %08x..%08x relocate=%u", eh->e_phnum, hash, min_a, max_a, relocate);
@@ -3716,7 +3982,7 @@ index 8aa0c2f..0fe77ca 100644
  			goto out;
  		}
  
-@@ -6175,7 +6532,7 @@ modem_boot(void)
+@@ -6175,7 +6676,7 @@ modem_boot(void)
  		} else {
  			/* split firmware: the hash segment is its own .bNN file (qcom_mdt_read_metadata) */
  			char hname[16];
@@ -3725,7 +3991,7 @@ index 8aa0c2f..0fe77ca 100644
  			int64_t got = fw_read(hname, meta + hdr, ph[hash].p_filesz);
  			LOG("hash from %s: %lld of %u bytes", hname, got, ph[hash].p_filesz);
  			if (got != (int64_t)ph[hash].p_filesz) {
-@@ -6214,7 +6571,7 @@ modem_boot(void)
+@@ -6214,7 +6715,7 @@ modem_boot(void)
  			uint8_t *dst = (uint8_t *)m->getVirtualAddress() + off;
  			int64_t got = 0;
  			if (ph[i].p_filesz != 0) {
@@ -3734,7 +4000,7 @@ index 8aa0c2f..0fe77ca 100644
  				got = fw_read(name, dst, ph[i].p_filesz);
  				if (got != (int64_t)ph[i].p_filesz) {
  					LOG("%s: %lld of %u bytes", name, got, ph[i].p_filesz);
-@@ -6277,14 +6634,19 @@ topaz_soc_map(void)
+@@ -6277,14 +6778,19 @@ topaz_soc_map(void)
  	uint8_t probe[16];
  	int err = EAGAIN;
  	for (int i = 0; i < 120 && err == EAGAIN; i++) {
@@ -3756,7 +4022,7 @@ index 8aa0c2f..0fe77ca 100644
  	tcsr_mutex = (volatile uint8_t *)ml_io_map(TCSR_MUTEX_PA, 0x4000);
  	if (err != 0) {
  		LOG("partition %s: %d", fw_part, err);
-@@ -6374,12 +6736,12 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -6374,12 +6880,12 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
  		return;
  	}
  	LOG("SMEM version %u", *(volatile uint32_t *)(smem + 64 + 7 * 4) >> 16);
@@ -3771,7 +4037,7 @@ index 8aa0c2f..0fe77ca 100644
  	}
  	/* keep the mappings: the modem uses SMEM from now on */
  	thread_terminate(current_thread());
-@@ -6394,11 +6756,30 @@ topaz_modem_init(void)
+@@ -6394,11 +6900,31 @@ topaz_modem_init(void)
  	uint32_t on = 0;
  	thread_t thread;
  
@@ -3780,7 +4046,8 @@ index 8aa0c2f..0fe77ca 100644
 +	if (PE_parse_boot_argn("wpss", &wpss, sizeof(wpss)) && wpss != 0 && !started) {
 +		volcano = true;
 +		v_pas_id = 6;
-+		v_pool_base = 0xC0000000ull;            /* free DDR below 4 GiB (xnu has 0x9_00000000+) */
++		v_pool_base = 0xC0000000ull;
++		v_pool_size = 0x04000000ull;            /* free DDR below 4 GiB (xnu has 0x9_00000000+) */
 +		v_smem_pa = 0x81d00000ull;
 +		v_tcsr_pa = 0x01f40000ull;
 +		v_item_out = 616;
