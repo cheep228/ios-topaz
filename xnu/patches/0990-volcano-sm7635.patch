@@ -3166,7 +3166,7 @@ index 1d3ee17..62438a2 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..90b101a 100644
+index 8aa0c2f..2b3c152 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -28,7 +28,7 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -4286,7 +4286,86 @@ index 8aa0c2f..90b101a 100644
  			htc_connect(SVC_HTT_DATA);          /* ath10k_core_start: htt, then wmi */
  		} else if (msg == HTC_MSG_CONNECT_RESP && plen >= 8) {
  			uint16_t svc, max;
-@@ -6003,6 +6777,9 @@ static void
+@@ -4194,6 +4968,8 @@ static volatile uint32_t api_scans_done;
+ static bool scan_started, scanning;
+ static unsigned next_scan_ms;
+ 
++static void wev_table(void);
++
+ static bool
+ scan_send_start(void)
+ {
+@@ -4479,8 +5255,16 @@ scan_event(const uint8_t *t, uint32_t len)
+ 	if (e[0] == 0x001) {
+ 		LOG("t=%u ms: scan: STARTED", g_ms);
+ 	}
++	if (volcano) {
++		for (int k = 0; k < 3; k++) {
++			LOG("t=%u ms: scan ev %x reason %x freq %u req %x id %x vdev %u", g_ms, e[0], e[1], e[2], e[3], e[4], e[5]);
++		}
++	}
+ 	if (e[0] == 0x002 || e[0] == 0x040 || e[0] == 0x010) {
+ 		scanning = false;
++		if (volcano) {
++			wev_table();
++		}
+ 		scans++;
+ 		LOG("t=%u ms: *** scan %u done (event %x): %u networks, %u beacons/probe responses, %u htt msdus ***", g_ms, scans, e[0], nbss, scan_frames, htt_msdus);
+ 		next_scan_ms = scans < 3 ? g_ms + 10000 : 0;
+@@ -5848,6 +6632,42 @@ w_tx_pump(void)
+ 	}
+ }
+ 
++static uint32_t wev_id[32], wev_n[32], wev_cnt;
++
++static void
++wev_table(void)
++{
++	for (uint32_t i = 0; i < wev_cnt; i += 4) {
++		for (int k = 0; k < 3; k++) {
++			LOG("wmi ev: %x x%u, %x x%u, %x x%u, %x x%u", wev_id[i], wev_n[i], wev_id[i + 1], wev_n[i + 1],
++			    wev_id[i + 2], wev_n[i + 2], wev_id[i + 3], wev_n[i + 3]);
++		}
++	}
++}
++
++static void
++wev_note(uint32_t id, const uint8_t *d, uint32_t len)
++{
++	for (uint32_t i = 0; i < wev_cnt; i++) {
++		if (wev_id[i] == id) {
++			wev_n[i]++;
++			return;
++		}
++	}
++	if (wev_cnt >= 32) {
++		return;
++	}
++	wev_id[wev_cnt] = id;
++	wev_n[wev_cnt++] = 1;
++	uint8_t b[24] = {};
++	memcpy(b, d, MIN(len, (uint32_t)sizeof(b)));
++	for (int k = 0; k < 3; k++) {
++		LOG("t=%u ms: wmi new ev %x len %u: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
++		    g_ms, id, len, b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
++		    b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]);
++	}
++}
++
+ static void
+ wmi_rx(const uint8_t *d, uint32_t len)
+ {
+@@ -5857,6 +6677,9 @@ wmi_rx(const uint8_t *d, uint32_t len)
+ 	}
+ 	memcpy(&id, d, 4);
+ 	id &= 0xFFFFFF;
++	if (volcano) {
++		wev_note(id, d, len);
++	}
+ 	switch (id) {
+ 	case WMI_EV_SERVICE_AVAILABLE: {
+ 		uint16_t tag;
+@@ -6003,6 +6826,9 @@ static void
  svc_summary(void)
  {
  	LOG("WLFW: %s%s", w_step, w_fw_ready ? " (firmware ready)" : "");
@@ -4296,7 +4375,7 @@ index 8aa0c2f..90b101a 100644
  	LOG("services: pd-mapper %u reqs; tftp %u reqs (%u missing, %u writes); rmtfs reads %u writes %u (not kept) errors %u",
  	    pd_reqs, tftp_reqs, tftp_missing, tftp_writes, rmtfs_reads, rmtfs_writes, rmtfs_err);
  }
-@@ -6024,7 +6801,11 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -6024,7 +6850,11 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  		LOG("cannot create SMP2P item %u", ITEM_SMP2P_OUT);
  		return;
  	}
@@ -4309,7 +4388,7 @@ index 8aa0c2f..90b101a 100644
  	bool glink = false;
  	for (unsigned ms = 0; seconds == 0 || ms < seconds * 1000; ms++) {
  		if (ready && !glink) {
-@@ -6095,6 +6876,96 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -6095,6 +6925,96 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  	}
  }
  
@@ -4406,7 +4485,7 @@ index 8aa0c2f..90b101a 100644
  /* ---------------------------------------------------------------- PAS boot */
  
  static bool
-@@ -6112,8 +6983,8 @@ modem_boot(void)
+@@ -6112,8 +7032,8 @@ modem_boot(void)
  	uint32_t min_a = ~0u, max_a = 0, hash = ~0u;
  	bool relocate = false, ok = false;
  
@@ -4417,7 +4496,7 @@ index 8aa0c2f..90b101a 100644
  	if (part == NULL) {
  		return false;
  	}
-@@ -6121,24 +6992,29 @@ modem_boot(void)
+@@ -6121,24 +7041,29 @@ modem_boot(void)
  		LOG("modem SMP2P item %u already exists: modem is not cold, not touching it", ITEM_SMP2P_IN);
  		return false;
  	}
@@ -4451,7 +4530,7 @@ index 8aa0c2f..90b101a 100644
  			goto out;
  		}
  		struct elf32_phdr *ph = (struct elf32_phdr *)(mdt + eh->e_phoff);
-@@ -6156,8 +7032,8 @@ modem_boot(void)
+@@ -6156,8 +7081,8 @@ modem_boot(void)
  			max_a = MAX(max_a, ph[i].p_paddr + ph[i].p_memsz);
  		}
  		LOG("phdrs=%u hash=%u region %08x..%08x relocate=%u", eh->e_phnum, hash, min_a, max_a, relocate);
@@ -4462,7 +4541,7 @@ index 8aa0c2f..90b101a 100644
  			goto out;
  		}
  
-@@ -6175,7 +7051,7 @@ modem_boot(void)
+@@ -6175,7 +7100,7 @@ modem_boot(void)
  		} else {
  			/* split firmware: the hash segment is its own .bNN file (qcom_mdt_read_metadata) */
  			char hname[16];
@@ -4471,7 +4550,7 @@ index 8aa0c2f..90b101a 100644
  			int64_t got = fw_read(hname, meta + hdr, ph[hash].p_filesz);
  			LOG("hash from %s: %lld of %u bytes", hname, got, ph[hash].p_filesz);
  			if (got != (int64_t)ph[hash].p_filesz) {
-@@ -6214,7 +7090,7 @@ modem_boot(void)
+@@ -6214,7 +7139,7 @@ modem_boot(void)
  			uint8_t *dst = (uint8_t *)m->getVirtualAddress() + off;
  			int64_t got = 0;
  			if (ph[i].p_filesz != 0) {
@@ -4480,7 +4559,7 @@ index 8aa0c2f..90b101a 100644
  				got = fw_read(name, dst, ph[i].p_filesz);
  				if (got != (int64_t)ph[i].p_filesz) {
  					LOG("%s: %lld of %u bytes", name, got, ph[i].p_filesz);
-@@ -6277,14 +7153,19 @@ topaz_soc_map(void)
+@@ -6277,14 +7202,19 @@ topaz_soc_map(void)
  	uint8_t probe[16];
  	int err = EAGAIN;
  	for (int i = 0; i < 120 && err == EAGAIN; i++) {
@@ -4502,7 +4581,7 @@ index 8aa0c2f..90b101a 100644
  	tcsr_mutex = (volatile uint8_t *)ml_io_map(TCSR_MUTEX_PA, 0x4000);
  	if (err != 0) {
  		LOG("partition %s: %d", fw_part, err);
-@@ -6374,12 +7255,19 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -6374,12 +7304,19 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
  		return;
  	}
  	LOG("SMEM version %u", *(volatile uint32_t *)(smem + 64 + 7 * 4) >> 16);
@@ -4524,7 +4603,7 @@ index 8aa0c2f..90b101a 100644
  	}
  	/* keep the mappings: the modem uses SMEM from now on */
  	thread_terminate(current_thread());
-@@ -6394,11 +7282,31 @@ topaz_modem_init(void)
+@@ -6394,11 +7331,31 @@ topaz_modem_init(void)
  	uint32_t on = 0;
  	thread_t thread;
  
