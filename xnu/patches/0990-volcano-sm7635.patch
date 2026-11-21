@@ -3165,6 +3165,593 @@ index 1d3ee17..62438a2 100644
 +	IOLog("SHOT end\n");
 +}
 +#endif /* VOLCANO */
+diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
+index 8aa0c2f..1ff18d8 100644
+--- a/iokit/Kernel/arm/TopazModem.cpp
++++ b/iokit/Kernel/arm/TopazModem.cpp
+@@ -28,7 +28,7 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+ #define LOG(fmt, ...)       IOLog("TopazModem: " fmt "\n", ##__VA_ARGS__)
+ 
+-#define PAS_ID_MODEM        4
++#define PAS_ID_MODEM        v_pas_id
+ #define SCM_FN(svc, cmd)    (0x42000000u | ((uint32_t)(svc) << 8) | (uint32_t)(cmd))
+ #define SCM_SVC_PIL         0x02
+ #define PIL_INIT_IMAGE      0x01
+@@ -44,22 +44,45 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ #define MDT_RELOCATABLE     (1u << 27)
+ 
+ /* middle DDR bank, RAM the kernel does not manage; below 0xF0000000 for TZ/the modem */
+-#define MODEM_POOL_BASE     0xE0000000ull
++#define MODEM_POOL_BASE     v_pool_base
+ #define MODEM_POOL_SIZE     0x01000000ull       /* 16 MB: metadata, SCM args, rmtfs, CE rings, WMI memory */
+ 
+-#define SMEM_PA             0x46000000ull
++#define SMEM_PA             v_smem_pa
+ #define SMEM_SIZE           0x00200000u
+ #define SMEM_GLOBAL_HOST    0xFFFE
+-#define TCSR_MUTEX_PA       0x00340000ull       /* qcom,tcsr-mutex, stride 0x1000 */
++#define TCSR_MUTEX_PA       v_tcsr_pa           /* qcom,tcsr-mutex, stride 0x1000 */
+ #define SMEM_HWLOCK         3
+ #define HWLOCK_APPS_ID      1
+ #define APCS_PA             0x0F111000ull
+ #define APCS_IPC            8                   /* apcs_glb mailbox */
+ #define MPSS_SMP2P_BIT      14
++#define GLINK_IRQ_BIT       12
++#define QMP_IRQ_BIT         99                  /* volcano only: the AOP */
++
++#define ITEM_SMP2P_OUT      v_item_out          /* apps -> modem */
++#define ITEM_SMP2P_IN       v_item_in           /* modem -> apps */
++#define ITEM_MSS_CRASH      v_item_crash
++#define R_PID               v_rpid              /* the remote's SMEM host / SMP2P pid */
+ 
+-#define ITEM_SMP2P_OUT      428                 /* apps -> modem */
+-#define ITEM_SMP2P_IN       435                 /* modem -> apps */
+-#define ITEM_MSS_CRASH      421
++/*
++ * volcano (SM7635, boot-arg wpss=1): the same flow for the WPSS (WLAN subsystem, WCN6750
++ * firmware qca6750/wpss.*). Differences: SMEM 0x81d00000, TCSR mutex 0x1f40000, remote pid 13,
++ * SMP2P items 616 out / 617 in, doorbells through the IPCC (client 0x18 WPSS: signal 0 GLINK,
++ * 2 SMP2P), PAS id 6, carveout 0x9bb00000+0x1900000, the firmware from the FAT16 volume of
++ * modem_b (read by path, no table), the AOP told "load_state on" over QMP before the boot.
++ */
++static bool volcano;
++static uint32_t v_pas_id = 4;
++static uint64_t v_pool_base = 0xE0000000ull, v_smem_pa = 0x46000000ull, v_tcsr_pa = 0x00340000ull;
++static uint16_t v_item_out = 428, v_item_in = 435, v_item_crash = 421, v_rpid = 1;
++static uint32_t v_carve = 0x4AB00000u, v_carve_size = 0x6900000u;
++static const char *v_fw = "modem";
++#define IPCC_PA             0x00405000ull
++#define IPCC_SEND_ID        0x0c
++#define IPCC_CLIENT_AOP     0
++#define IPCC_CLIENT_WPSS    0x18
++#define QMP_PA              0x0c300000ull
++static volatile uint8_t *ipcc;
+ #define SMP2P_MAGIC         0x504D5324u         /* "$SMP" */
+ #define SMP2P_MAX_ENTRY     16
+ 
+@@ -208,6 +231,165 @@ static const struct { const char *name; uint32_t off, size, crc; } fw_files[] =
+ 	{ "modem.mdt", 0x4a6d000, 0x238c, 0x8742d22b },
+ };
+ 
++/* ---- FAT16 (volcano modem_b: 4 KiB sectors, 16 KiB clusters) */
++static struct {
++	bool ok;
++	uint32_t csize, root_off, root_len, data_off, nfat;
++	uint16_t *fat;
++} fat;
++
++static bool
++fat_init(void)
++{
++	uint8_t bs[64];
++	if (fat.ok) {
++		return true;
++	}
++	if (sweet_ufs_read_part(fw_part, 0, bs, sizeof(bs)) != 0 || memcmp(bs + 54, "FAT16", 5) != 0) {
++		LOG("%s: no FAT16 boot sector", fw_part);
++		return false;
++	}
++	uint32_t bps = bs[11] | (bs[12] << 8), spc = bs[13], rsv = bs[14] | (bs[15] << 8), nf = bs[16];
++	uint32_t re = bs[17] | (bs[18] << 8), fsz = bs[22] | (bs[23] << 8);
++	if (bps < 512 || spc == 0 || nf == 0 || fsz == 0 || fsz * bps > 0x100000) {
++		LOG("%s: odd FAT16 (bps %u spc %u fats %u fatsz %u)", fw_part, bps, spc, nf, fsz);
++		return false;
++	}
++	fat.csize = bps * spc;
++	fat.nfat = fsz * bps / 2;
++	fat.root_off = (rsv + nf * fsz) * bps;
++	fat.root_len = re * 32;
++	fat.data_off = fat.root_off + ((fat.root_len + bps - 1) / bps) * bps;
++	fat.fat = (uint16_t *)IOMalloc(fsz * bps);
++	if (fat.fat == NULL || sweet_ufs_read_part(fw_part, rsv * bps, fat.fat, fsz * bps) != 0) {
++		LOG("%s: cannot read the FAT", fw_part);
++		return false;
++	}
++	fat.ok = true;
++	LOG("%s: FAT16, cluster %u bytes, data at %#x", fw_part, fat.csize, fat.data_off);
++	return true;
++}
++
++/* "wpss.b00" -> "WPSS    B00" */
++static void
++fat_83(const char *c, size_t n, char out[11])
++{
++	memset(out, ' ', 11);
++	size_t i = 0, o = 0;
++	for (; i < n && c[i] != '.' && o < 8; i++) {
++		out[o++] = (c[i] >= 'a' && c[i] <= 'z') ? c[i] - 32 : c[i];
++	}
++	while (i < n && c[i] != '.') {
++		i++;
++	}
++	for (i++, o = 8; i < n && o < 11; i++) {
++		out[o++] = (c[i] >= 'a' && c[i] <= 'z') ? c[i] - 32 : c[i];
++	}
++}
++
++/* look name up in the directory at cluster cl (0: root): first cluster, size */
++static bool
++fat_lookup(uint32_t cl, const char name[11], uint32_t *first, uint32_t *size)
++{
++	uint8_t *buf = (uint8_t *)IOMalloc(fat.csize > fat.root_len ? fat.csize : fat.root_len);
++	bool found = false, end = false;
++	if (buf == NULL) {
++		return false;
++	}
++	for (unsigned hops = 0; !found && !end && hops < 4096; hops++) {
++		uint32_t len = cl == 0 ? fat.root_len : fat.csize;
++		uint64_t off = cl == 0 ? fat.root_off : fat.data_off + (uint64_t)(cl - 2) * fat.csize;
++		if (sweet_ufs_read_part(fw_part, off, buf, len) != 0) {
++			break;
++		}
++		for (uint32_t e = 0; e + 32 <= len; e += 32) {
++			uint8_t *d = buf + e;
++			if (d[0] == 0) {
++				end = true;
++				break;
++			}
++			if (d[0] == 0xE5 || d[11] == 0x0F || (d[11] & 0x08)) {
++				continue;
++			}
++			if (memcmp(d, name, 11) == 0) {
++				*first = d[26] | (d[27] << 8);
++				*size = d[28] | (d[29] << 8) | (d[30] << 16) | ((uint32_t)d[31] << 24);
++				found = true;
++				break;
++			}
++		}
++		if (cl == 0 || found || end) {
++			break;
++		}
++		cl = cl < fat.nfat ? fat.fat[cl] : 0xFFFF;
++		if (cl < 2 || cl >= 0xFFF8) {
++			break;
++		}
++	}
++	IOFree(buf, fat.csize > fat.root_len ? fat.csize : fat.root_len);
++	return found;
++}
++
++/* "image/qca6750/wpss.b00": first cluster and size */
++static bool
++fat_path(const char *path, uint32_t *first, uint32_t *size)
++{
++	uint32_t cl = 0, sz = 0;
++	if (!fat_init()) {
++		return false;
++	}
++	for (const char *c = path; *c;) {
++		const char *e = strchr(c, '/');
++		size_t n = e ? (size_t)(e - c) : strlen(c);
++		char nm[11];
++		fat_83(c, n, nm);
++		if (!fat_lookup(cl, nm, &cl, &sz)) {
++			return false;
++		}
++		c += n + (e ? 1 : 0);
++	}
++	*first = cl;
++	*size = sz;
++	return true;
++}
++
++/* whole file into dst, contiguous cluster runs in one read */
++static int64_t
++fat_read(const char *path, void *dst, uint64_t max)
++{
++	uint32_t cl, size;
++	if (!fat_path(path, &cl, &size)) {
++		LOG("%s: not found on %s", path, fw_part);
++		return -1;
++	}
++	if (size > max) {
++		LOG("%s: %u bytes, room for %llu", path, size, max);
++		return -1;
++	}
++	uint64_t done = 0;
++	while (done < size && cl >= 2 && cl < 0xFFF8) {
++		uint32_t run = 1;
++		while (cl + run - 1 < fat.nfat && fat.fat[cl + run - 1] == cl + run && (uint64_t)run * fat.csize < size - done) {
++			run++;
++		}
++		uint64_t take = MIN((uint64_t)run * fat.csize, size - done);
++		if (sweet_ufs_read_part(fw_part, fat.data_off + (uint64_t)(cl - 2) * fat.csize, (uint8_t *)dst + done, take) != 0) {
++			LOG("%s: read error", path);
++			return -1;
++		}
++		done += take;
++		uint32_t last = cl + run - 1;
++		cl = last < fat.nfat ? fat.fat[last] : 0xFFFF;
++	}
++	return done == size ? (int64_t)size : -1;
++}
++
++static void
++fw_vpath(const char *name, char *out, size_t max)
++{
++	snprintf(out, max, "image/qca6750/%s", name);
++}
++
+ static int
+ fw_find(const char *name)
+ {
+@@ -222,6 +404,12 @@ fw_find(const char *name)
+ static int64_t
+ fw_size(const char *name)
+ {
++	if (volcano) {
++		char path[64];
++		uint32_t cl, size;
++		fw_vpath(name, path, sizeof(path));
++		return fat_path(path, &cl, &size) ? (int64_t)size : -1;
++	}
+ 	int i = fw_find(name);
+ 	return i < 0 ? -1 : (int64_t)fw_files[i].size;
+ }
+@@ -230,6 +418,11 @@ fw_size(const char *name)
+ static int64_t
+ fw_read(const char *name, void *dst, uint64_t max)
+ {
++	if (volcano) {
++		char path[64];
++		fw_vpath(name, path, sizeof(path));
++		return fat_read(path, dst, max);
++	}
+ 	int i = fw_find(name), err;
+ 
+ 	if (i < 0 || fw_files[i].size > max) {
+@@ -359,14 +552,27 @@ smem_alloc(struct smem_part_hdr *p, uint16_t item, uint32_t size)
+ 
+ /* ---------------------------------------------------------------- SMP2P */
+ 
++/* topaz: APCS bit; volcano: IPCC signal to the WPSS (GLINK 0, SMP2P 2) or the AOP */
+ static void
+-smp2p_kick(void)
++doorbell(unsigned bit)
+ {
+ 	mb();
+-	*(volatile uint32_t *)(apcs + APCS_IPC) = 1u << MPSS_SMP2P_BIT;
++	if (volcano) {
++		uint32_t v = bit == GLINK_IRQ_BIT ? (IPCC_CLIENT_WPSS << 16) | 0 :
++		    bit == MPSS_SMP2P_BIT ? (IPCC_CLIENT_WPSS << 16) | 2 : (IPCC_CLIENT_AOP << 16) | 0;
++		*(volatile uint32_t *)(ipcc + IPCC_SEND_ID) = v;
++	} else {
++		*(volatile uint32_t *)(apcs + APCS_IPC) = 1u << bit;
++	}
+ 	mb();
+ }
+ 
++static void
++smp2p_kick(void)
++{
++	doorbell(MPSS_SMP2P_BIT);
++}
++
+ static struct smp2p_hdr *
+ smp2p_create_out(struct smem_part_hdr *p)
+ {
+@@ -378,7 +584,7 @@ smp2p_create_out(struct smem_part_hdr *p)
+ 	}
+ 	o->magic = SMP2P_MAGIC;
+ 	o->local_pid = 0;
+-	o->remote_pid = 1;
++	o->remote_pid = R_PID;
+ 	o->total = SMP2P_MAX_ENTRY;
+ 	o->valid = 0;
+ 	o->features[0] = 1;                         /* SSR_ACK */
+@@ -443,7 +649,6 @@ extern "C" void read_random(void *buffer, unsigned int numBytes);
+ #define SMEM_GLINK_FIFO_TX  479
+ #define SMEM_GLINK_FIFO_RX  480
+ #define GLINK_TX_SIZE       0x4000u
+-#define GLINK_IRQ_BIT       12
+ #define GLINK_FEATURES      1                   /* INTENT_REUSE */
+ 
+ #define CMD_VERSION         0
+@@ -574,8 +779,7 @@ tx_write(const void *hdr, uint32_t hlen, const void *data, uint32_t dlen)
+ 	mb();
+ 	g_desc[1] = head;
+ 	mb();
+-	*(volatile uint32_t *)(apcs + APCS_IPC) = 1u << GLINK_IRQ_BIT;
+-	mb();
++	doorbell(GLINK_IRQ_BIT);
+ 	g_tx_msgs++;
+ 	return true;
+ }
+@@ -907,8 +1111,7 @@ rx_one(void)
+ 		break;
+ 	case CMD_READ_NOTIF:
+ 		rx_advance(8);
+-		*(volatile uint32_t *)(apcs + APCS_IPC) = 1u << GLINK_IRQ_BIT;
+-		mb();
++		doorbell(GLINK_IRQ_BIT);
+ 		break;
+ 	case CMD_TX_DATA:
+ 	case CMD_TX_DATA_CONT: {
+@@ -2360,6 +2563,9 @@ static const struct { const char *path; uint32_t size; uint16_t ext, next; } fw_
+ static int
+ fw_all_find(const char *path)
+ {
++	if (volcano) {
++		return -1;                              /* the table is topaz' modem_a */
++	}
+ 	for (unsigned i = 0; i < sizeof(fw_all) / sizeof(fw_all[0]); i++) {
+ 		if (strcmp(fw_all[i].path, path) == 0) {
+ 			return (int)i;
+@@ -6024,7 +6230,11 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+ 		LOG("cannot create SMP2P item %u", ITEM_SMP2P_OUT);
+ 		return;
+ 	}
+-	ipa_out = smp2p_add_out(out, "ipa", 0);
++	if (volcano) {
++		(void)smp2p_add_out(out, "master-kernel", 0);   /* q6v5 "stop" state */
++	} else {
++		ipa_out = smp2p_add_out(out, "ipa", 0);
++	}
+ 	bool glink = false;
+ 	for (unsigned ms = 0; seconds == 0 || ms < seconds * 1000; ms++) {
+ 		if (ready && !glink) {
+@@ -6095,6 +6305,96 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+ 	}
+ }
+ 
++/* ---------------------------------------------------------------- AOP QMP (volcano) */
++
++#define QMP_MAGIC           0x4d41494cu
++#define QMP_UP              0x0000ffffu
++#define QMP_UCORE_LINK      0x0c
++#define QMP_UCORE_LINK_ACK  0x10
++#define QMP_UCORE_CH        0x14
++#define QMP_UCORE_CH_ACK    0x18
++#define QMP_MCORE_LINK      0x24
++#define QMP_MCORE_LINK_ACK  0x28
++#define QMP_MCORE_CH        0x2c
++#define QMP_MCORE_CH_ACK    0x30
++#define QMP_MCORE_SIZE      0x34
++#define QMP_MCORE_OFF       0x38
++
++static volatile uint8_t *qmp;
++
++static inline uint32_t qr(uint32_t o) { return *(volatile uint32_t *)(qmp + o); }
++static inline void qw(uint32_t o, uint32_t v) { mb(); *(volatile uint32_t *)(qmp + o) = v; mb(); }
++
++static bool
++qmp_wait(uint32_t o, uint32_t want)
++{
++	for (int i = 0; i < 1000; i++) {
++		if (qr(o) == want) {
++			return true;
++		}
++		IOSleep(1);
++	}
++	return false;
++}
++
++static bool
++qmp_open(void)
++{
++	static bool open;
++	if (open) {
++		return true;
++	}
++	if (qmp == NULL) {
++		qmp = (volatile uint8_t *)ml_io_map(QMP_PA, 0x1000);
++	}
++	if (qmp == NULL || qr(0) != QMP_MAGIC || qr(4) != 1) {
++		LOG("qmp: no AOP message RAM (magic %x version %x)", qmp ? qr(0) : 0, qmp ? qr(4) : 0);
++		return false;
++	}
++	LOG("qmp: mcore link %x/%x ch %x/%x, ucore link %x ch %x, mbox %x+%x", qr(QMP_MCORE_LINK), qr(QMP_MCORE_LINK_ACK),
++	    qr(QMP_MCORE_CH), qr(QMP_MCORE_CH_ACK), qr(QMP_UCORE_LINK), qr(QMP_UCORE_CH), qr(QMP_MCORE_OFF), qr(QMP_MCORE_SIZE));
++	qw(QMP_UCORE_LINK_ACK, qr(QMP_UCORE_LINK));
++	qw(QMP_MCORE_LINK, QMP_UP);
++	doorbell(QMP_IRQ_BIT);
++	bool a = qmp_wait(QMP_MCORE_LINK_ACK, QMP_UP);
++	qw(QMP_MCORE_CH, QMP_UP);
++	doorbell(QMP_IRQ_BIT);
++	bool b = qmp_wait(QMP_UCORE_CH, QMP_UP);
++	qw(QMP_UCORE_CH_ACK, QMP_UP);
++	doorbell(QMP_IRQ_BIT);
++	bool c = qmp_wait(QMP_MCORE_CH_ACK, QMP_UP);
++	LOG("qmp: link ack %u, ucore channel %u, channel ack %u", a, b, c);
++	open = a && b && c;
++	return open;
++}
++
++static bool
++qmp_send(const char *msg)
++{
++	if (!qmp_open()) {
++		return false;
++	}
++	uint32_t off = qr(QMP_MCORE_OFF), size = qr(QMP_MCORE_SIZE), len = (uint32_t)strlen(msg) + 1;
++	uint32_t padded = (len + 3) & ~3u;
++	if (size < 8 || padded > size - 4 || off + size > 0x1000) {
++		LOG("qmp: message too long (%u, mbox %u)", len, size);
++		return false;
++	}
++	for (uint32_t i = 0; i < padded; i += 4) {
++		uint32_t w = 0;
++		memcpy(&w, msg + i, MIN(4u, len > i ? len - i : 0));
++		qw(off + 4 + i, w);
++	}
++	qw(off, padded);
++	doorbell(QMP_IRQ_BIT);
++	bool done = qmp_wait(off, 0);
++	LOG("qmp: \"%s\": %s", msg, done ? "taken" : "TIMEOUT");
++	if (!done) {
++		qw(off, 0);
++	}
++	return done;
++}
++
+ /* ---------------------------------------------------------------- PAS boot */
+ 
+ static bool
+@@ -6112,8 +6412,8 @@ modem_boot(void)
+ 	uint32_t min_a = ~0u, max_a = 0, hash = ~0u;
+ 	bool relocate = false, ok = false;
+ 
+-	struct smem_part_hdr *part = smem_partition(0, 1);
+-	LOG("SMEM apps<->modem partition %p", part);
++	struct smem_part_hdr *part = smem_partition(0, R_PID);
++	LOG("SMEM apps<->%s partition (pid %u) %p", v_fw, R_PID, part);
+ 	if (part == NULL) {
+ 		return false;
+ 	}
+@@ -6121,24 +6421,29 @@ modem_boot(void)
+ 		LOG("modem SMP2P item %u already exists: modem is not cold, not touching it", ITEM_SMP2P_IN);
+ 		return false;
+ 	}
++	if (volcano && !qmp_send("{class: image, res: load_state, name: wpss, val: on}")) {
++		LOG("AOP did not take load_state: trying the boot anyway");
++	}
+ 	st = scm(SCM_FN(SCM_SVC_PIL, PIL_IS_SUPPORTED), 1, PAS_ID_MODEM, 0, 0, &res);
+ 	LOG("PAS id %u supported: ret=%llx res=%llx", PAS_ID_MODEM, st, res);
+ 	/* informational only: on topaz TZ answers res=0 here, init_image decides */
+ 
+-	mdt_size = fw_size("modem.mdt");
++	char mdt_name[16];
++	snprintf(mdt_name, sizeof(mdt_name), "%s.mdt", v_fw);
++	mdt_size = fw_size(mdt_name);
+ 	if (mdt_size <= (int64_t)sizeof(struct elf32_ehdr) || mdt_size > 0x100000) {
+-		LOG("modem.mdt: size %lld", mdt_size);
++		LOG("%s: size %lld", mdt_name, mdt_size);
+ 		return false;
+ 	}
+ 	mdt = (uint8_t *)IOMalloc(mdt_size);
+-	if (mdt == NULL || fw_read("modem.mdt", mdt, mdt_size) != mdt_size) {
++	if (mdt == NULL || fw_read(mdt_name, mdt, mdt_size) != mdt_size) {
+ 		goto out;
+ 	}
+ 	{
+ 		struct elf32_ehdr *eh = (struct elf32_ehdr *)mdt;
+ 		if (memcmp(eh->e_ident, "\x7f" "ELF", 4) != 0 ||
+ 		    eh->e_phoff + (uint64_t)eh->e_phnum * sizeof(struct elf32_phdr) > (uint64_t)mdt_size) {
+-			LOG("modem.mdt: bad ELF header");
++			LOG("%s: bad ELF header", mdt_name);
+ 			goto out;
+ 		}
+ 		struct elf32_phdr *ph = (struct elf32_phdr *)(mdt + eh->e_phoff);
+@@ -6156,8 +6461,8 @@ modem_boot(void)
+ 			max_a = MAX(max_a, ph[i].p_paddr + ph[i].p_memsz);
+ 		}
+ 		LOG("phdrs=%u hash=%u region %08x..%08x relocate=%u", eh->e_phnum, hash, min_a, max_a, relocate);
+-		if (hash == ~0u || min_a < 0x4AB00000u || max_a > 0x4AB00000u + 0x6900000u) {
+-			LOG("unexpected layout (carveout is 0x4ab00000+0x6900000)");
++		if (hash == ~0u || min_a < v_carve || max_a > v_carve + v_carve_size) {
++			LOG("unexpected layout (carveout is %#x+%#x)", v_carve, v_carve_size);
+ 			goto out;
+ 		}
+ 
+@@ -6175,7 +6480,7 @@ modem_boot(void)
+ 		} else {
+ 			/* split firmware: the hash segment is its own .bNN file (qcom_mdt_read_metadata) */
+ 			char hname[16];
+-			snprintf(hname, sizeof(hname), "modem.b%02u", hash);
++			snprintf(hname, sizeof(hname), "%s.b%02u", v_fw, hash);
+ 			int64_t got = fw_read(hname, meta + hdr, ph[hash].p_filesz);
+ 			LOG("hash from %s: %lld of %u bytes", hname, got, ph[hash].p_filesz);
+ 			if (got != (int64_t)ph[hash].p_filesz) {
+@@ -6214,7 +6519,7 @@ modem_boot(void)
+ 			uint8_t *dst = (uint8_t *)m->getVirtualAddress() + off;
+ 			int64_t got = 0;
+ 			if (ph[i].p_filesz != 0) {
+-				snprintf(name, sizeof(name), "modem.b%02u", i);
++				snprintf(name, sizeof(name), "%s.b%02u", v_fw, i);
+ 				got = fw_read(name, dst, ph[i].p_filesz);
+ 				if (got != (int64_t)ph[i].p_filesz) {
+ 					LOG("%s: %lld of %u bytes", name, got, ph[i].p_filesz);
+@@ -6277,14 +6582,19 @@ topaz_soc_map(void)
+ 	uint8_t probe[16];
+ 	int err = EAGAIN;
+ 	for (int i = 0; i < 120 && err == EAGAIN; i++) {
+-		err = sweet_ufs_read_part(fw_part, fw_files[0].off, probe, sizeof(probe));
++		err = sweet_ufs_read_part(fw_part, volcano ? 0 : fw_files[0].off, probe, sizeof(probe));
+ 		if (err == EAGAIN) {
+ 			IOSleep(500);
+ 		}
+ 	}
+ 	smem_map = err == 0 ? map_phys(SMEM_PA, SMEM_SIZE, true) : NULL;
+ 	pool_map = err == 0 ? map_phys(MODEM_POOL_BASE, MODEM_POOL_SIZE, true) : NULL;
+-	apcs = (volatile uint8_t *)ml_io_map(APCS_PA, 0x1000);
++	if (volcano) {
++		ipcc = (volatile uint8_t *)ml_io_map(IPCC_PA, 0x1000);
++		apcs = ipcc;                            /* not used: doorbell() goes to the IPCC */
++	} else {
++		apcs = (volatile uint8_t *)ml_io_map(APCS_PA, 0x1000);
++	}
+ 	tcsr_mutex = (volatile uint8_t *)ml_io_map(TCSR_MUTEX_PA, 0x4000);
+ 	if (err != 0) {
+ 		LOG("partition %s: %d", fw_part, err);
+@@ -6374,12 +6684,12 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
+ 		return;
+ 	}
+ 	LOG("SMEM version %u", *(volatile uint32_t *)(smem + 64 + 7 * 4) >> 16);
+-	if (wifi_enabled() && !smmu_identity(WLAN_SID, WLAN_SID_MASK, "WLAN")) {
++	if (!volcano && wifi_enabled() && !smmu_identity(WLAN_SID, WLAN_SID_MASK, "WLAN")) {
+ 		LOG("wifi: no SMMU stream for WLAN, the radio stays off");
+ 		wifi_on = 0;
+ 	}
+ 	if (modem_boot()) {
+-		modem_watch(smem_partition(0, 1), watch);
++		modem_watch(smem_partition(0, R_PID), watch);
+ 	}
+ 	/* keep the mappings: the modem uses SMEM from now on */
+ 	thread_terminate(current_thread());
+@@ -6394,11 +6704,30 @@ topaz_modem_init(void)
+ 	uint32_t on = 0;
+ 	thread_t thread;
+ 
+-	if (started || !PE_parse_boot_argn("modem", &on, sizeof(on)) || on == 0) {
++	uint32_t wpss = 0;
++	if (PE_parse_boot_argn("wpss", &wpss, sizeof(wpss)) && wpss != 0 && !started) {
++		volcano = true;
++		v_pas_id = 6;
++		v_pool_base = 0xC0000000ull;            /* free DDR below 4 GiB (xnu has 0x9_00000000+) */
++		v_smem_pa = 0x81d00000ull;
++		v_tcsr_pa = 0x01f40000ull;
++		v_item_out = 616;
++		v_item_in = 617;
++		v_item_crash = 626;
++		v_rpid = 13;
++		v_carve = 0x9bb00000u;
++		v_carve_size = 0x1900000u;
++		v_fw = "wpss";
++		strlcpy(fw_part, "modem_b", sizeof(fw_part));
++		on = 1;
++	}
++	if (started || (!volcano && (!PE_parse_boot_argn("modem", &on, sizeof(on)) || on == 0))) {
+ 		return;
+ 	}
+ 	started = true;
+-	topaz_sta_init();                           /* private: bsd/dev/topaz_sta.c (en0 + Apple80211 for wifid) */
++	if (!volcano) {
++		topaz_sta_init();                       /* private: bsd/dev/topaz_sta.c (en0 + Apple80211 for wifid) */
++	}
+ 	if (kernel_thread_start(topaz_modem_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 index d2f4fa1..ead2ef7 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
