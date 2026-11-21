@@ -380,7 +380,7 @@ index 4da50d8..1e80ec0 100644
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 370d18b..f9fe265 100644
+index 370d18b..2dfdba4 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -16,8 +16,12 @@
@@ -396,7 +396,7 @@ index 370d18b..f9fe265 100644
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
  extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
-@@ -740,10 +744,1449 @@ out:
+@@ -740,10 +744,1464 @@ out:
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -1835,6 +1835,21 @@ index 370d18b..f9fe265 100644
 +		touch_wait(60);
 +		sweet_hid_touch(0, 0, 152, 280);
 +	}
++	if (tap >= 2) {
++		extern int sweet_fb_os_off;
++		unsigned s;
++		for (s = 0; s < 150 && !sweet_fb_os_off; ++s) {
++			touch_wait(1000);
++		}
++		printf("SWEET SWIPE: display off=%d after %u s\n", sweet_fb_os_off, s);
++		touch_wait(3000);
++		sweet_hid_touch(0, 1, 540, 1400);
++		touch_wait(60);
++		sweet_hid_touch(0, 0, 540, 1400);
++		printf("SWEET SWIPE: woke, off=%d\n", sweet_fb_os_off);
++		touch_wait(3000);
++		touch_swipe_one(2);
++	}
 +	(void)thread_terminate(current_thread());
 +	thread_block(THREAD_CONTINUE_NULL);
 +}
@@ -1847,7 +1862,7 @@ index 370d18b..f9fe265 100644
  	thread_t thread;
  	if (st.started) {
  		return;
-@@ -757,7 +2200,17 @@ sweet_touch_init(void)
+@@ -757,7 +2215,17 @@ sweet_touch_init(void)
  		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
  		return;
  	}
@@ -2658,10 +2673,20 @@ index 96c557b..208c1f2 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1d3ee17..c9406b4 100644
+index 1d3ee17..687c669 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -280,6 +280,9 @@ class IOAcceleratorES : public IOService {
+@@ -53,6 +53,9 @@ bool topaz_surface_drawn(SweetSurface *surface, uint64_t milliseconds);   /* Red
+  * reads the u64 at +0x18 of the shared state page; held from SwapEnd until
+  * one vsync after the next frame replaced it on the panel.
+  */
++/* iOS turned the display off (auto-lock) while sweetfb_stayon kept the panel lit: SweetHID wakes it on a touch */
++extern "C" { int sweet_fb_os_off; }
++
+ static uint64_t sweet_fps_tick;         /* mach time of the last vsync tick (SWEET FPS) */
+ 
+ /* boot-arg sweetfb_nohold=1 (a test): frames on the panel are not marked in use */
+@@ -280,6 +283,9 @@ class IOAcceleratorES : public IOService {
  
  OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
  OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
@@ -2671,7 +2696,7 @@ index 1d3ee17..c9406b4 100644
  
  class IOMobileFramebufferUserClient : public IOUserClient {
  	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
-@@ -352,11 +355,12 @@ AppleCLCD::start(IOService *provider)
+@@ -352,11 +358,12 @@ AppleCLCD::start(IOService *provider)
  		IOLog("SWEET FB: no vsync timer\n");
  		return false;
  	}
@@ -2687,7 +2712,7 @@ index 1d3ee17..c9406b4 100644
  	fDsiBuf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
  	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, page_size, 0x00000000fffff000ull);
  	fDsiBufPhys = fDsiBuf ? fDsiBuf->getPhysicalSegment(0, NULL, kIOMemoryMapperNone) : 0;
-@@ -399,7 +403,7 @@ AppleCLCD::start(IOService *provider)
+@@ -399,7 +406,7 @@ AppleCLCD::start(IOService *provider)
  	}
  	OSSafeReleaseNULL(accel);
  	/* dpu sm6115 catalog: intf_1 at mdp+0x6a800, mdp at 0x5e01000 */
@@ -2696,7 +2721,7 @@ index 1d3ee17..c9406b4 100644
  	if (fIntf1 != NULL) {
  		volatile uint32_t *r = fIntf1 + 0x800 / 4;
  		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
-@@ -472,6 +476,9 @@ AppleCLCD::start(IOService *provider)
+@@ -472,6 +479,9 @@ AppleCLCD::start(IOService *provider)
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
  	registerService();
@@ -2706,7 +2731,21 @@ index 1d3ee17..c9406b4 100644
  	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
  	return true;
-@@ -1638,3 +1645,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1590,9 +1600,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 			 */
+ 			int stayon = 0;
+ 			if (off && PE_parse_boot_argn("sweetfb_stayon", &stayon, sizeof(stayon)) && stayon) {
++				sweet_fb_os_off = 1;
+ 				IOLog("SWEET FB: display off ignored (sweetfb_stayon)\n");
+ 				break;
+ 			}
++			if (!off) {
++				sweet_fb_os_off = 0;
++			}
+ 			IOLockLock(fFB->fLock);
+ 			bool changed = off != fFB->fPowerOff;
+ 			if (changed) {
+@@ -1638,3 +1652,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  	return ret;
  }
  #endif /* SWEET */
@@ -2771,7 +2810,7 @@ index 1d3ee17..c9406b4 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
-index d2f4fa1..282ae92 100644
+index d2f4fa1..ead2ef7 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
 +++ b/iokit/Kernel/arm/hid/SweetHID.cpp
 @@ -367,7 +367,7 @@ protected:
@@ -2818,6 +2857,44 @@ index d2f4fa1..282ae92 100644
  	}
  
  	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
+@@ -552,10 +556,35 @@ sweet_hid_key(int key, int down)
+ 	}
+ }
+ 
++extern "C" int sweet_fb_os_off;       /* SweetFramebuffer.cpp */
++static int sweet_wake_swallow;
++
++/*
++ * The panel stays lit (sweetfb_stayon) but iOS, once it turned the display off
++ * (auto-lock), stops drawing and drops touches: the screen froze on the last
++ * frame. A finger then is tap-to-wake: a power press, and the touch is not
++ * passed on until it lifts.
++ */
+ extern "C" void
+ sweet_hid_touch(int finger, int down, int x, int y)
+ {
+-	if (gSweetTouch) {
+-		gSweetTouch->touch(finger, down != 0, x, y);
++	if (!gSweetTouch) {
++		return;
++	}
++	if (sweet_wake_swallow) {
++		if (!down && finger == 0) {
++			sweet_wake_swallow = 0;
++		}
++		return;
++	}
++	if (down && sweet_fb_os_off) {
++		sweet_wake_swallow = 1;
++		sweet_fb_os_off = 0;
++		IOLog("SWEET HID: touch with the display off: power press to wake\n");
++		sweet_hid_key(0, 1);
++		IOSleep(80);
++		sweet_hid_key(0, 0);
++		return;
+ 	}
++	gSweetTouch->touch(finger, down != 0, x, y);
+ }
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index b926886..d1837aa 100644
 --- a/osfmk/arm64/arm_vm_init.c
