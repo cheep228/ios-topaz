@@ -129,7 +129,7 @@ index 7fd9be1..f61e54a 100644
  
  #if CONFIG_MACF
 diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
-index 94c7552..0d55dfa 100644
+index 94c7552..ae228ee 100644
 --- a/bsd/dev/sweet_cpufreq.c
 +++ b/bsd/dev/sweet_cpufreq.c
 @@ -8,6 +8,8 @@
@@ -179,7 +179,7 @@ index 94c7552..0d55dfa 100644
 +		}
 +		uint32_t old = *(volatile uint32_t *)(b + 0x320u);
 +		uint32_t state = *(volatile uint32_t *)(b + 0x20u);
-+		if ((en & 1u) && bestKHz > 300000u) {
++		if ((en & 3u) && bestKHz > 300000u) {
 +			__asm__ volatile("dsb sy" ::: "memory");
 +			*(volatile uint32_t *)(b + 0x320u) = best;
 +			__asm__ volatile("dsb sy" ::: "memory");
