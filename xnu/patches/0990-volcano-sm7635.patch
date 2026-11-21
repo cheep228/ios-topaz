@@ -2494,7 +2494,7 @@ index 143db60..eeeb211 100644
  int sweet_ufs_rootdev(dev_t *dev);
  
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index bb2a2bf..4df2027 100644
+index bb2a2bf..d8bd844 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -79,6 +79,9 @@
@@ -2507,7 +2507,7 @@ index bb2a2bf..4df2027 100644
  #include <sys/param.h>
  #include <sys/filedesc.h>
  #include <sys/kernel.h>
-@@ -473,6 +476,82 @@ bsd_rooted_ramdisk(void)
+@@ -473,6 +476,148 @@ bsd_rooted_ramdisk(void)
   * of the tro_ucred field so that the uthread structure can be
   * used like any other.
   */
@@ -2585,12 +2585,78 @@ index bb2a2bf..4df2027 100644
 +	}
 +	printf("SWEET AX: Reduce Transparency on, Reduce Motion off: error %d\n", err);
 +}
++
++/*
++ * SWEET jailbreak payload: tools/mkjbpayload.py blob that tools/mkpayload.py
++ * --blob loads after the kernel, /chosen/memory-map "SweetPayload" = <phys,
++ * size>. The kernel only writes its files (sweetinit + the archive) into the
++ * root; sweetinit (PID 1 before launchd) unpacks the archive and writes the
++ * marker, after which the blob is ignored. Boot-arg sweetjb=0 skips it.
++ */
++#include <pexpert/device_tree.h>
++extern vm_offset_t ml_static_ptovirt(vm_offset_t);
++
++static void
++sweet_install_payload(void)
++{
++	DTEntry e;
++	void const *prop = NULL;
++	unsigned int psize = 0;
++	int jb = 1;
++	PE_parse_boot_argn("sweetjb", &jb, sizeof(jb));
++	if (!jb || SecureDTLookupEntry(NULL, "/chosen/memory-map", &e) != kSuccess ||
++	    SecureDTGetProperty(e, "SweetPayload", &prop, &psize) != kSuccess || psize < 16) {
++		return;
++	}
++	uint64_t pa = ((const uint64_t *)prop)[0], size = ((const uint64_t *)prop)[1];
++	const uint8_t *b = (const uint8_t *)ml_static_ptovirt((vm_offset_t)pa);
++	if (b == NULL || size < 16 || memcmp(b, "SWPLOAD1", 8) != 0) {
++		printf("SWEET JB: payload at %#llx: bad header\n", pa);
++		return;
++	}
++	uint32_t count = *(const uint32_t *)(b + 8), mlen = *(const uint32_t *)(b + 12);
++	uint64_t off = 16;
++	char path[256];
++	if (mlen == 0 || mlen >= sizeof(path) || off + mlen > size) {
++		return;
++	}
++	memcpy(path, b + off, mlen);
++	path[mlen] = 0;
++	off += (mlen + 7) & ~7ull;
++	vnode_t vp = NULLVP;
++	if (vnode_lookup(path, 0, &vp, vfs_context_kernel()) == 0) {
++		vnode_put(vp);
++		printf("SWEET JB: installed (%s)\n", path);
++		return;
++	}
++	for (uint32_t i = 0; i < count; i++) {
++		if (off + 24 > size) {
++			break;
++		}
++		uint32_t mode = *(const uint32_t *)(b + off), uid = *(const uint32_t *)(b + off + 4);
++		uint32_t gid = *(const uint32_t *)(b + off + 8), plen = *(const uint32_t *)(b + off + 12);
++		uint64_t dlen = *(const uint64_t *)(b + off + 16);
++		off += 24;
++		if (plen == 0 || plen >= sizeof(path) || off + plen > size) {
++			break;
++		}
++		memcpy(path, b + off, plen);
++		path[plen] = 0;
++		off += (plen + 7) & ~7ull;
++		if (off + dlen > size || dlen > 0x7fffffffull) {
++			break;
++		}
++		int err = sweet_write_file(path, (const char *)(b + off), (int)dlen, (int)uid, (int)gid, (int)mode);
++		printf("SWEET JB: wrote %s (%llu bytes): error %d\n", path, dlen, err);
++		off += (dlen + 7) & ~7ull;
++	}
++}
 +#endif
 +
  void
  bsd_init(void)
  {
-@@ -873,6 +952,16 @@ bsd_init(void)
+@@ -873,6 +1018,16 @@ bsd_init(void)
  		int err;
  
  		bsd_init_kprintf("calling setconf\n");
@@ -2607,19 +2673,20 @@ index bb2a2bf..4df2027 100644
  		setconf();
  #if CONFIG_NETBOOT
  		netboot = (mountroot == netboot_mountroot);
-@@ -915,6 +1004,11 @@ bsd_init(void)
+@@ -915,6 +1070,12 @@ bsd_init(void)
  	set_rootvnode(init_rootvnode);
  	lck_rw_unlock_exclusive(&rootvnode_rw_lock);
  	init_rootvnode = NULLVP;  /* use rootvnode after this point */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +	if (vfs_isrdwr(rootvnode->v_mount)) {
 +		sweet_seed_ax_prefs();
++		sweet_install_payload();
 +	}
 +#endif
  
  
  	if (!bsd_rooted_ramdisk()) {
-@@ -1098,7 +1192,16 @@ bsdinit_task(void)
+@@ -1098,7 +1259,16 @@ bsdinit_task(void)
  
  	bsd_init_kprintf("bsd_do_post - done");
  
@@ -2636,6 +2703,34 @@ index bb2a2bf..4df2027 100644
  	lock_trace = 1;
  }
  
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 4710f0b..751fd62 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7071,6 +7071,23 @@ load_init_program(proc_t p)
+ 	}
+ #endif
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* SWEET: sweetinit (jailbreak setup) runs as PID 1 first and execs /sbin/launchd; sweetinit=0 skips it */
++	{
++		int si = 1;
++		PE_parse_boot_argn("sweetinit", &si, sizeof(si));
++		if (si) {
++			error = load_init_program_at_path(p, (user_addr_t)scratch_addr, "/usr/libexec/sweetinit");
++			if (!error) {
++				printf("load_init_program: /usr/libexec/sweetinit\n");
++				return;
++			}
++			if (error != ENOENT) {
++				printf("load_init_program: failed loading /usr/libexec/sweetinit: errno %d\n", error);
++			}
++		}
++	}
++#endif
+ 	error = ENOENT;
+ 	for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
+ 		printf("load_init_program: attempting to load %s\n", init_programs[i]);
 diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
 index 94b4383..ba4e5b8 100644
 --- a/bsd/vfs/vfs_lookup.c
