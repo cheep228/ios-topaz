@@ -2494,7 +2494,7 @@ index 143db60..eeeb211 100644
  int sweet_ufs_rootdev(dev_t *dev);
  
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index bb2a2bf..d8bd844 100644
+index bb2a2bf..ccb5d9e 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -79,6 +79,9 @@
@@ -2507,7 +2507,7 @@ index bb2a2bf..d8bd844 100644
  #include <sys/param.h>
  #include <sys/filedesc.h>
  #include <sys/kernel.h>
-@@ -473,6 +476,148 @@ bsd_rooted_ramdisk(void)
+@@ -473,6 +476,154 @@ bsd_rooted_ramdisk(void)
   * of the tro_ucred field so that the uthread structure can be
   * used like any other.
   */
@@ -2623,11 +2623,13 @@ index bb2a2bf..d8bd844 100644
 +	memcpy(path, b + off, mlen);
 +	path[mlen] = 0;
 +	off += (mlen + 7) & ~7ull;
++	/* installed: only the entries flagged "always" (mode bit 31, e.g. sweetinit) are rewritten */
 +	vnode_t vp = NULLVP;
++	bool installed = false;
 +	if (vnode_lookup(path, 0, &vp, vfs_context_kernel()) == 0) {
 +		vnode_put(vp);
++		installed = true;
 +		printf("SWEET JB: installed (%s)\n", path);
-+		return;
 +	}
 +	for (uint32_t i = 0; i < count; i++) {
 +		if (off + 24 > size) {
@@ -2646,7 +2648,11 @@ index bb2a2bf..d8bd844 100644
 +		if (off + dlen > size || dlen > 0x7fffffffull) {
 +			break;
 +		}
-+		int err = sweet_write_file(path, (const char *)(b + off), (int)dlen, (int)uid, (int)gid, (int)mode);
++		if (installed && !(mode & 0x80000000u)) {
++			off += (dlen + 7) & ~7ull;
++			continue;
++		}
++		int err = sweet_write_file(path, (const char *)(b + off), (int)dlen, (int)uid, (int)gid, (int)(mode & 07777));
 +		printf("SWEET JB: wrote %s (%llu bytes): error %d\n", path, dlen, err);
 +		off += (dlen + 7) & ~7ull;
 +	}
@@ -2656,7 +2662,7 @@ index bb2a2bf..d8bd844 100644
  void
  bsd_init(void)
  {
-@@ -873,6 +1018,16 @@ bsd_init(void)
+@@ -873,6 +1024,16 @@ bsd_init(void)
  		int err;
  
  		bsd_init_kprintf("calling setconf\n");
@@ -2673,7 +2679,7 @@ index bb2a2bf..d8bd844 100644
  		setconf();
  #if CONFIG_NETBOOT
  		netboot = (mountroot == netboot_mountroot);
-@@ -915,6 +1070,12 @@ bsd_init(void)
+@@ -915,6 +1076,12 @@ bsd_init(void)
  	set_rootvnode(init_rootvnode);
  	lck_rw_unlock_exclusive(&rootvnode_rw_lock);
  	init_rootvnode = NULLVP;  /* use rootvnode after this point */
@@ -2686,7 +2692,7 @@ index bb2a2bf..d8bd844 100644
  
  
  	if (!bsd_rooted_ramdisk()) {
-@@ -1098,7 +1259,16 @@ bsdinit_task(void)
+@@ -1098,7 +1265,16 @@ bsdinit_task(void)
  
  	bsd_init_kprintf("bsd_do_post - done");
  
