@@ -2494,7 +2494,7 @@ index 143db60..eeeb211 100644
  int sweet_ufs_rootdev(dev_t *dev);
  
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index bb2a2bf..98b6752 100644
+index bb2a2bf..4df2027 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -79,6 +79,9 @@
@@ -2517,7 +2517,8 @@ index bb2a2bf..98b6752 100644
 + * SWEET: seed the mobile user's Accessibility preferences once (Reduce
 + * Transparency + Reduce Motion). Without a GPU, CoreAnimation renders on the
 + * CPU (CA::OGL::SW) and the backdrop blurs of the dock, folders, Control
-+ * Center and the lock screen cost most of each frame. The kernel writes the
++ * Center and the lock screen cost most of each frame (Reduce Motion stays
++ * off: its cross-fades blend two full layers and looked worse). The kernel writes the
 + * plist before launchd starts, because the HFS+ root cannot be mounted
 + * read-write on the build machine. A marker file makes it one-shot, so a
 + * change made later in Settings stays. Boot-arg sweetax=0 skips it,
@@ -2558,15 +2559,14 @@ index bb2a2bf..98b6752 100644
 +static void
 +sweet_seed_ax_prefs(void)
 +{
-+	static const char marker[] = "/private/var/mobile/Library/Preferences/.sweet-ax-seeded";
++	static const char marker[] = "/private/var/mobile/Library/Preferences/.sweet-ax-seeded2";
 +	static const char plist[] = "/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist";
 +	static const char body[] =
 +	    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
 +	    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
 +	    "<plist version=\"1.0\">\n<dict>\n"
 +	    "\t<key>EnhancedBackgroundContrastEnabled</key>\n\t<true/>\n"
-+	    "\t<key>ReduceMotionEnabled</key>\n\t<true/>\n"
-+	    "\t<key>ReduceMotionReduceSlideTransitionsPreference</key>\n\t<true/>\n"
++	    "\t<key>ReduceMotionEnabled</key>\n\t<false/>\n"
 +	    "</dict>\n</plist>\n";
 +	int ax = 1;
 +	vnode_t vp = NULLVP;
@@ -2583,7 +2583,7 @@ index bb2a2bf..98b6752 100644
 +	if (!err) {
 +		err = sweet_write_file(marker, "", 0, 0, 0, 0644);
 +	}
-+	printf("SWEET AX: Reduce Transparency + Reduce Motion seeded: error %d\n", err);
++	printf("SWEET AX: Reduce Transparency on, Reduce Motion off: error %d\n", err);
 +}
 +#endif
 +
@@ -2833,7 +2833,7 @@ index 96c557b..208c1f2 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1d3ee17..9a375c6 100644
+index 1d3ee17..62438a2 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -53,6 +53,11 @@ bool topaz_surface_drawn(SweetSurface *surface, uint64_t milliseconds);   /* Red
@@ -2863,7 +2863,7 @@ index 1d3ee17..9a375c6 100644
  	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
  	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
 +	{
-+		int cached = 1;
++		int cached = 0;      /* sweetfb_cached=1: much slower on volcano (10 MB dc cvac per frame) */
 +		PE_parse_boot_argn("sweetfb_cached", &cached, sizeof(cached));
 +		IOMemoryDescriptor *md = cached && fPixels != 0 ?
 +		    IOMemoryDescriptor::withPhysicalAddress(fPhys, (IOByteCount)fRowBytes * fHeight, kIODirectionInOut) : NULL;
