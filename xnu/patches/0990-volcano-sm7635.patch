@@ -3166,7 +3166,7 @@ index 1d3ee17..62438a2 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..33883d0 100644
+index 8aa0c2f..646d85b 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -28,7 +28,7 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -3924,7 +3924,7 @@ index 8aa0c2f..33883d0 100644
  	case WLFW_CAL_REPORT:
  		LOG("wlfw: cal_report %s err %u, waiting for FW_READY", ok ? "ok" : "FAILED", err);
  		w_step = "waiting FW_READY";
-@@ -3448,7 +3943,11 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+@@ -3448,7 +3943,12 @@ wlfw_rx(const uint8_t *d, uint32_t len)
  			w_mission = true;
  			w_step = "WLAN ON (mission)";
  			LOG("*** WLAN ON (mission mode) ***");
@@ -3932,12 +3932,13 @@ index 8aa0c2f..33883d0 100644
 +			if (volcano) {
 +				IOSleep(100);
 +				w_v_dump();
++				(void)ce_start();
 +			}
 +			if (!volcano && wifi_enabled()) {
  				IOSleep(100);
  				(void)ce_start();               /* only now: before mission a CE access hangs the bus */
  			}
-@@ -3471,8 +3970,9 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+@@ -3471,8 +3971,9 @@ wlfw_rx(const uint8_t *d, uint32_t len)
   *  - WMI (TLV): SERVICE_READY -> INIT -> READY, then a passive scan (nothing is transmitted);
   *    each BSS seen is logged once, its BSSID masked.
   */
@@ -3949,7 +3950,7 @@ index 8aa0c2f..33883d0 100644
  #define WLAN_SID            0x1A0
  #define WLAN_SID_MASK       0x1
  #define CB_CLONE_CBAR       0x0001f000u         /* S1_TRANS_S2_FAULT, S1_MEMATTR WB */
-@@ -3559,8 +4059,10 @@ smmu_identity(uint32_t sid, uint32_t mask, const char *name)
+@@ -3559,8 +4060,10 @@ smmu_identity(uint32_t sid, uint32_t mask, const char *name)
  	smr = r32(s, 0x800 + 4 * slot);
  	s2cr = r32(s, 0xC00 + 4 * slot);
  	bool ok = (smr >> 31) != 0 && smmu_sid_match(smr, sid, mask) && ((s2cr >> 16) & 3) == 0 && (s2cr & 0x3F) == cb;
@@ -3962,7 +3963,280 @@ index 8aa0c2f..33883d0 100644
  	return ok;
  }
  
-@@ -6024,7 +6526,11 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -3635,11 +4138,15 @@ ce_post(uint32_t c)
+ 	s->dst_wr = (slot + 1) & (s->dst_n - 1);
+ }
+ 
++static bool vce_start(void);
+ static bool
+ ce_start(void)
+ {
+ 	uint64_t off = 0x1000, pa = 0;              /* RRI in the first page */
+ 
++	if (volcano) {
++		return vce_start();
++	}
+ 	if (ce_up) {
+ 		return true;
+ 	}
+@@ -3728,6 +4235,7 @@ ce_start(void)
+ 
+ static void htc_rx(uint32_t c, const uint8_t *d, uint32_t len);
+ 
++static bool vce_poll(void);
+ static bool
+ ce_poll(void)
+ {
+@@ -3735,6 +4243,9 @@ ce_poll(void)
+ 	if (!ce_up) {
+ 		return false;
+ 	}
++	if (volcano) {
++		return vce_poll();
++	}
+ 	for (uint32_t c = 0; c < CE_COUNT; c++) {
+ 		struct ce_state *s = &ce[c];
+ 		if (!ce_host_rx(c)) {
+@@ -3759,9 +4270,13 @@ ce_poll(void)
+ 	return any;
+ }
+ 
++static bool vce_send(uint32_t c, const void *data, uint32_t len, uint32_t transfer_id);
+ static bool
+ ce_send(uint32_t c, const void *data, uint32_t len, uint32_t transfer_id)
+ {
++	if (volcano) {
++		return vce_send(c, data, len, transfer_id);
++	}
+ 	if (!ce_up || c >= CE_COUNT || !ce_host_tx(c) || len > ce_tx_sz(c)) {
+ 		return false;
+ 	}
+@@ -3786,6 +4301,213 @@ ce_send(uint32_t c, const void *data, uint32_t len, uint32_t transfer_id)
+ 	return true;
+ }
+ 
++
++/* ---------------- volcano copy engines (ath11k ce.c / hal.c, WCN6750 SRNG rings, polled) */
++
++#define VCE_N               9
++#define VCE_SRC(c)          (0x01b80000u + (c) * 0x2000u)   /* R0; R2 (HP, TP) at +0x400 */
++#define VCE_DST(c)          (0x01b81000u + (c) * 0x2000u)   /* R0; R2 at +0x400; status R0 +0x58, R2 +0x408 */
++#define VCE_RING            64
++#define VCE_BUF             2048
++
++struct vce_state {
++	volatile uint32_t *src, *dst, *sts;        /* rings (descs 4, 2, 4 words) */
++	uint64_t src_pa, dst_pa, sts_pa, rx_pa, tx_pa;
++	uint8_t *rx_buf, *tx_buf;
++	uint32_t src_hp, dst_hp, dst_sw, sts_tp;   /* in entries */
++	uint32_t rx, tx, tx_full;
++};
++static struct vce_state vce[VCE_N];
++static volatile uint32_t *vce_ptr;              /* per-ring HW-written TP/HP words (rdp) */
++static uint64_t vce_ptr_pa;
++
++static bool vce_tx(uint32_t c) { return c == 0 || c == 3 || c == 4; }
++static bool vce_rx(uint32_t c) { return c == 1 || c == 2 || c == 5; }
++
++static void
++w_v_wr(uint32_t off, uint32_t v)
++{
++	uint32_t win = 0;
++	if ((off ^ 0x00a00000u) < 0x7FFFFu) {
++		win = 0x80000;
++	} else if ((off ^ 0x01b80000u) < 0x7FFFFu) {
++		win = 0x100000;
++	}
++	mb();
++	*(volatile uint32_t *)(w_bar + win + (off & 0x7FFFFu)) = v;
++	mb();
++}
++
++/* hal_srng_src_hw_init (TCL1 layout offsets: msb +4, id +8, misc +0x10, tp +0x1c/0x20, int +0x30/0x34) */
++static void
++vce_src_init(uint32_t r0, uint64_t pa, uint32_t words, uint32_t n, uint64_t tp_pa)
++{
++	w_v_wr(r0 + 0x00, (uint32_t)pa);
++	w_v_wr(r0 + 0x04, ((uint32_t)(pa >> 32) & 0xFF) | ((words * n) << 8));
++	w_v_wr(r0 + 0x08, words);
++	w_v_wr(r0 + 0x30, 0);
++	w_v_wr(r0 + 0x34, 0);
++	w_v_wr(r0 + 0x1c, (uint32_t)tp_pa);
++	w_v_wr(r0 + 0x20, (uint32_t)(tp_pa >> 32));
++	w_v_wr(r0 + 0x400, 0);
++	w_v_wr(r0 + 0x404, 0);
++	w_v_wr(r0 + 0x10, (1u << 1) | (1u << 6));  /* MSI loopcnt disable | SRNG enable */
++}
++
++/* hal_srng_dst_hw_init (REO1 layout offsets: msb +4, id +8, misc +0x10, hp +0x14/0x18, int +0x24) */
++static void
++vce_dst_init(uint32_t r0, uint32_t r2, uint64_t pa, uint32_t words, uint32_t n, uint32_t ring_id, uint64_t hp_pa)
++{
++	w_v_wr(r0 + 0x00, (uint32_t)pa);
++	w_v_wr(r0 + 0x04, ((uint32_t)(pa >> 32) & 0xFF) | ((words * n) << 8));
++	w_v_wr(r0 + 0x08, (ring_id << 8) | words);
++	w_v_wr(r0 + 0x24, 0);
++	w_v_wr(r0 + 0x14, (uint32_t)hp_pa);
++	w_v_wr(r0 + 0x18, (uint32_t)(hp_pa >> 32));
++	w_v_wr(r2 + 0, 0);
++	w_v_wr(r2 + 4, 0);
++	w_v_wr(r0 + 0x10, 1u << 6);
++}
++
++static void
++vce_post(uint32_t c)
++{
++	struct vce_state *s = &vce[c];
++	uint32_t slot = s->dst_hp;
++	uint64_t pa = s->rx_pa + (uint64_t)slot * VCE_BUF;
++	s->dst[2 * slot] = (uint32_t)pa;
++	s->dst[2 * slot + 1] = (uint32_t)(pa >> 32) & 0xFF;
++	s->dst_hp = (slot + 1) % VCE_RING;
++}
++
++static bool
++vce_start(void)
++{
++	uint64_t pa = 0, off = 0x1000;
++	if (ce_up) {
++		return true;
++	}
++	if (w_bar == NULL) {
++		LOG("vce: no BAR");
++		return false;
++	}
++	for (uint32_t c = 0; c < VCE_N; c++) {
++		if (vce_tx(c)) {
++			off += 0x1000 + VCE_RING * VCE_BUF;
++		}
++		if (vce_rx(c)) {
++			off += 0x1000 + 0x1000 + VCE_RING * VCE_BUF;
++		}
++	}
++	uint8_t *va = (uint8_t *)pool_alloc(off, &pa);
++	if (va == NULL) {
++		LOG("vce: alloc %llu failed", off);
++		return false;
++	}
++	vce_ptr = (volatile uint32_t *)va;
++	vce_ptr_pa = pa;
++	off = 0x1000;
++	for (uint32_t c = 0; c < VCE_N; c++) {
++		struct vce_state *s = &vce[c];
++		if (vce_tx(c)) {
++			s->src = (volatile uint32_t *)(va + off); s->src_pa = pa + off; off += 0x1000;
++			s->tx_buf = va + off; s->tx_pa = pa + off; off += VCE_RING * VCE_BUF;
++			vce_src_init(VCE_SRC(c), s->src_pa, 4, VCE_RING, vce_ptr_pa + 4 * (2 * c));
++		}
++		if (vce_rx(c)) {
++			s->dst = (volatile uint32_t *)(va + off); s->dst_pa = pa + off; off += 0x1000;
++			s->sts = (volatile uint32_t *)(va + off); s->sts_pa = pa + off; off += 0x1000;
++			s->rx_buf = va + off; s->rx_pa = pa + off; off += VCE_RING * VCE_BUF;
++			vce_src_init(VCE_DST(c), s->dst_pa, 2, VCE_RING, vce_ptr_pa + 4 * (2 * c));
++			w_v_wr(VCE_DST(c) + 0xb0, VCE_BUF);   /* DEST_CTRL max_len */
++			vce_dst_init(VCE_DST(c) + 0x58, VCE_DST(c) + 0x408, s->sts_pa, 4, VCE_RING, 80 + c,
++			    vce_ptr_pa + 4 * (2 * c + 1));
++		}
++	}
++	for (uint32_t c = 0; c < VCE_N; c++) {
++		if (!vce_rx(c)) {
++			continue;
++		}
++		for (uint32_t i = 0; i < VCE_RING - 1; i++) {
++			vce_post(c);
++		}
++		w_v_wr(VCE_DST(c) + 0x400, vce[c].dst_hp * 2);   /* HP in words */
++	}
++	ce_up = true;
++	for (int k = 0; k < 3; k++) {
++		LOG("vce: rings at %llx, rx posted; CE1 dst base %08x misc %08x sts misc %08x", pa,
++		    w_v_rd(VCE_DST(1)), w_v_rd(VCE_DST(1) + 0x10), w_v_rd(VCE_DST(1) + 0x58 + 0x10));
++	}
++	return true;
++}
++
++static void htc_rx(uint32_t c, const uint8_t *d, uint32_t len);
++
++static bool
++vce_poll(void)
++{
++	bool any = false;
++	for (uint32_t c = 0; c < VCE_N; c++) {
++		struct vce_state *s = &vce[c];
++		if (!vce_rx(c)) {
++			continue;
++		}
++		for (int k = 0; k < 16; k++) {
++			uint32_t hp = vce_ptr[2 * c + 1] / 4;   /* status ring HP (words -> entries) */
++			if (s->sts_tp == hp % VCE_RING) {
++				break;
++			}
++			mb();
++			volatile uint32_t *e = s->sts + 4 * s->sts_tp;
++			uint32_t len = e[0] >> 16;
++			e[0] &= 0xFFFF;
++			uint32_t slot = s->dst_sw;
++			s->dst_sw = (slot + 1) % VCE_RING;
++			s->sts_tp = (s->sts_tp + 1) % VCE_RING;
++			s->rx++;
++			if (s->rx <= 3) {
++				const uint8_t *b = s->rx_buf + (uint64_t)slot * VCE_BUF;
++				for (int r = 0; r < 3; r++) {
++					LOG("vce: CE%u rx %u bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x", c, len,
++					    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11]);
++				}
++			}
++			htc_rx(c, s->rx_buf + (uint64_t)slot * VCE_BUF, MIN(len, (uint32_t)VCE_BUF));
++			w_v_wr(VCE_DST(c) + 0x40c, s->sts_tp * 4);  /* status TP */
++			vce_post(c);
++			w_v_wr(VCE_DST(c) + 0x400, s->dst_hp * 2);
++			any = true;
++		}
++	}
++	return any;
++}
++
++static bool
++vce_send(uint32_t c, const void *data, uint32_t len, uint32_t transfer_id)
++{
++	if (!ce_up || c >= VCE_N || !vce_tx(c) || len > VCE_BUF) {
++		return false;
++	}
++	struct vce_state *s = &vce[c];
++	uint32_t tp = (vce_ptr[2 * c] / 4) % VCE_RING;
++	if ((s->src_hp + 1) % VCE_RING == tp) {
++		s->tx_full++;
++		return false;
++	}
++	uint32_t slot = s->src_hp;
++	uint64_t pa = s->tx_pa + (uint64_t)slot * VCE_BUF;
++	memcpy(s->tx_buf + (uint64_t)slot * VCE_BUF, data, len);
++	volatile uint32_t *d = s->src + 4 * slot;
++	d[0] = (uint32_t)pa;
++	d[1] = ((uint32_t)(pa >> 32) & 0xFF) | (len << 16);
++	d[2] = transfer_id & 0xFFFF;
++	d[3] = 0;
++	s->src_hp = (slot + 1) % VCE_RING;
++	s->tx++;
++	w_v_wr(VCE_SRC(c) + 0x400, s->src_hp * 4);
++	return true;
++}
++
+ /* ---------------- HTC (ath10k htc.c) */
+ 
+ #define HTC_MSG_READY       1
+@@ -3926,7 +4648,9 @@ htc_rx(uint32_t c, const uint8_t *d, uint32_t len)
+ 			ep[0].ul = 0;
+ 			ep[0].dl = 2;
+ 			ep[0].up = true;
+-			LOG("t=%u ms: *** HTC READY: credits %u x %u, %u endpoints ***", g_ms, cc, cs, p[6]);
++			for (int k = 0; k < (volcano ? 3 : 1); k++) {
++				LOG("t=%u ms: *** HTC READY: credits %u x %u, %u endpoints ***", g_ms, cc, cs, p[6]);
++			}
+ 			htc_connect(SVC_HTT_DATA);          /* ath10k_core_start: htt, then wmi */
+ 		} else if (msg == HTC_MSG_CONNECT_RESP && plen >= 8) {
+ 			uint16_t svc, max;
+@@ -6024,7 +6748,11 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  		LOG("cannot create SMP2P item %u", ITEM_SMP2P_OUT);
  		return;
  	}
@@ -3975,7 +4249,7 @@ index 8aa0c2f..33883d0 100644
  	bool glink = false;
  	for (unsigned ms = 0; seconds == 0 || ms < seconds * 1000; ms++) {
  		if (ready && !glink) {
-@@ -6095,6 +6601,96 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -6095,6 +6823,96 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  	}
  }
  
@@ -4072,7 +4346,7 @@ index 8aa0c2f..33883d0 100644
  /* ---------------------------------------------------------------- PAS boot */
  
  static bool
-@@ -6112,8 +6708,8 @@ modem_boot(void)
+@@ -6112,8 +6930,8 @@ modem_boot(void)
  	uint32_t min_a = ~0u, max_a = 0, hash = ~0u;
  	bool relocate = false, ok = false;
  
@@ -4083,7 +4357,7 @@ index 8aa0c2f..33883d0 100644
  	if (part == NULL) {
  		return false;
  	}
-@@ -6121,24 +6717,29 @@ modem_boot(void)
+@@ -6121,24 +6939,29 @@ modem_boot(void)
  		LOG("modem SMP2P item %u already exists: modem is not cold, not touching it", ITEM_SMP2P_IN);
  		return false;
  	}
@@ -4117,7 +4391,7 @@ index 8aa0c2f..33883d0 100644
  			goto out;
  		}
  		struct elf32_phdr *ph = (struct elf32_phdr *)(mdt + eh->e_phoff);
-@@ -6156,8 +6757,8 @@ modem_boot(void)
+@@ -6156,8 +6979,8 @@ modem_boot(void)
  			max_a = MAX(max_a, ph[i].p_paddr + ph[i].p_memsz);
  		}
  		LOG("phdrs=%u hash=%u region %08x..%08x relocate=%u", eh->e_phnum, hash, min_a, max_a, relocate);
@@ -4128,7 +4402,7 @@ index 8aa0c2f..33883d0 100644
  			goto out;
  		}
  
-@@ -6175,7 +6776,7 @@ modem_boot(void)
+@@ -6175,7 +6998,7 @@ modem_boot(void)
  		} else {
  			/* split firmware: the hash segment is its own .bNN file (qcom_mdt_read_metadata) */
  			char hname[16];
@@ -4137,7 +4411,7 @@ index 8aa0c2f..33883d0 100644
  			int64_t got = fw_read(hname, meta + hdr, ph[hash].p_filesz);
  			LOG("hash from %s: %lld of %u bytes", hname, got, ph[hash].p_filesz);
  			if (got != (int64_t)ph[hash].p_filesz) {
-@@ -6214,7 +6815,7 @@ modem_boot(void)
+@@ -6214,7 +7037,7 @@ modem_boot(void)
  			uint8_t *dst = (uint8_t *)m->getVirtualAddress() + off;
  			int64_t got = 0;
  			if (ph[i].p_filesz != 0) {
@@ -4146,7 +4420,7 @@ index 8aa0c2f..33883d0 100644
  				got = fw_read(name, dst, ph[i].p_filesz);
  				if (got != (int64_t)ph[i].p_filesz) {
  					LOG("%s: %lld of %u bytes", name, got, ph[i].p_filesz);
-@@ -6277,14 +6878,19 @@ topaz_soc_map(void)
+@@ -6277,14 +7100,19 @@ topaz_soc_map(void)
  	uint8_t probe[16];
  	int err = EAGAIN;
  	for (int i = 0; i < 120 && err == EAGAIN; i++) {
@@ -4168,7 +4442,7 @@ index 8aa0c2f..33883d0 100644
  	tcsr_mutex = (volatile uint8_t *)ml_io_map(TCSR_MUTEX_PA, 0x4000);
  	if (err != 0) {
  		LOG("partition %s: %d", fw_part, err);
-@@ -6374,12 +6980,19 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -6374,12 +7202,19 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
  		return;
  	}
  	LOG("SMEM version %u", *(volatile uint32_t *)(smem + 64 + 7 * 4) >> 16);
@@ -4190,7 +4464,7 @@ index 8aa0c2f..33883d0 100644
  	}
  	/* keep the mappings: the modem uses SMEM from now on */
  	thread_terminate(current_thread());
-@@ -6394,11 +7007,31 @@ topaz_modem_init(void)
+@@ -6394,11 +7229,31 @@ topaz_modem_init(void)
  	uint32_t on = 0;
  	thread_t thread;
  
