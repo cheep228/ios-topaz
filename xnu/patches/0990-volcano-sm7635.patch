@@ -207,7 +207,7 @@ index 94c7552..ae228ee 100644
  	if (!on) {
  		return 0;
 diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
-index 65970f9..cbc0c87 100644
+index 65970f9..085710f 100644
 --- a/bsd/dev/sweet_keys.c
 +++ b/bsd/dev/sweet_keys.c
 @@ -17,15 +17,25 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -243,7 +243,7 @@ index 65970f9..cbc0c87 100644
  static uint16_t keys_pon_apid = KEYS_NO_APID, keys_gpio_apid = KEYS_NO_APID;
  static uint32_t keys_version, keys_last_status;
  static bool keys_started;
-@@ -45,7 +55,7 @@ keys_find_apid(uint16_t ppid, uint32_t count)
+@@ -45,11 +55,11 @@ keys_find_apid(uint16_t ppid, uint32_t count)
  {
  	uint16_t found = KEYS_NO_APID;
  	for (uint32_t i = 0; i < count; ++i) {
@@ -251,6 +251,11 @@ index 65970f9..cbc0c87 100644
 +		uint32_t map = keys_rd(keys_core, 0x2000u + 4u * i);
  		if (map == 0 || ((map >> 8) & 0xfffu) != ppid) {
  			continue;
+ 		}
+-		uint32_t owner = keys_rd(keys_cnfg, 0x700u + 4u * i) & 7u;
++		uint32_t owner = keys_rd(keys_cnfg, 4u * i) & 7u; /* v7: cnfg + 4n */
+ 		if (found == KEYS_NO_APID || owner == 0) {
+ 			found = (uint16_t)i;
  		}
 @@ -63,7 +73,7 @@ keys_read(uint16_t apid, uint16_t addr, uint8_t *out)
  	if (apid == KEYS_NO_APID) {
