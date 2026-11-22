@@ -3325,7 +3325,7 @@ index 1d3ee17..62438a2 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..a42be99 100644
+index 8aa0c2f..55eb6b6 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -20,6 +20,7 @@
@@ -4933,7 +4933,7 @@ index 8aa0c2f..a42be99 100644
 +		m[4] = 0;
 +		m[5] = (1u << 18) | (1u << 21) | (1u << 24);   /* FP data mcast | ucast | null */
 +		m[6] = 0xBF;                            /* MPDU/MSDU start, packet, MSDU/MPDU end, pkt header, attention */
-+		bool f = htt_send(m, sizeof(m));
++		bool f = m[0] == 0;                         /* fix75: ath11k sends no data-ring selection cfg (fw MpduPop asserts) */
 +		for (int k = 0; k < 2; k++) {
 +			LOG("t=%u ms: dp: mon status rx filter %s, data ring filter %s", g_ms, e ? "ok" : "FAIL", f ? "ok" : "FAIL");
 +		}
