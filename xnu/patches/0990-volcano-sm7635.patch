@@ -3166,7 +3166,7 @@ index 1d3ee17..62438a2 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..b46c288 100644
+index 8aa0c2f..f810ef3 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -28,7 +28,7 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -4318,9 +4318,9 @@ index 8aa0c2f..b46c288 100644
 +#define DP_TCL              0x00a44000u
 +#define DP_WBM              0x00a34000u
 +#define DP_RBM_IDLE_DESC    1                   /* HAL_RX_BUF_RBM_WBM_IDLE_DESC_LIST */
-+#define DP_RBM_SW1          4                   /* wcn6750 rx_buf_rbm */
++#define DP_RBM_SW1          6                   /* wcn6750 rx_buf_rbm = HAL_RX_BUF_RBM_SW3_BM */
 +#define DP_N_LINK           8192
-+#define DP_REFILL_POST 128
++#define DP_REFILL_POST (DP_N_REFILL - 1)
 +#define DP_N_REFILL         1024
 +#define DP_N_MON            128
 +#define DP_BUF              2048
