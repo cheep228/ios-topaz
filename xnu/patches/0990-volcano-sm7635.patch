@@ -207,7 +207,7 @@ index 94c7552..ae228ee 100644
  	if (!on) {
  		return 0;
 diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
-index 65970f9..085710f 100644
+index 65970f9..e40a0ab 100644
 --- a/bsd/dev/sweet_keys.c
 +++ b/bsd/dev/sweet_keys.c
 @@ -17,15 +17,25 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -303,7 +303,7 @@ index 65970f9..085710f 100644
  				sweet_hid_key(k, state[k]);
  			}
  		}
-@@ -137,37 +150,40 @@ sweet_keys_init(void)
+@@ -137,37 +150,39 @@ sweet_keys_init(void)
  		printf("SWEET KEYS: disabled (sweetkeys=0)\n");
  		return;
  	}
@@ -352,8 +352,7 @@ index 65970f9..085710f 100644
  	    mode & 3u : (mode >> 4) & 7u;
  	if (!eok || !mok || !sok || !(en & 0x80u) || (dir != 0 && dir != 2)) {
 -		printf("SWEET KEYS: GPIO5 not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
-+		printf("SWEET KEYS: GPIO6 not confirmed enabled as input; volume-up withheld, PMIC unchanged
-+");
++		printf("SWEET KEYS: GPIO6 not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
  		keys_gpio_apid = KEYS_NO_APID;
  	}
  	if (!pok && !gok) {
