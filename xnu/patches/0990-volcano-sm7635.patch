@@ -3325,7 +3325,7 @@ index 1d3ee17..62438a2 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..5098def 100644
+index 8aa0c2f..5f0b8bf 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -20,15 +20,17 @@
@@ -4986,7 +4986,7 @@ index 8aa0c2f..5098def 100644
 +		m[3] = 0x00001249;                      /* FP mgmt flags1 */
 +		m[4] = 0x09200000;                      /* FP ctrl flags2 */
 +		m[5] = 0x01249249;                      /* FP ctrl | data flags3 */
-+		m[6] = (1u << 0) | (1u << 9) | (1u << 11);   /* MPDU_START | PPDU_END | PPDU_END_STATUS_DONE */
++		m[6] = (1u << 0) | (1u << 9) | (1u << 12);   /* fix93: MPDU_START | PPDU_END | PPDU_END_STATUS_DONE (bit 12, was 11) */
 +		bool e = (g_dpmask & 8) ? htt_send(m, sizeof(m)) : false;   /* fix70: ath11k_mac_mon_status_filter_default */
 +		/* fix81: qcacld dp_rxdma_ring_sel_cfg: RXDMA_BUF -> HTT_RXDMA_HOST_BUF_RING (0), SW_TO_HW so
 +		 * pdev = mac+1; mgmt stays on fw buffers; offsets valid (rx desc = hal_rx_desc_qcn9074, 384 B) */
