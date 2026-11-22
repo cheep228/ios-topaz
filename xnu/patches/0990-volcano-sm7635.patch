@@ -3166,7 +3166,7 @@ index 1d3ee17..62438a2 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..5d4a51d 100644
+index 8aa0c2f..89de879 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -28,7 +28,7 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -4534,10 +4534,10 @@ index 8aa0c2f..5d4a51d 100644
 +		LOG("t=%u ms: dp: rings not up, no HTT srng setup", g_ms);
 +		return;
 +	}
-+	bool a = dp_htt_ring(&dp_refill, 0, 1, true);   /* qcacld: HTT_RXDMA_HOST_BUF_RING, SW_TO_HW */
-+	bool b = true;                                  /* no mac buf ring (qcacld qca6750 has none) */
++	bool a = dp_htt_ring(&dp_refill, 5, 2, true);   /* HTT_HOST1_TO_FW_RXBUF_RING, SW_TO_SW */
++	bool b = dp_htt_ring(&dp_macbuf, 0, 1, true);   /* HTT_RXDMA_HOST_BUF_RING, SW_TO_HW */
 +	bool c = dp_htt_ring(&dp_rxerr, 7, 0, false);   /* HTT_RXDMA_NON_MONITOR_DEST_RING, HW_TO_SW */
-+	bool d = dp_htt_ring(&dp_mon, 1, 1, true);      /* HTT_RXDMA_MONITOR_STATUS_RING, SW_TO_HW */
++	bool d = true;                                  /* experiment: no monitor status ring */
 +	{
 +		uint32_t m[7];
 +		m[0] = 0x0c | (1u << 8) | (1u << 16);   /* RX_RING_SELECTION_CFG, pdev 1, ring MONITOR_STATUS */
@@ -4547,7 +4547,7 @@ index 8aa0c2f..5d4a51d 100644
 +		m[4] = 0x09200000;                      /* FP ctrl flags2 */
 +		m[5] = 0x01249249;                      /* FP ctrl | data flags3 */
 +		m[6] = (1u << 0) | (1u << 9) | (1u << 11);   /* MPDU_START | PPDU_END | PPDU_END_STATUS_DONE */
-+		bool e = htt_send(m, sizeof(m));
++		bool e = true;
 +		m[0] = 0x0c | (1u << 8) | (0u << 16);   /* RX_RING_SELECTION_CFG, pdev 1, ring RXDMA_HOST_BUF */
 +		m[1] = DP_BUF;
 +		m[2] = 0;                               /* mgmt stays with the fw */
