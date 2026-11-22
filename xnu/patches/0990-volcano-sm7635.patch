@@ -3166,7 +3166,7 @@ index 1d3ee17..62438a2 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..b9e68d4 100644
+index 8aa0c2f..cc05a11 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -20,6 +20,7 @@
@@ -4753,7 +4753,7 @@ index 8aa0c2f..b9e68d4 100644
 +	bool b = dp_htt_ring(&dp_macbuf, 0, 1, true);   /* HTT_RXDMA_HOST_BUF_RING, SW_TO_HW */
 +	bool c = dp_htt_ring(&dp_rxerr, 7, 0, false);   /* HTT_RXDMA_NON_MONITOR_DEST_RING, HW_TO_SW */
 +	bool b1 = true;
-+	bool c1 = dp_htt_ring(&dp_rxerr1, 7, 0, false, 1);
++	bool c1 = true;                                /* fix69: wcn6750 num_rxdma_per_pdev = 1, no mac 1 rings */
 +	b = b && b1;
 +	c = c && c1;
 +	bool d = true;                                  /* experiment: no monitor status ring */
@@ -4774,7 +4774,7 @@ index 8aa0c2f..b9e68d4 100644
 +		m[4] = 0;
 +		m[5] = (1u << 18) | (1u << 21) | (1u << 24);   /* FP data mcast | ucast | null */
 +		m[6] = 0xBF;                            /* MPDU/MSDU start, packet, MSDU/MPDU end, pkt header, attention */
-+		bool f = htt_send(m, sizeof(m));
++		bool f = m[6] == 0 && htt_send(m, sizeof(m));   /* fix69: fw default filter */
 +		for (int k = 0; k < 2; k++) {
 +			LOG("t=%u ms: dp: mon status rx filter %s, data ring filter %s", g_ms, e ? "ok" : "FAIL", f ? "ok" : "FAIL");
 +		}
