@@ -207,7 +207,7 @@ index 94c7552..ae228ee 100644
  	if (!on) {
  		return 0;
 diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
-index 65970f9..cbd2e15 100644
+index 65970f9..ea38355 100644
 --- a/bsd/dev/sweet_keys.c
 +++ b/bsd/dev/sweet_keys.c
 @@ -17,15 +17,25 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -235,7 +235,7 @@ index 65970f9..cbd2e15 100644
 +#define KEYS_GPIO_PPID   0x18du
 +#define KEYS_GPIO_BASE   0x8d00u
 +#define KEYS_GPIO_RT     (KEYS_GPIO_BASE + 0x10u)
-+#define KEYS_TLMM_AI_PA  0x0f047000u    /* TLMM tile 71: CFG +0, IN_OUT +4 */
++#define KEYS_TLMM_AI_PA  0x0f147000u    /* TLMM 0xf000000 + REG_BASE 0x100000 + 71*0x1000 */
  #define KEYS_NO_APID     0xffffu
  
 -static vm_offset_t keys_core, keys_obs, keys_cnfg;
