@@ -3325,7 +3325,7 @@ index 1d3ee17..62438a2 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..657cb07 100644
+index 8aa0c2f..a42be99 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -20,6 +20,7 @@
@@ -4681,7 +4681,7 @@ index 8aa0c2f..657cb07 100644
  	scanning = scan_send_start();
  	LOG("t=%u ms: scan: chan list (%u ch) %s, vdev %s, passive scan %s", g_ms, NFREQ, a ? "ok" : "FAILED",
  	    b ? "ok" : "FAILED", scanning ? "requested" : "FAILED");
-@@ -4328,12 +5161,597 @@ htt_publish(void)
+@@ -4328,12 +5161,616 @@ htt_publish(void)
  static uint8_t *put16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); return p + 2; }
  static uint8_t *put64(uint8_t *p, uint64_t v) { memcpy(p, &v, 8); return p + 8; }
  
@@ -5144,16 +5144,35 @@ index 8aa0c2f..657cb07 100644
 +		dp_lmac_publish(&dp_refill);
 +	}
 +	{
-+		uint32_t mtp = (dp_rdp[dp_mon.id] / dp_mon.words) % dp_mon.n;
++		/* fix74: the status ring tp never moves (stays 0) although RXDMA fills status buffers.
++		 * ath11k decides by content (first TLV = RX_STATUS_BUFFER_DONE), so reap in ring order
++		 * while the buffer's first word is non-zero, clear it and hand the slot back. */
++		static uint32_t mon_dumps;
 +		bool mon_any = false;
-+		for (int k = 0; k < 64 && dp_mon_reap != mtp; k++) {
++		for (int k = 0; k < 64; k++) {
 +			mb();
 +			volatile uint32_t *e = dp_mon.va + dp_mon.words * dp_mon_reap;
 +			uint64_t pa = e[0] | ((uint64_t)(e[1] & 0xFF) << 32);
 +			uint32_t cookie = e[1] >> 11;
-+			if (!dp_lmac_post(&dp_mon, pa, cookie)) {
++			uint32_t bi = (cookie - 0x10000u) % DP_N_MON;
++			volatile uint32_t *b = (volatile uint32_t *)(dp_monb + (uint64_t)bi * DP_BUF);
++			if (pa == 0 || b[0] == 0) {
 +				break;
 +			}
++			if (mon_dumps < 6) {
++				mon_dumps++;
++				for (int q = 0; q < 2; q++) {
++					LOG("dp mon t=%u: slot %u buf %u tp %u: %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x %08x %08x",
++					    g_ms, dp_mon_reap, bi, dp_rdp[dp_mon.id], b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
++					    b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
++				}
++			}
++			for (uint32_t w = 0; w < DP_BUF / 4; w++) {
++				b[w] = 0;
++			}
++			mb();
++			dp_buf_info(dp_mon.va + dp_mon.words * dp_mon.idx, pa, cookie, DP_RBM_SW1);
++			dp_mon.idx = (dp_mon.idx + 1) % dp_mon.n;
 +			dp_mon_reap = (dp_mon_reap + 1) % dp_mon.n;
 +			dp_mon_cnt++;
 +			mon_any = true;
@@ -5279,7 +5298,7 @@ index 8aa0c2f..657cb07 100644
  	/* ath10k_htt_send_frag_desc_bank_cfg_64 */
  	*p++ = H2T_FRAG_DESC_BANK_CFG;
  	*p++ = 0;
-@@ -4417,6 +5835,33 @@ htt_rx(const uint8_t *p, uint32_t len)
+@@ -4417,6 +5854,33 @@ htt_rx(const uint8_t *p, uint32_t len)
  {
  	uint8_t type = len != 0 ? p[0] : 0xFF;
  	htt_msgs++;
@@ -5313,7 +5332,7 @@ index 8aa0c2f..657cb07 100644
  	if (type == T2H_VERSION_CONF && len >= 3) {
  		LOG("t=%u ms: *** HTT VERSION_CONF %u.%u ***", g_ms, p[2], p[1]);
  		if (htt_state == 1) {
-@@ -4454,6 +5899,9 @@ htt_rx(const uint8_t *p, uint32_t len)
+@@ -4454,6 +5918,9 @@ htt_rx(const uint8_t *p, uint32_t len)
  static void
  htt_poll(void)
  {
@@ -5323,7 +5342,7 @@ index 8aa0c2f..657cb07 100644
  	if (htt_state == 1 && g_ms - htt_req_ms > 2000) {
  		LOG("t=%u ms: htt: no VERSION_CONF in 2 s, configuring anyway", g_ms);
  		htt_configure("timeout");
-@@ -4474,13 +5922,26 @@ scan_event(const uint8_t *t, uint32_t len)
+@@ -4474,13 +5941,26 @@ scan_event(const uint8_t *t, uint32_t len)
  	}
  	memcpy(e, t + 4, sizeof(e));
  	if (e[0] == 0x008 || e[0] == 0x100 || e[0] == 0x004) {
@@ -5350,7 +5369,7 @@ index 8aa0c2f..657cb07 100644
  		scans++;
  		LOG("t=%u ms: *** scan %u done (event %x): %u networks, %u beacons/probe responses, %u htt msdus ***", g_ms, scans, e[0], nbss, scan_frames, htt_msdus);
  		next_scan_ms = scans < 3 ? g_ms + 10000 : 0;
-@@ -4989,6 +6450,10 @@ static uint8_t s_ptk[48], s_anonce[32], s_snonce[32], s_group_cipher;
+@@ -4989,6 +6469,10 @@ static uint8_t s_ptk[48], s_anonce[32], s_snonce[32], s_group_cipher;
  static uint64_t s_replay;
  static uint8_t *s_mgmt_va;
  static uint64_t s_mgmt_pa;
@@ -5361,7 +5380,7 @@ index 8aa0c2f..657cb07 100644
  
  void (*topaz_wlan_rx_hook)(const uint8_t *frame, size_t length);
  void (*topaz_wlan_link_hook)(bool up);
-@@ -5146,6 +6611,61 @@ w_peer_param(uint32_t param, uint32_t value)
+@@ -5146,6 +6630,61 @@ w_peer_param(uint32_t param, uint32_t value)
  	return wmi_send(CMD_PEER_SET_PARAM, m, sizeof(m));
  }
  
@@ -5423,7 +5442,7 @@ index 8aa0c2f..657cb07 100644
  static bool
  w_ps_off(void)
  {
-@@ -5198,14 +6718,14 @@ w_ap_rates(uint8_t *out)
+@@ -5198,14 +6737,14 @@ w_ap_rates(uint8_t *out)
  static bool
  w_peer_assoc(uint32_t caps)
  {
@@ -5440,7 +5459,7 @@ index 8aa0c2f..657cb07 100644
  	p = w_p32(p, caps);
  	p = w_p32(p, 1);                            /* listen interval */
  	p += 4 * 6;                                 /* ht caps, max mpdu, density, rate caps; nss below */
-@@ -5223,8 +6743,11 @@ w_peer_assoc(uint32_t caps)
+@@ -5223,8 +6762,11 @@ w_peer_assoc(uint32_t caps)
  	}
  	p = r + rl;
  	p = wmi_put_tlv(p, TAG_ARRAY_BYTE, 0);
@@ -5454,7 +5473,7 @@ index 8aa0c2f..657cb07 100644
  }
  
  static bool
-@@ -5330,6 +6853,9 @@ w_tx_ether(const uint8_t *e, size_t len, bool clear)
+@@ -5330,6 +6872,9 @@ w_tx_ether(const uint8_t *e, size_t len, bool clear)
  	memcpy(f + 24, snap, 6);
  	memcpy(f + 30, e + 12, 2);                  /* ethertype */
  	memcpy(f + 32, e + 14, len - 14);
@@ -5464,7 +5483,7 @@ index 8aa0c2f..657cb07 100644
  	return htt_tx_frame(f, (uint32_t)(len - 14 + 32), clear);
  }
  
-@@ -5449,6 +6975,26 @@ w_eapol_rx(const uint8_t *e, size_t elen)
+@@ -5449,6 +6994,26 @@ w_eapol_rx(const uint8_t *e, size_t elen)
  				}
  			}
  		}
@@ -5491,7 +5510,7 @@ index 8aa0c2f..657cb07 100644
  		w_eapol_send(0x030A, NULL, NULL, 0);
  		IOSleep(5);                             /* message 4 out in the clear before the keys go in */
  		w_install_key(false, 0, WMI_CIPHER_CCMP, s_ptk + 32, 16);
-@@ -5464,6 +7010,27 @@ w_eapol_rx(const uint8_t *e, size_t elen)
+@@ -5464,6 +7029,27 @@ w_eapol_rx(const uint8_t *e, size_t elen)
  	}
  }
  
@@ -5519,7 +5538,7 @@ index 8aa0c2f..657cb07 100644
  /* ---- the join, step by step from the modem thread */
  static void
  w_teardown(void)
-@@ -5472,16 +7039,22 @@ w_teardown(void)
+@@ -5472,16 +7058,22 @@ w_teardown(void)
  		if (s_state >= S_4WAY) {
  			w_vdev_simple(CMD_VDEV_DOWN, TAG_VDEV_DOWN);
  		}
@@ -5544,7 +5563,7 @@ index 8aa0c2f..657cb07 100644
  }
  
  static void
-@@ -5551,6 +7124,22 @@ w_join_begin(void)
+@@ -5551,6 +7143,22 @@ w_join_begin(void)
  	LOG("t=%u ms: join: %.*s %02x:%02x:%02x:**:**:** %u MHz %s", g_ms, (int)s_ssid_len, s_ssid, s_bssid[0], s_bssid[1],
  	    s_bssid[2], s_freq, s_rsn ? "WPA2" : "open");
  	w_ps_off();
@@ -5567,7 +5586,7 @@ index 8aa0c2f..657cb07 100644
  	if (!w_vdev_start(s_freq, bcn, dtim)) {
  		w_join_end(EIO);
  		return;
-@@ -5647,15 +7236,42 @@ w_join_poll(void)
+@@ -5647,15 +7255,42 @@ w_join_poll(void)
  		w_join_begin();
  		return;
  	}
@@ -5612,7 +5631,7 @@ index 8aa0c2f..657cb07 100644
  			w_send_auth();
  			s_deadline = g_ms + 400;
  		} else if (g_ms > s_deadline) {
-@@ -5688,6 +7304,9 @@ w_rx_native(const uint8_t *f, uint32_t len)
+@@ -5688,6 +7323,9 @@ w_rx_native(const uint8_t *f, uint32_t len)
  		return;                                 /* data frames only */
  	}
  	uint32_t hl = ((f[1] & 3) == 3) ? 30 : 24;
@@ -5622,7 +5641,7 @@ index 8aa0c2f..657cb07 100644
  	const uint8_t *da = f + 4, *sa = (f[1] & 2) ? f + 16 : f + 10;   /* from DS: addr3 is the source */
  	const uint8_t *llc = f + hl;
  	if (len < hl + 8 || llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03) {
-@@ -5711,6 +7330,23 @@ w_rx_native(const uint8_t *f, uint32_t len)
+@@ -5711,6 +7349,23 @@ w_rx_native(const uint8_t *f, uint32_t len)
  	}
  }
  
@@ -5646,7 +5665,7 @@ index 8aa0c2f..657cb07 100644
  /* ---- the C API */
  extern "C" {
  int topaz_wlan_join(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pass, unsigned pass_len);
-@@ -5848,6 +7484,42 @@ w_tx_pump(void)
+@@ -5848,6 +7503,42 @@ w_tx_pump(void)
  	}
  }
  
@@ -5689,7 +5708,7 @@ index 8aa0c2f..657cb07 100644
  static void
  wmi_rx(const uint8_t *d, uint32_t len)
  {
-@@ -5857,6 +7529,9 @@ wmi_rx(const uint8_t *d, uint32_t len)
+@@ -5857,6 +7548,9 @@ wmi_rx(const uint8_t *d, uint32_t len)
  	}
  	memcpy(&id, d, 4);
  	id &= 0xFFFFFF;
@@ -5699,7 +5718,7 @@ index 8aa0c2f..657cb07 100644
  	switch (id) {
  	case WMI_EV_SERVICE_AVAILABLE: {
  		uint16_t tag;
-@@ -5908,6 +7583,125 @@ wmi_rx(const uint8_t *d, uint32_t len)
+@@ -5908,6 +7602,125 @@ wmi_rx(const uint8_t *d, uint32_t len)
  	}
  }
  
@@ -5825,7 +5844,7 @@ index 8aa0c2f..657cb07 100644
  /* from the watch loop */
  static void
  radio_poll(unsigned ms)
-@@ -5934,6 +7728,7 @@ radio_poll(unsigned ms)
+@@ -5934,6 +7747,7 @@ radio_poll(unsigned ms)
  	}
  	if (api_ready) {
  		w_join_poll();
@@ -5833,7 +5852,7 @@ index 8aa0c2f..657cb07 100644
  		w_tx_pump();
  	}
  	if (scan_started && !scanning && api_scan_asked && (s_state == S_IDLE || s_state == S_UP)) {
-@@ -5944,7 +7739,7 @@ radio_poll(unsigned ms)
+@@ -5944,7 +7758,7 @@ radio_poll(unsigned ms)
  			api_scans_done++;
  		}
  	}
@@ -5842,7 +5861,7 @@ index 8aa0c2f..657cb07 100644
  		next_scan_ms = 0;
  		scanning = scan_send_start();
  		LOG("t=%u ms: scan: passive scan %u %s", g_ms, scans + 1, scanning ? "requested" : "FAILED");
-@@ -6003,6 +7798,9 @@ static void
+@@ -6003,6 +7817,9 @@ static void
  svc_summary(void)
  {
  	LOG("WLFW: %s%s", w_step, w_fw_ready ? " (firmware ready)" : "");
@@ -5852,7 +5871,7 @@ index 8aa0c2f..657cb07 100644
  	LOG("services: pd-mapper %u reqs; tftp %u reqs (%u missing, %u writes); rmtfs reads %u writes %u (not kept) errors %u",
  	    pd_reqs, tftp_reqs, tftp_missing, tftp_writes, rmtfs_reads, rmtfs_writes, rmtfs_err);
  }
-@@ -6024,7 +7822,11 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -6024,7 +7841,11 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  		LOG("cannot create SMP2P item %u", ITEM_SMP2P_OUT);
  		return;
  	}
@@ -5865,7 +5884,7 @@ index 8aa0c2f..657cb07 100644
  	bool glink = false;
  	for (unsigned ms = 0; seconds == 0 || ms < seconds * 1000; ms++) {
  		if (ready && !glink) {
-@@ -6095,6 +7897,96 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -6095,6 +7916,96 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  	}
  }
  
@@ -5962,7 +5981,7 @@ index 8aa0c2f..657cb07 100644
  /* ---------------------------------------------------------------- PAS boot */
  
  static bool
-@@ -6112,8 +8004,8 @@ modem_boot(void)
+@@ -6112,8 +8023,8 @@ modem_boot(void)
  	uint32_t min_a = ~0u, max_a = 0, hash = ~0u;
  	bool relocate = false, ok = false;
  
@@ -5973,7 +5992,7 @@ index 8aa0c2f..657cb07 100644
  	if (part == NULL) {
  		return false;
  	}
-@@ -6121,24 +8013,29 @@ modem_boot(void)
+@@ -6121,24 +8032,29 @@ modem_boot(void)
  		LOG("modem SMP2P item %u already exists: modem is not cold, not touching it", ITEM_SMP2P_IN);
  		return false;
  	}
@@ -6007,7 +6026,7 @@ index 8aa0c2f..657cb07 100644
  			goto out;
  		}
  		struct elf32_phdr *ph = (struct elf32_phdr *)(mdt + eh->e_phoff);
-@@ -6156,8 +8053,8 @@ modem_boot(void)
+@@ -6156,8 +8072,8 @@ modem_boot(void)
  			max_a = MAX(max_a, ph[i].p_paddr + ph[i].p_memsz);
  		}
  		LOG("phdrs=%u hash=%u region %08x..%08x relocate=%u", eh->e_phnum, hash, min_a, max_a, relocate);
@@ -6018,7 +6037,7 @@ index 8aa0c2f..657cb07 100644
  			goto out;
  		}
  
-@@ -6175,7 +8072,7 @@ modem_boot(void)
+@@ -6175,7 +8091,7 @@ modem_boot(void)
  		} else {
  			/* split firmware: the hash segment is its own .bNN file (qcom_mdt_read_metadata) */
  			char hname[16];
@@ -6027,7 +6046,7 @@ index 8aa0c2f..657cb07 100644
  			int64_t got = fw_read(hname, meta + hdr, ph[hash].p_filesz);
  			LOG("hash from %s: %lld of %u bytes", hname, got, ph[hash].p_filesz);
  			if (got != (int64_t)ph[hash].p_filesz) {
-@@ -6214,7 +8111,7 @@ modem_boot(void)
+@@ -6214,7 +8130,7 @@ modem_boot(void)
  			uint8_t *dst = (uint8_t *)m->getVirtualAddress() + off;
  			int64_t got = 0;
  			if (ph[i].p_filesz != 0) {
@@ -6036,7 +6055,7 @@ index 8aa0c2f..657cb07 100644
  				got = fw_read(name, dst, ph[i].p_filesz);
  				if (got != (int64_t)ph[i].p_filesz) {
  					LOG("%s: %lld of %u bytes", name, got, ph[i].p_filesz);
-@@ -6277,14 +8174,19 @@ topaz_soc_map(void)
+@@ -6277,14 +8193,19 @@ topaz_soc_map(void)
  	uint8_t probe[16];
  	int err = EAGAIN;
  	for (int i = 0; i < 120 && err == EAGAIN; i++) {
@@ -6058,7 +6077,7 @@ index 8aa0c2f..657cb07 100644
  	tcsr_mutex = (volatile uint8_t *)ml_io_map(TCSR_MUTEX_PA, 0x4000);
  	if (err != 0) {
  		LOG("partition %s: %d", fw_part, err);
-@@ -6374,12 +8276,19 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -6374,12 +8295,19 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
  		return;
  	}
  	LOG("SMEM version %u", *(volatile uint32_t *)(smem + 64 + 7 * 4) >> 16);
@@ -6080,7 +6099,7 @@ index 8aa0c2f..657cb07 100644
  	}
  	/* keep the mappings: the modem uses SMEM from now on */
  	thread_terminate(current_thread());
-@@ -6394,11 +8303,32 @@ topaz_modem_init(void)
+@@ -6394,11 +8322,32 @@ topaz_modem_init(void)
  	uint32_t on = 0;
  	thread_t thread;
  
