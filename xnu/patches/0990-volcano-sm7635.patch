@@ -3325,7 +3325,7 @@ index 1d3ee17..62438a2 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..65bc3a9 100644
+index 8aa0c2f..a81da8a 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -20,15 +20,17 @@
@@ -4733,7 +4733,7 @@ index 8aa0c2f..65bc3a9 100644
 +/* fix82: boot-arg knobs for bisecting fw DmaLeakDetect: wifidp bits 1 post refill bufs, 2 macbuf setup,
 + * 4 rxerr setup, 8 mon ring + filter, 16 refill setup; wifirbm = rx buffer return manager */
 +static uint32_t g_dpmask = 31, g_rx_rbm = 6, g_errdrain = 1;   /* fix85: ath11k wcn6750 rx_buf_rbm = SW3_BM */
-+#define DP_N_REFILL         1024
++#define DP_N_REFILL         4096   /* fix89: ath11k DP_RXDMA_BUF_RING_SIZE */
 +#define DP_N_MON            128
 +#define DP_BUF              2048
 +#define DP_LMAC0            111                 /* HAL_SRNG_RING_ID_LMAC1_ID_START */
@@ -4846,9 +4846,9 @@ index 8aa0c2f..65bc3a9 100644
 +	    dp_alloc(&dp_tcl_cmd, 8, 32, 24) && dp_alloc(&dp_tcl_sts, 9, 32, 25) && dp_alloc(&dp_idle, 2, DP_N_LINK, 104) &&
 +	    dp_alloc(&dp_sw2wbm, 8, 64, 105) && dp_alloc(&dp_wbm0, 8, 512, 106) && dp_alloc(&dp_rxrel, 8, 1024, 109) &&
 +	    dp_alloc(&dp_wbm1, 8, 1024, 107) && dp_alloc(&dp_wbm2, 8, 512, 108) && dp_alloc(&dp_wbm4, 8, 512, 110) &&
-+	    dp_alloc(&dp_refill, 2, DP_N_REFILL, 111) && dp_alloc(&dp_macbuf, 2, 1024, 112) &&
++	    dp_alloc(&dp_refill, 2, DP_N_REFILL, 111) && dp_alloc(&dp_macbuf, 2, 2048, 112) &&
 +	    dp_alloc(&dp_mon, 2, DP_N_MON, 115) && dp_alloc(&dp_rxerr, 8, 1024, 116) &&
-+	    dp_alloc(&dp_macbuf1, 2, 1024, 112 + 9) && dp_alloc(&dp_rxerr1, 8, 1024, 116 + 9);   /* mac_id 1: +HAL_SRNG_RINGS_PER_LMAC */
++	    dp_alloc(&dp_macbuf1, 2, 2048, 112 + 9) && dp_alloc(&dp_rxerr1, 8, 1024, 116 + 9);   /* mac_id 1: +HAL_SRNG_RINGS_PER_LMAC */
 +	uint8_t *link = ok ? (uint8_t *)pool_alloc((uint64_t)DP_N_LINK * 128, &link_pa) : NULL;
 +	dp_rxb = link != NULL ? (uint8_t *)pool_alloc((uint64_t)DP_N_REFILL * DP_BUF, &dp_rxb_pa) : NULL;
 +	dp_monb = dp_rxb != NULL ? (uint8_t *)pool_alloc((uint64_t)DP_N_MON * DP_BUF, &dp_monb_pa) : NULL;
