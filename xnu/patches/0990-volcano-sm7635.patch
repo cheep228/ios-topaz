@@ -207,7 +207,7 @@ index 94c7552..ae228ee 100644
  	if (!on) {
  		return 0;
 diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
-index 65970f9..e40a0ab 100644
+index 65970f9..cbd2e15 100644
 --- a/bsd/dev/sweet_keys.c
 +++ b/bsd/dev/sweet_keys.c
 @@ -17,15 +17,25 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -303,7 +303,7 @@ index 65970f9..e40a0ab 100644
  				sweet_hid_key(k, state[k]);
  			}
  		}
-@@ -137,37 +150,39 @@ sweet_keys_init(void)
+@@ -137,37 +150,55 @@ sweet_keys_init(void)
  		printf("SWEET KEYS: disabled (sweetkeys=0)\n");
  		return;
  	}
@@ -318,10 +318,20 @@ index 65970f9..e40a0ab 100644
  		printf("SWEET KEYS: MMIO mapping failed\n");
  		return;
  	}
++	int step = 99;
++	(void)PE_parse_boot_argn("sweetkeysstep", &step, sizeof(step));
++	printf("SWEET KEYS: step1 mapped core=%#lx cnfg=%#lx obs=%#lx tlmm=%#lx, reading core+0\n", (unsigned long)keys_core, (unsigned long)keys_cnfg, (unsigned long)keys_obs, (unsigned long)keys_tlmm_ai);
++	delay(20000);
++	if (step < 1) { return; }
  	keys_version = keys_rd(keys_core, 0);
  	uint32_t count = keys_rd(keys_core, 4) & 0x7ffu;
 -	if (keys_version < 0x50000000u || keys_version >= 0x70000000u ||
 -	    count == 0 || count > 512) {
++	printf("SWEET KEYS: step2 core ok ver=%#x feat=%#x, reading cnfg+0\n", keys_version, keys_rd(keys_core, 4));
++	delay(20000);
++	printf("SWEET KEYS: step3 cnfg0=%#x, scanning apid map\n", keys_rd(keys_cnfg, 0));
++	delay(20000);
++	if (step < 2) { return; }
 +	if (keys_version < 0x70000000u || keys_version >= 0x80000000u ||
 +	    count == 0 || count > 1024) {
  		printf("SWEET KEYS: unsupported arbiter version=%#x apids=%u\n",
@@ -332,6 +342,9 @@ index 65970f9..e40a0ab 100644
 -	keys_gpio_apid = keys_find_apid(0x0c4, count);
 +	keys_pon_apid = keys_find_apid(KEYS_PON_PPID, count);
 +	keys_gpio_apid = keys_find_apid(KEYS_GPIO_PPID, count);
++	printf("SWEET KEYS: step4 pon-apid=%u gpio-apid=%u, observer read\n", keys_pon_apid, keys_gpio_apid);
++	delay(20000);
++	if (step < 3) { return; }
  	uint8_t pon = 0, gpio = 0, mode = 0, en = 0, subtype = 0;
  	bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
  	bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
@@ -342,6 +355,9 @@ index 65970f9..e40a0ab 100644
 +	bool mok = keys_read(keys_gpio_apid, KEYS_GPIO_BASE + 0x40u, &mode);
 +	bool eok = keys_read(keys_gpio_apid, KEYS_GPIO_BASE + 0x46u, &en);
 +	bool sok = keys_read(keys_gpio_apid, KEYS_GPIO_BASE + 0x05u, &subtype);
++	printf("SWEET KEYS: step5 spmi reads done pon=%#x/%d gpio=%#x/%d st=%#x, reading tlmm\n", pon, pok, gpio, gok, keys_last_status);
++	delay(20000);
++	if (step < 4) { keys_tlmm_ai = 0; }
 +	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u gpio6-apid=%u pon=%#x/%d gpio=%#x/%d mode=%#x/%d en=%#x/%d subtype=%#x/%d tlmm71 cfg=%#x io=%#x\n",
  	    keys_version, count, keys_pon_apid, keys_gpio_apid,
 -	    pon, pok, gpio, gok, mode, mok, en, eok, subtype, sok);
