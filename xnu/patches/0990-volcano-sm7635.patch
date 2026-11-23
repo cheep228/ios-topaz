@@ -7416,7 +7416,7 @@ index 9fd1cb9..8734854 100644
  #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index 9429767..2d303bd 100644
+index 9429767..aa886a2 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
 @@ -14,11 +14,11 @@
@@ -7433,7 +7433,7 @@ index 9429767..2d303bd 100644
  #define EARLY_STRIDE (4320u / 4)
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
-@@ -43,9 +43,85 @@ sweet_early_clear_row(void)
+@@ -43,9 +43,64 @@ sweet_early_clear_row(void)
  	}
  }
  
@@ -7445,34 +7445,13 @@ index 9429767..2d303bd 100644
 + */
 +#define VOLCANO_RAMOOPS_SIG     0x43474244u
 +#define VOLCANO_RAMOOPS_DATA    (0x200000u - 12u)
-+#define VOLCANO_RAMOOPS_PMSG    0x200000u       /* fix112: DT pmsg-size zone right after the console */
 +static volatile uint8_t *volcano_early_log = (volatile uint8_t *)(uintptr_t)VOLCANO_RAMOOPS_PA;
-+
-+static void volcano_log_put1(volatile uint8_t *base, char c);
-+static int volcano_pmsg_ready;          /* fix112: the pmsg zone holds Android's logd records until we reset it */
 +
 +void
 +volcano_log_putc(volatile uint8_t *base, char c)
 +{
-+	if (base == NULL || c == '\r') {
-+		return;
-+	}
-+	volcano_log_put1(base, c);
-+	volatile uint32_t *h2 = (volatile uint32_t *)(base + VOLCANO_RAMOOPS_PMSG);
-+	if (!volcano_pmsg_ready) {
-+		volcano_pmsg_ready = 1;
-+		h2[1] = 0;
-+		h2[2] = 0;
-+		h2[0] = VOLCANO_RAMOOPS_SIG;
-+	}
-+	volcano_log_put1(base + VOLCANO_RAMOOPS_PMSG, c);
-+}
-+
-+static void
-+volcano_log_put1(volatile uint8_t *base, char c)
-+{
 +	volatile uint32_t *h = (volatile uint32_t *)base;
-+	if (h[0] != VOLCANO_RAMOOPS_SIG) {
++	if (base == NULL || c == '\r' || h[0] != VOLCANO_RAMOOPS_SIG) {
 +		return;
 +	}
 +	uint32_t n = h[2];
@@ -7519,7 +7498,7 @@ index 9429767..2d303bd 100644
  	if (early_disabled) {
  		return;
  	}
-@@ -133,6 +209,9 @@ void
+@@ -133,6 +188,9 @@ void
  sweet_early_relocate(uint64_t base)
  {
  	sweet_early_mark(8, "leaving bootstrap TTBR0");
@@ -7705,7 +7684,7 @@ index 6089db9..0d8cce3 100644
  
  #define gicd_read32(offset) (_gic_read32(gicd_base + (offset)))
 diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
-index 19f27cd..a4f4657 100644
+index 19f27cd..7c76d71 100644
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
 @@ -718,6 +718,23 @@ extern unsigned char iso_font[256 * 16];
@@ -7750,7 +7729,7 @@ index 19f27cd..a4f4657 100644
  	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
  	sweet_early_mark(18, "fbcon mapping returned");
 +#if defined(VOLCANO)
-+	fbcon_log = (volatile uint8_t *)ml_io_map_wcomb(VOLCANO_RAMOOPS_PA, 0x400000);   /* fix112: console + pmsg */
++	fbcon_log = (volatile uint8_t *)ml_io_map_wcomb(VOLCANO_RAMOOPS_PA, 0x200000);
 +#endif
  	if (fbcon_base != NULL) {
  		register_serial_functions(&sweet_fbcon_serial_functions);
