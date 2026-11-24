@@ -3118,7 +3118,7 @@ index 96c557b..208c1f2 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1d3ee17..f24f293 100644
+index 1d3ee17..f7be142 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -40,6 +40,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -3141,7 +3141,7 @@ index 1d3ee17..f24f293 100644
  static uint64_t sweet_fps_tick;         /* mach time of the last vsync tick (SWEET FPS) */
  
  /* boot-arg sweetfb_nohold=1 (a test): frames on the panel are not marked in use */
-@@ -94,6 +100,13 @@ class OSDictionary;
+@@ -94,6 +100,32 @@ class OSDictionary;
  static void sweet_bl_log(const char *who, OSDictionary *d);
  extern "C" void sweet_dcache_clean(vm_offset_t addr, unsigned length);  /* osfmk/arm/caches.c */
  extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -3152,10 +3152,29 @@ index 1d3ee17..f24f293 100644
 + * last page of the splash region (stock DT splash_region 0xe3940000+0x2b00000).
 + */
 +static uint8_t *sweet_dsi_va;
++/* brightness status, printed every 20 s (ramoops copies get voted on) */
++static struct { uint32_t self, sent, ok, fail, last, props, nits; } sweet_bls;
++static thread_call_t sweet_bls_call;
++static volatile uint8_t *sweet_bls_dsi;
++static void
++sweet_bls_tick(thread_call_param_t, thread_call_param_t)
++{
++	static uint32_t n;
++	volatile uint8_t *d = sweet_bls_dsi;
++	IOLog("@@B@@ self %u sent %u ok %u fail %u last %#x props %u nits %u ctrl %#x dma %#x int %#x err %#x\n",
++	    sweet_bls.self, sweet_bls.sent, sweet_bls.ok, sweet_bls.fail, sweet_bls.last, sweet_bls.props, sweet_bls.nits,
++	    d ? *(volatile uint32_t *)(d + 0x004) : 0, d ? *(volatile uint32_t *)(d + 0x03c) : 0,
++	    d ? *(volatile uint32_t *)(d + 0x110) : 0, d ? *(volatile uint32_t *)(d + 0x0c4) : 0);
++	if (++n < 14) {
++		uint64_t dl;
++		clock_interval_to_deadline(20, kSecondScale, &dl);
++		thread_call_enter_delayed(sweet_bls_call, dl);
++	}
++}
  
  #if defined(SWEET)
  #include <IOKit/IOService.h>
-@@ -127,7 +140,14 @@ enum {
+@@ -127,7 +159,14 @@ enum {
  #define SWEET_FB_SWAP_REC_SIZE          0x46c
  #define SWEET_FB_LAYERS                 4
  #define SWEET_FB_FADE_STEPS             30      /* ~0.5 s at 60 Hz */
@@ -3171,7 +3190,7 @@ index 1d3ee17..f24f293 100644
  #define SWEET_FB_NOTIFY_TYPES           8
  #define SWEET_FB_NOTIFY_VSYNC           5
  #define SWEET_FB_VSYNC_US               16667
-@@ -280,6 +300,9 @@ class IOAcceleratorES : public IOService {
+@@ -280,6 +319,9 @@ class IOAcceleratorES : public IOService {
  
  OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
  OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
@@ -3181,7 +3200,7 @@ index 1d3ee17..f24f293 100644
  
  class IOMobileFramebufferUserClient : public IOUserClient {
  	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
-@@ -312,6 +335,7 @@ AppleCLCD::start(IOService *provider)
+@@ -312,6 +354,7 @@ AppleCLCD::start(IOService *provider)
  	if (!IOService::start(provider)) {
  		return false;
  	}
@@ -3189,7 +3208,7 @@ index 1d3ee17..f24f293 100644
  	topaz_modem_init();
  	topaz_audio_init();
  	sweet_amfi_service_init();
-@@ -340,6 +364,20 @@ AppleCLCD::start(IOService *provider)
+@@ -340,6 +383,20 @@ AppleCLCD::start(IOService *provider)
  	fClients = OSArray::withCapacity(4);
  	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
  	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
@@ -3210,7 +3229,7 @@ index 1d3ee17..f24f293 100644
  	fWorkLoop = IOWorkLoop::workLoop();
  	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
  		IOLog("SWEET FB: setup failed\n");
-@@ -352,16 +390,91 @@ AppleCLCD::start(IOService *provider)
+@@ -352,16 +409,91 @@ AppleCLCD::start(IOService *provider)
  		IOLog("SWEET FB: no vsync timer\n");
  		return false;
  	}
@@ -3305,7 +3324,7 @@ index 1d3ee17..f24f293 100644
  	fBlSent = ~0u;
  	fBlCall = thread_call_allocate(&AppleCLCD::blWork, this);
  	if (fDsi != NULL) {
-@@ -372,7 +485,13 @@ AppleCLCD::start(IOService *provider)
+@@ -372,7 +504,21 @@ AppleCLCD::start(IOService *provider)
  		 * runs digital dimming, a colour filter over every frame, which the
  		 * CPU renderer cannot afford (the UI dropped to under 1 fps).
  		 */
@@ -3313,13 +3332,21 @@ index 1d3ee17..f24f293 100644
 +		uint32_t blOn = 1;
 +		/* boot self test: one level, logs done / NO DONE with the DSI state */
 +		setPanelLevel(fBlLevel);
++		sweet_bls.self = 1 + (sweet_bls.ok != 0);
++		sweet_bls_dsi = fDsi;
++		sweet_bls_call = thread_call_allocate(sweet_bls_tick, NULL);
++		if (sweet_bls_call != NULL) {
++			uint64_t dl;
++			clock_interval_to_deadline(20, kSecondScale, &dl);
++			thread_call_enter_delayed(sweet_bls_call, dl);
++		}
 +#else
  		uint32_t blOn = 0;
 +#endif
  		(void)PE_parse_boot_argn("sweetbl", &blOn, sizeof(blOn));
  		AppleARMBacklight *bl = blOn ? OSTypeAlloc(AppleARMBacklight) : NULL;
  		if (bl != NULL && bl->init()) {
-@@ -399,7 +518,7 @@ AppleCLCD::start(IOService *provider)
+@@ -399,7 +545,7 @@ AppleCLCD::start(IOService *provider)
  	}
  	OSSafeReleaseNULL(accel);
  	/* dpu sm6115 catalog: intf_1 at mdp+0x6a800, mdp at 0x5e01000 */
@@ -3328,7 +3355,7 @@ index 1d3ee17..f24f293 100644
  	if (fIntf1 != NULL) {
  		volatile uint32_t *r = fIntf1 + 0x800 / 4;
  		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
-@@ -472,6 +591,9 @@ AppleCLCD::start(IOService *provider)
+@@ -472,6 +618,9 @@ AppleCLCD::start(IOService *provider)
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
  	registerService();
@@ -3338,7 +3365,7 @@ index 1d3ee17..f24f293 100644
  	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
  	return true;
-@@ -590,7 +712,22 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -590,7 +739,22 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		fb->flipBack();
  	}
  	if (rec != NULL) {
@@ -3361,7 +3388,7 @@ index 1d3ee17..f24f293 100644
  		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
  		IOLockLock(fb->fLock);
  		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
-@@ -981,7 +1118,7 @@ AppleCLCD::dsiSend(const uint8_t hdr[4], const uint8_t *payload, uint32_t len)
+@@ -981,7 +1145,7 @@ AppleCLCD::dsiSend(const uint8_t hdr[4], const uint8_t *payload, uint32_t len)
  	if (fDsi == NULL || fDsiBuf == NULL || len > 60) {
  		return false;
  	}
@@ -3370,7 +3397,7 @@ index 1d3ee17..f24f293 100644
  	uint32_t size = (4 + len + 3) & ~3u;
  	memset(p, 0xff, 64);
  	memcpy(p, hdr, 4);
-@@ -1006,7 +1143,11 @@ AppleCLCD::dsiSend(const uint8_t hdr[4], const uint8_t *payload, uint32_t len)
+@@ -1006,7 +1170,11 @@ AppleCLCD::dsiSend(const uint8_t hdr[4], const uint8_t *payload, uint32_t len)
  	 */
  	static int hs = -1;
  	if (hs < 0) {
@@ -3382,7 +3409,21 @@ index 1d3ee17..f24f293 100644
  		(void)PE_parse_boot_argn("sweetdsi_hs", &hs, sizeof(hs));
  	}
  	dsi_wr(fDsi, 0x03c, hs ? (dma & ~(1u << 26)) : (dma | (1u << 26)));
-@@ -1093,13 +1234,13 @@ AppleCLCD::setProperties(OSObject *properties)
+@@ -1070,6 +1238,13 @@ AppleCLCD::setPanelLevel(uint32_t level)
+ 	uint8_t cmd[3] = { 0x51, (uint8_t)(level >> 8), (uint8_t)level };   /* MSB first */
+ 	IOLockLock(fBlLock);
+ 	bool done = dsiDcsLong(cmd, sizeof(cmd));
++	sweet_bls.sent++;
++	if (done) {
++		sweet_bls.ok++;
++	} else {
++		sweet_bls.fail++;
++	}
++	sweet_bls.last = level;
+ 	IOLockUnlock(fBlLock);
+ 	static uint32_t logs;
+ 	if (logs++ < 8 || !done) {
+@@ -1093,13 +1268,15 @@ AppleCLCD::setProperties(OSObject *properties)
  	}
  	uint64_t v = n->unsigned64BitValue();
  	setProperty("IOMFBBrightnessLevel", v, 32);
@@ -3390,6 +3431,8 @@ index 1d3ee17..f24f293 100644
 -	uint64_t level = (v * 0x7ffull) / ((uint64_t)SWEET_FB_MAX_NITS << 16);
 -	if (level > 0x7ff) {
 -		level = 0x7ff;
++	sweet_bls.props++;
++	sweet_bls.nits = (uint32_t)(v >> 16);
 +	/* 0..SWEET_FB_MAX_NITS nits -> DBV SWEET_FB_DBV_MIN..SWEET_FB_DBV_MAX */
 +	uint64_t level = (v * SWEET_FB_DBV_MAX) / ((uint64_t)SWEET_FB_MAX_NITS << 16);
 +	if (level > SWEET_FB_DBV_MAX) {
@@ -3402,7 +3445,7 @@ index 1d3ee17..f24f293 100644
  	}
  	IOLockLock(fLock);
  	fBlLevel = (uint32_t)level;
-@@ -1433,6 +1574,8 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -1433,6 +1610,8 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  	if (fFlip[0] != NULL) {
  		flipBack();
@@ -3411,7 +3454,7 @@ index 1d3ee17..f24f293 100644
  	}
  }
  
-@@ -1590,9 +1733,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1590,9 +1769,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			 */
  			int stayon = 0;
  			if (off && PE_parse_boot_argn("sweetfb_stayon", &stayon, sizeof(stayon)) && stayon) {
@@ -3425,7 +3468,7 @@ index 1d3ee17..f24f293 100644
  			IOLockLock(fFB->fLock);
  			bool changed = off != fFB->fPowerOff;
  			if (changed) {
-@@ -1638,3 +1785,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1638,3 +1821,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  	return ret;
  }
  #endif /* SWEET */
