@@ -3341,7 +3341,7 @@ index 1d3ee17..190991c 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..898cb52 100644
+index 8aa0c2f..2d654ab 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -20,15 +20,17 @@
@@ -3363,7 +3363,7 @@ index 8aa0c2f..898cb52 100644
  #define SCM_FN(svc, cmd)    (0x42000000u | ((uint32_t)(svc) << 8) | (uint32_t)(cmd))
  #define SCM_SVC_PIL         0x02
  #define PIL_INIT_IMAGE      0x01
-@@ -44,22 +46,47 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -44,22 +46,48 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
  #define MDT_RELOCATABLE     (1u << 27)
  
  /* middle DDR bank, RAM the kernel does not manage; below 0xF0000000 for TZ/the modem */
@@ -3382,6 +3382,7 @@ index 8aa0c2f..898cb52 100644
  #define HWLOCK_APPS_ID      1
  #define APCS_PA             0x0F111000ull
 +static void w_bten(const char *when, uint32_t drive);   /* fix138: defined near w_ipa_rail */
++static void w_egpio(const char *when, unsigned give);   /* fix139 */
  #define APCS_IPC            8                   /* apcs_glb mailbox */
  #define MPSS_SMP2P_BIT      14
 +#define GLINK_IRQ_BIT       12
@@ -3418,7 +3419,7 @@ index 8aa0c2f..898cb52 100644
  #define SMP2P_MAGIC         0x504D5324u         /* "$SMP" */
  #define SMP2P_MAX_ENTRY     16
  
-@@ -127,6 +154,22 @@ pool_alloc(uint64_t size, uint64_t *pa)
+@@ -127,6 +155,22 @@ pool_alloc(uint64_t size, uint64_t *pa)
  	return va;
  }
  
@@ -3441,7 +3442,7 @@ index 8aa0c2f..898cb52 100644
  /* ---------------------------------------------------------------- TrustZone */
  
  static uint64_t
-@@ -208,6 +251,217 @@ static const struct { const char *name; uint32_t off, size, crc; } fw_files[] =
+@@ -208,6 +252,217 @@ static const struct { const char *name; uint32_t off, size, crc; } fw_files[] =
  	{ "modem.mdt", 0x4a6d000, 0x238c, 0x8742d22b },
  };
  
@@ -3659,7 +3660,7 @@ index 8aa0c2f..898cb52 100644
  static int
  fw_find(const char *name)
  {
-@@ -222,6 +476,12 @@ fw_find(const char *name)
+@@ -222,6 +477,12 @@ fw_find(const char *name)
  static int64_t
  fw_size(const char *name)
  {
@@ -3672,7 +3673,7 @@ index 8aa0c2f..898cb52 100644
  	int i = fw_find(name);
  	return i < 0 ? -1 : (int64_t)fw_files[i].size;
  }
-@@ -230,6 +490,11 @@ fw_size(const char *name)
+@@ -230,6 +491,11 @@ fw_size(const char *name)
  static int64_t
  fw_read(const char *name, void *dst, uint64_t max)
  {
@@ -3684,7 +3685,7 @@ index 8aa0c2f..898cb52 100644
  	int i = fw_find(name), err;
  
  	if (i < 0 || fw_files[i].size > max) {
-@@ -359,14 +624,27 @@ smem_alloc(struct smem_part_hdr *p, uint16_t item, uint32_t size)
+@@ -359,14 +625,27 @@ smem_alloc(struct smem_part_hdr *p, uint16_t item, uint32_t size)
  
  /* ---------------------------------------------------------------- SMP2P */
  
@@ -3714,7 +3715,7 @@ index 8aa0c2f..898cb52 100644
  static struct smp2p_hdr *
  smp2p_create_out(struct smem_part_hdr *p)
  {
-@@ -378,7 +656,7 @@ smp2p_create_out(struct smem_part_hdr *p)
+@@ -378,7 +657,7 @@ smp2p_create_out(struct smem_part_hdr *p)
  	}
  	o->magic = SMP2P_MAGIC;
  	o->local_pid = 0;
@@ -3723,7 +3724,7 @@ index 8aa0c2f..898cb52 100644
  	o->total = SMP2P_MAX_ENTRY;
  	o->valid = 0;
  	o->features[0] = 1;                         /* SSR_ACK */
-@@ -443,7 +721,6 @@ extern "C" void read_random(void *buffer, unsigned int numBytes);
+@@ -443,7 +722,6 @@ extern "C" void read_random(void *buffer, unsigned int numBytes);
  #define SMEM_GLINK_FIFO_TX  479
  #define SMEM_GLINK_FIFO_RX  480
  #define GLINK_TX_SIZE       0x4000u
@@ -3731,7 +3732,7 @@ index 8aa0c2f..898cb52 100644
  #define GLINK_FEATURES      1                   /* INTENT_REUSE */
  
  #define CMD_VERSION         0
-@@ -574,8 +851,7 @@ tx_write(const void *hdr, uint32_t hlen, const void *data, uint32_t dlen)
+@@ -574,8 +852,7 @@ tx_write(const void *hdr, uint32_t hlen, const void *data, uint32_t dlen)
  	mb();
  	g_desc[1] = head;
  	mb();
@@ -3741,7 +3742,7 @@ index 8aa0c2f..898cb52 100644
  	g_tx_msgs++;
  	return true;
  }
-@@ -907,8 +1183,7 @@ rx_one(void)
+@@ -907,8 +1184,7 @@ rx_one(void)
  		break;
  	case CMD_READ_NOTIF:
  		rx_advance(8);
@@ -3751,7 +3752,7 @@ index 8aa0c2f..898cb52 100644
  		break;
  	case CMD_TX_DATA:
  	case CMD_TX_DATA_CONT: {
-@@ -2360,6 +2635,9 @@ static const struct { const char *path; uint32_t size; uint16_t ext, next; } fw_
+@@ -2360,6 +2636,9 @@ static const struct { const char *path; uint32_t size; uint16_t ext, next; } fw_
  static int
  fw_all_find(const char *path)
  {
@@ -3761,7 +3762,7 @@ index 8aa0c2f..898cb52 100644
  	for (unsigned i = 0; i < sizeof(fw_all) / sizeof(fw_all[0]); i++) {
  		if (strcmp(fw_all[i].path, path) == 0) {
  			return (int)i;
-@@ -2458,14 +2736,34 @@ qm_string(const uint8_t *d, uint32_t len, uint8_t type, char *out, size_t max)
+@@ -2458,14 +2737,34 @@ qm_string(const uint8_t *d, uint32_t len, uint8_t type, char *out, size_t max)
  	}
  }
  
@@ -3803,7 +3804,7 @@ index 8aa0c2f..898cb52 100644
  };
  static unsigned pd_reqs;
  
-@@ -2474,35 +2772,49 @@ pdm_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t *
+@@ -2474,35 +2773,49 @@ pdm_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t *
  {
  	struct qmsg m;
  	char name[80];
@@ -3870,7 +3871,7 @@ index 8aa0c2f..898cb52 100644
  	qm_tlv(&m, 0x10, &v, 2);
  	v = 1;
  	qm_tlv(&m, 0x11, &v, 2);
-@@ -2511,7 +2823,9 @@ pdm_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t *
+@@ -2511,7 +2824,9 @@ pdm_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t *
  	}
  	qm_send(&m, PORT_PDM, node, port);
  	pd_reqs++;
@@ -3881,7 +3882,7 @@ index 8aa0c2f..898cb52 100644
  }
  
  /* tftp */
-@@ -3058,6 +3372,13 @@ rmtfs_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t
+@@ -3058,6 +3373,13 @@ rmtfs_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t
  #define WLFW_MSA_INFO       0x2D
  #define WLFW_MSA_READY      0x2E
  #define WLFW_HOST_CAP       0x34
@@ -3895,7 +3896,7 @@ index 8aa0c2f..898cb52 100644
  #define WLFW_MSA_BASE       0x51900000u         /* DTB wlan_msa_region, inside "PIL Reserved" */
  #define WLFW_MSA_SIZE       0x00100000u
  #define WLFW_CLIENT_ID      0x4b4e454c          /* ath10k ATH10K_QMI_CLIENT_ID */
-@@ -3067,10 +3388,32 @@ rmtfs_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t
+@@ -3067,10 +3389,32 @@ rmtfs_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t
  
  static uint32_t w_node, w_port, w_board = 0xFF, w_bdf_seg;
  static uint16_t w_txn = 1;
@@ -3928,7 +3929,7 @@ index 8aa0c2f..898cb52 100644
  
  struct wmsg { uint8_t *b; uint32_t n; };
  
-@@ -3168,13 +3511,18 @@ w_bdf_segment(void)
+@@ -3168,13 +3512,18 @@ w_bdf_segment(void)
  	t[0] = 0x13;
  	memcpy(t + 1, &tl, 2);
  	memcpy(t + 3, &dl, 2);
@@ -3948,7 +3949,7 @@ index 8aa0c2f..898cb52 100644
  	wm_send(&m);
  	w_bdf_off += chunk;
  	w_bdf_seg++;
-@@ -3182,6 +3530,80 @@ w_bdf_segment(void)
+@@ -3182,6 +3531,80 @@ w_bdf_segment(void)
  }
  
  /* bdwlan.bNN for board ids < 0x100, bdwlan.NNN otherwise, bdwlan.bin as fallback */
@@ -4029,7 +4030,7 @@ index 8aa0c2f..898cb52 100644
  static void
  w_start_bdf(void)
  {
-@@ -3190,6 +3612,32 @@ w_start_bdf(void)
+@@ -3190,6 +3613,32 @@ w_start_bdf(void)
  		return;
  	}
  	w_bdf_started = true;
@@ -4062,7 +4063,7 @@ index 8aa0c2f..898cb52 100644
  	if (w_board == 0xFF) {
  		snprintf(name, sizeof(name), "image/bdwlan.bin");
  	} else if (w_board < 0x100) {
-@@ -3230,6 +3678,18 @@ static const uint32_t w_svc_ce[][3] = {
+@@ -3230,6 +3679,18 @@ static const uint32_t w_svc_ce[][3] = {
  	{ 0xFE00, 2, 0 }, { 0xFE00, 1, 2 }, { 0x300, 2, 4 }, { 0x300, 1, 1 }, { 0xFE00, 2, 5 }, { 0x301, 1, 9 },
  	{ 0x302, 1, 10 }, { 0x600, 1, 11 }, { 0, 0, 0 },
  };
@@ -4081,7 +4082,7 @@ index 8aa0c2f..898cb52 100644
  static const uint16_t w_shadow[12][2] = {
  	{ 0, 0x3C }, { 3, 0x3C }, { 4, 0x3C }, { 5, 0x3C }, { 7, 0x3C }, { 1, 0x40 },
  	{ 2, 0x40 }, { 7, 0x40 }, { 8, 0x40 }, { 9, 0x40 }, { 10, 0x40 }, { 11, 0x40 },
-@@ -3265,6 +3725,21 @@ w_on_cap(const uint8_t *d, uint32_t len)
+@@ -3265,6 +3726,21 @@ w_on_cap(const uint8_t *d, uint32_t len)
  		s[n] = 0;
  		LOG("wlfw: fw_build_id %s", s);
  	}
@@ -4103,7 +4104,7 @@ index 8aa0c2f..898cb52 100644
  }
  
  static void
-@@ -3294,6 +3769,88 @@ w_on_msa_info(const uint8_t *d, uint32_t len)
+@@ -3294,6 +3770,88 @@ w_on_msa_info(const uint8_t *d, uint32_t len)
  }
  
  static unsigned w_arrivals, w_cap_tries, w_cap_retry_ms;
@@ -4192,7 +4193,7 @@ index 8aa0c2f..898cb52 100644
  
  static void
  wlfw_arrive(uint32_t node, uint32_t port)
-@@ -3304,7 +3861,11 @@ wlfw_arrive(uint32_t node, uint32_t port)
+@@ -3304,7 +3862,11 @@ wlfw_arrive(uint32_t node, uint32_t port)
  	if (w_arrivals++ != 0) {
  		/* the WLAN PD restarted (new server port): start the handshake again */
  		LOG("t=%u ms: WLFW back on port %x (restart %u, last step: %s): handshake again", g_ms, port, w_arrivals - 1, w_step);
@@ -4205,7 +4206,7 @@ index 8aa0c2f..898cb52 100644
  		w_board = 0xFF;
  		w_cap_tries = 0;
  		w_cap_retry_ms = 0;
-@@ -3314,13 +3875,40 @@ wlfw_arrive(uint32_t node, uint32_t port)
+@@ -3314,13 +3876,40 @@ wlfw_arrive(uint32_t node, uint32_t port)
  	struct wmsg m;
  	if (wm_new(&m, WLFW_IND_REGISTER)) {
  		wm_u8(&m, 0x10, 1);                     /* fw_ready_enable */
@@ -4247,7 +4248,7 @@ index 8aa0c2f..898cb52 100644
  static void
  wlfw_rx(const uint8_t *d, uint32_t len)
  {
-@@ -3338,16 +3926,58 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+@@ -3338,16 +3927,59 @@ wlfw_rx(const uint8_t *d, uint32_t len)
  			w_start_bdf();
  		} else if (msg == WLFW_FW_READY_IND) {
  			w_fw_ready = true;
@@ -4256,6 +4257,7 @@ index 8aa0c2f..898cb52 100644
 +			w_socwake_req(0, "at FW_READY");    /* fix106: only with wifiswat=0 (old fix91 timing) */
 +			LOG("t=%u ms: *** WLAN FIRMWARE READY ***%s", g_ms, w_cal_sent ? " (after calibration)" : "");
 +			w_bten("ready", 0xffffffffu);   /* fix138 */
++			w_egpio("ready", 0xffffffffu);   /* fix139 */
 +			if (volcano && !w_v_cfg_sent && w_mac_wait_ms == 0 && w_arg("wifiqmac", 1) != 0 && wm_new(&m, WLFW_MAC_ADDR)) {
 +				/* fix102: icnss_setup_dms_mac: MAC over QMI before the driver probe (fw had 00:00:00:00:00:00) */
 +				static const uint8_t qmac[6] = { 0x02, 0x54, 0x4F, 0x50, 0x41, 0x5A };    /* = our_mac */
@@ -4309,7 +4311,7 @@ index 8aa0c2f..898cb52 100644
  		}
  		return;
  	}
-@@ -3364,7 +3994,35 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+@@ -3364,7 +3996,35 @@ wlfw_rx(const uint8_t *d, uint32_t len)
  		}
  		LOG("t=%u ms: wlfw: ind_register %s err %u, fw_status %llx", g_ms, ok ? "ok" : "FAILED", err, st);
  		if (wm_new(&m, WLFW_HOST_CAP)) {
@@ -4346,7 +4348,7 @@ index 8aa0c2f..898cb52 100644
  			wm_send(&m);
  			w_step = "host_cap sent";
  		}
-@@ -3372,6 +4030,10 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+@@ -3372,6 +4032,10 @@ wlfw_rx(const uint8_t *d, uint32_t len)
  	}
  	case WLFW_HOST_CAP:
  		LOG("wlfw: host_cap %s err %u", ok ? "ok" : "rejected (not fatal)", err);
@@ -4357,7 +4359,7 @@ index 8aa0c2f..898cb52 100644
  		if (wm_new(&m, WLFW_MSA_INFO)) {
  			uint64_t a = WLFW_MSA_BASE;
  			wm_tlv(&m, 0x01, &a, 8);            /* msa_addr */
-@@ -3409,19 +4071,66 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+@@ -3409,19 +4073,66 @@ wlfw_rx(const uint8_t *d, uint32_t len)
  			}
  		}
  		w_cap_done = true;
@@ -4427,7 +4429,7 @@ index 8aa0c2f..898cb52 100644
  				uint8_t none = 0;
  				wm_tlv(&m, 0x01, &none, 1);     /* meta_data_len = 0 */
  				wm_send(&m);
-@@ -3429,6 +4138,10 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+@@ -3429,6 +4140,10 @@ wlfw_rx(const uint8_t *d, uint32_t len)
  			}
  		}
  		break;
@@ -4438,7 +4440,7 @@ index 8aa0c2f..898cb52 100644
  	case WLFW_CAL_REPORT:
  		LOG("wlfw: cal_report %s err %u, waiting for FW_READY", ok ? "ok" : "FAILED", err);
  		w_step = "waiting FW_READY";
-@@ -3443,17 +4156,36 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+@@ -3443,17 +4158,36 @@ wlfw_rx(const uint8_t *d, uint32_t len)
  		}
  		break;
  	case WLFW_WLAN_MODE:
@@ -4476,7 +4478,7 @@ index 8aa0c2f..898cb52 100644
  	default:
  		LOG("wlfw: response %x %s err %u", msg, ok ? "ok" : "FAILED", err);
  		break;
-@@ -3471,8 +4203,9 @@ wlfw_rx(const uint8_t *d, uint32_t len)
+@@ -3471,8 +4205,9 @@ wlfw_rx(const uint8_t *d, uint32_t len)
   *  - WMI (TLV): SERVICE_READY -> INIT -> READY, then a passive scan (nothing is transmitted);
   *    each BSS seen is logged once, its BSSID masked.
   */
@@ -4488,7 +4490,7 @@ index 8aa0c2f..898cb52 100644
  #define WLAN_SID            0x1A0
  #define WLAN_SID_MASK       0x1
  #define CB_CLONE_CBAR       0x0001f000u         /* S1_TRANS_S2_FAULT, S1_MEMATTR WB */
-@@ -3501,6 +4234,8 @@ smmu_sid_match(uint32_t smr, uint32_t sid, uint32_t mask)
+@@ -3501,6 +4236,8 @@ smmu_sid_match(uint32_t smr, uint32_t sid, uint32_t mask)
  	return ((id ^ sid) & ~(m | mask) & 0x7FFF) == 0;
  }
  
@@ -4497,7 +4499,7 @@ index 8aa0c2f..898cb52 100644
  static bool
  smmu_identity(uint32_t sid, uint32_t mask, const char *name)
  {
-@@ -3540,15 +4275,68 @@ smmu_identity(uint32_t sid, uint32_t mask, const char *name)
+@@ -3540,15 +4277,68 @@ smmu_identity(uint32_t sid, uint32_t mask, const char *name)
  	}
  	volatile uint8_t *gr1 = s + psize, *cbp = s + (uint64_t)npage * psize + (uint64_t)cb * psize;
  	w32(cbp, 0x58, 0xFFFFFFFF);                 /* FSR: clear */
@@ -4572,7 +4574,7 @@ index 8aa0c2f..898cb52 100644
  	w32(s, 0xC00 + 4 * slot, cb);               /* S2CR: type 0 (translate), this bank */
  	w32(s, 0x800 + 4 * slot, (1u << 31) | (mask << 16) | sid);   /* SMR valid last */
  	w32(s, 0x70, 0);                            /* sTLBGSYNC */
-@@ -3559,8 +4347,14 @@ smmu_identity(uint32_t sid, uint32_t mask, const char *name)
+@@ -3559,8 +4349,14 @@ smmu_identity(uint32_t sid, uint32_t mask, const char *name)
  	smr = r32(s, 0x800 + 4 * slot);
  	s2cr = r32(s, 0xC00 + 4 * slot);
  	bool ok = (smr >> 31) != 0 && smmu_sid_match(smr, sid, mask) && ((s2cr >> 16) & 3) == 0 && (s2cr & 0x3F) == cb;
@@ -4589,7 +4591,7 @@ index 8aa0c2f..898cb52 100644
  	return ok;
  }
  
-@@ -3635,11 +4429,15 @@ ce_post(uint32_t c)
+@@ -3635,11 +4431,15 @@ ce_post(uint32_t c)
  	s->dst_wr = (slot + 1) & (s->dst_n - 1);
  }
  
@@ -4605,7 +4607,7 @@ index 8aa0c2f..898cb52 100644
  	if (ce_up) {
  		return true;
  	}
-@@ -3653,7 +4451,7 @@ ce_start(void)
+@@ -3653,7 +4453,7 @@ ce_start(void)
  		off += ce_host_rx(c) ? RX_POST * RX_BUF_SIZE : 0;
  		off += ce_host_tx(c) ? ce_tx_slots(c) * ce_tx_sz(c) : 0;
  	}
@@ -4614,7 +4616,7 @@ index 8aa0c2f..898cb52 100644
  	if (ce_regs == NULL || ce_shadow == NULL || va == NULL) {
  		LOG("ce: map/alloc failed (%llu bytes)", off);
  		return false;
-@@ -3728,6 +4526,7 @@ ce_start(void)
+@@ -3728,6 +4528,7 @@ ce_start(void)
  
  static void htc_rx(uint32_t c, const uint8_t *d, uint32_t len);
  
@@ -4622,7 +4624,7 @@ index 8aa0c2f..898cb52 100644
  static bool
  ce_poll(void)
  {
-@@ -3735,6 +4534,9 @@ ce_poll(void)
+@@ -3735,6 +4536,9 @@ ce_poll(void)
  	if (!ce_up) {
  		return false;
  	}
@@ -4632,7 +4634,7 @@ index 8aa0c2f..898cb52 100644
  	for (uint32_t c = 0; c < CE_COUNT; c++) {
  		struct ce_state *s = &ce[c];
  		if (!ce_host_rx(c)) {
-@@ -3759,9 +4561,13 @@ ce_poll(void)
+@@ -3759,9 +4563,13 @@ ce_poll(void)
  	return any;
  }
  
@@ -4646,7 +4648,7 @@ index 8aa0c2f..898cb52 100644
  	if (!ce_up || c >= CE_COUNT || !ce_host_tx(c) || len > ce_tx_sz(c)) {
  		return false;
  	}
-@@ -3786,22 +4592,271 @@ ce_send(uint32_t c, const void *data, uint32_t len, uint32_t transfer_id)
+@@ -3786,22 +4594,271 @@ ce_send(uint32_t c, const void *data, uint32_t len, uint32_t transfer_id)
  	return true;
  }
  
@@ -4932,7 +4934,7 @@ index 8aa0c2f..898cb52 100644
  static struct htc_ep ep[EP_MAX];
  static uint8_t wmi_eid = 0xFF, htt_eid = 0xFF;
  static bool htc_ready, htc_setup;
-@@ -3846,7 +4901,7 @@ htc_connect(uint16_t svc)
+@@ -3846,7 +4903,7 @@ htc_connect(uint16_t svc)
  }
  
  /* WMI waits here while the endpoint has no credit */
@@ -4941,7 +4943,7 @@ index 8aa0c2f..898cb52 100644
  #define WMIQ_MAX 2040
  static uint8_t wmiq[WMIQ_LEN][WMIQ_MAX];
  static uint16_t wmiq_len[WMIQ_LEN];
-@@ -3864,6 +4919,7 @@ wmiq_pump(void)
+@@ -3864,6 +4921,7 @@ wmiq_pump(void)
  	}
  }
  
@@ -4949,7 +4951,7 @@ index 8aa0c2f..898cb52 100644
  static bool
  htc_wmi_send(const void *data, uint32_t len)
  {
-@@ -3873,6 +4929,23 @@ htc_wmi_send(const void *data, uint32_t len)
+@@ -3873,6 +4931,23 @@ htc_wmi_send(const void *data, uint32_t len)
  	if (wmiq_head == wmiq_tail && ep[wmi_eid].credits != 0) {
  		return htc_send(wmi_eid, data, len);
  	}
@@ -4973,7 +4975,7 @@ index 8aa0c2f..898cb52 100644
  	if (wmiq_tail - wmiq_head >= WMIQ_LEN) {
  		LOG("htc: wmi queue full, message dropped");
  		return false;
-@@ -3885,6 +4958,17 @@ htc_wmi_send(const void *data, uint32_t len)
+@@ -3885,6 +4960,17 @@ htc_wmi_send(const void *data, uint32_t len)
  
  static void wmi_rx(const uint8_t *d, uint32_t len);
  static void htt_rx(const uint8_t *p, uint32_t len);
@@ -4991,7 +4993,7 @@ index 8aa0c2f..898cb52 100644
  
  static void
  htc_rx(uint32_t c, const uint8_t *d, uint32_t len)
-@@ -3926,7 +5010,9 @@ htc_rx(uint32_t c, const uint8_t *d, uint32_t len)
+@@ -3926,7 +5012,9 @@ htc_rx(uint32_t c, const uint8_t *d, uint32_t len)
  			ep[0].ul = 0;
  			ep[0].dl = 2;
  			ep[0].up = true;
@@ -5002,7 +5004,7 @@ index 8aa0c2f..898cb52 100644
  			htc_connect(SVC_HTT_DATA);          /* ath10k_core_start: htt, then wmi */
  		} else if (msg == HTC_MSG_CONNECT_RESP && plen >= 8) {
  			uint16_t svc, max;
-@@ -4049,6 +5135,8 @@ wmi_send(uint32_t cmd, const void *tlvs, uint32_t len)
+@@ -4049,6 +5137,8 @@ wmi_send(uint32_t cmd, const void *tlvs, uint32_t len)
  }
  
  /* walk the TLVs of SERVICE_READY (ath10k_wmi_tlv_svc_rdy_parse) */
@@ -5011,7 +5013,7 @@ index 8aa0c2f..898cb52 100644
  static void
  wmi_svc_ready(const uint8_t *p, uint32_t len)
  {
-@@ -4066,6 +5154,7 @@ wmi_svc_ready(const uint8_t *p, uint32_t len)
+@@ -4066,6 +5156,7 @@ wmi_svc_ready(const uint8_t *p, uint32_t len)
  			memcpy(&a0, v + 4, 4);
  			memcpy(&rf, v + 4 + 24 + 8, 4);
  			LOG("wmi: fw %08x abi %08x rf_chains %u", fw, a0, rf);
@@ -5019,7 +5021,7 @@ index 8aa0c2f..898cb52 100644
  		} else if (tag == TAG_ARRAY_UINT32 && !wmi_seen_bmap) {
  			wmi_seen_bmap = true;
  			memcpy(wmi_svc_map, v, MIN((uint32_t)l, (uint32_t)sizeof(wmi_svc_map)));
-@@ -4109,7 +5198,7 @@ wmi_send_init(void)
+@@ -4109,7 +5200,7 @@ wmi_send_init(void)
  		wmi_chunk_len[i] = units * ((wmi_req[i].unit_size + 3) & ~3u);
  		total += (wmi_chunk_len[i] + 0xfff) & ~0xfffu;
  	}
@@ -5028,7 +5030,7 @@ index 8aa0c2f..898cb52 100644
  		LOG("wmi: host memory %u bytes not given", total);
  		n = 0;
  	}
-@@ -4127,7 +5216,7 @@ wmi_send_init(void)
+@@ -4127,7 +5218,7 @@ wmi_send_init(void)
  	p = put32(p, 0);
  	p = put32(p, n);
  	/* wmi_tlv_resource_config, 44 x u32, ath10k values for wcn3990 */
@@ -5037,7 +5039,7 @@ index 8aa0c2f..898cb52 100644
  	rc[0] = NUM_VDEVS;
  	rc[1] = NUM_PEERS;
  	if (wmi_svc(SVC_RX_FULL_REORDER)) {
-@@ -4137,8 +5226,16 @@ wmi_send_init(void)
+@@ -4137,8 +5228,16 @@ wmi_send_init(void)
  	rc[4] = 2;                                  /* peer keys */
  	rc[5] = NUM_PEERS * 2;                      /* tids */
  	rc[6] = 16;                                 /* ast skid limit */
@@ -5056,7 +5058,7 @@ index 8aa0c2f..898cb52 100644
  	rc[9] = 0x64; rc[10] = 0x64; rc[11] = 0x64; rc[12] = 0x28;
  	rc[13] = 1;                                 /* rx decap: native wifi */
  	rc[14] = 4;                                 /* scan max pending */
-@@ -4159,6 +5256,13 @@ wmi_send_init(void)
+@@ -4159,6 +5258,13 @@ wmi_send_init(void)
  	rc[37] = 1;
  	rc[38] = 1;
  	rc[43] = 1u << 9;                           /* MGMT_BUNDLE_TX_COMPL */
@@ -5070,7 +5072,7 @@ index 8aa0c2f..898cb52 100644
  	p = wmi_put_tlv(p, TAG_RESOURCE_CONFIG, sizeof(rc));
  	memcpy(p, rc, sizeof(rc));
  	p += sizeof(rc);
-@@ -4171,6 +5275,20 @@ wmi_send_init(void)
+@@ -4171,6 +5277,20 @@ wmi_send_init(void)
  		put32(c, wmi_svc(SVC_EXTEND_ADDRESS) ? (uint32_t)(wmi_chunk_pa[i] >> 32) : 0);
  		p += 20;
  	}
@@ -5091,7 +5093,7 @@ index 8aa0c2f..898cb52 100644
  	wmi_init_sent = wmi_send(WMI_CMD_INIT, m, (uint32_t)(p - m));
  	LOG("t=%u ms: wmi: INIT (%u chunks, %u bytes host memory) %s", g_ms, n, total, wmi_init_sent ? "sent" : "FAILED");
  }
-@@ -4189,11 +5307,13 @@ struct bss {
+@@ -4189,11 +5309,13 @@ struct bss {
  	uint8_t raw_ssid[32], raw_ssid_len; uint16_t freq, bintval, capab, ie_len; uint32_t last_ms; uint8_t ie[768];
  };
  static struct bss bss[64];
@@ -5106,7 +5108,7 @@ index 8aa0c2f..898cb52 100644
  static bool
  scan_send_start(void)
  {
-@@ -4206,8 +5326,14 @@ scan_send_start(void)
+@@ -4206,8 +5328,14 @@ scan_send_start(void)
  	c = put32(c, 0);                            /* vdev */
  	c = put32(c, 1);                            /* priority low */
  	c = put32(c, 0x001 | 0x002 | 0x004 | 0x008 | 0x100 | 0x010);   /* events */
@@ -5122,7 +5124,7 @@ index 8aa0c2f..898cb52 100644
  	c = put32(c, 50);                           /* min rest */
  	c = put32(c, 500);                          /* max rest */
  	c = put32(c, 0);
-@@ -4215,25 +5341,273 @@ scan_send_start(void)
+@@ -4215,25 +5343,273 @@ scan_send_start(void)
  	c = put32(c, 0);
  	c = put32(c, 20000);                        /* max scan time */
  	c = put32(c, 5);                            /* probe delay */
@@ -5403,7 +5405,7 @@ index 8aa0c2f..898cb52 100644
  static void
  scan_start(void)
  {
-@@ -4244,12 +5618,22 @@ scan_start(void)
+@@ -4244,12 +5620,22 @@ scan_start(void)
  		return;
  	}
  	scan_started = true;
@@ -5428,7 +5430,7 @@ index 8aa0c2f..898cb52 100644
  		c = wmi_put_tlv(p, TAG_CHANNEL, 24);
  		c = put32(c, scan_freqs[i]);
  		c = put32(c, scan_freqs[i]);
-@@ -4259,14 +5643,63 @@ scan_start(void)
+@@ -4259,14 +5645,63 @@ scan_start(void)
  		p = put32(c, 40u << 8);
  	}
  	bool a = wmi_send(CMD_SCAN_CHAN_LIST, m, (uint32_t)(p - m));
@@ -5500,7 +5502,7 @@ index 8aa0c2f..898cb52 100644
  	LOG("t=%u ms: scan: chan list (%u ch) %s, vdev %s, passive scan %s", g_ms, NFREQ, a ? "ok" : "FAILED",
  	    b ? "ok" : "FAILED", scanning ? "requested" : "FAILED");
  }
-@@ -4328,27 +5761,1039 @@ htt_publish(void)
+@@ -4328,27 +5763,1039 @@ htt_publish(void)
  static uint8_t *put16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); return p + 2; }
  static uint8_t *put64(uint8_t *p, uint64_t v) { memcpy(p, &v, 8); return p + 8; }
  
@@ -6558,7 +6560,7 @@ index 8aa0c2f..898cb52 100644
  	for (uint32_t i = 0; i < HTT_RING_SIZE - 1; i++) {
  		htt_post(htt_buf_pa + (uint64_t)i * HTT_BUF_SIZE);
  	}
-@@ -4392,7 +6837,7 @@ htt_start(void)
+@@ -4392,7 +6839,7 @@ htt_start(void)
  	if (htt_state != 0) {
  		return;
  	}
@@ -6567,7 +6569,7 @@ index 8aa0c2f..898cb52 100644
  	if (htt_blk == NULL) {
  		LOG("htt: no memory, scanning without it");
  		scan_start();
-@@ -4417,6 +6862,82 @@ htt_rx(const uint8_t *p, uint32_t len)
+@@ -4417,6 +6864,82 @@ htt_rx(const uint8_t *p, uint32_t len)
  {
  	uint8_t type = len != 0 ? p[0] : 0xFF;
  	htt_msgs++;
@@ -6650,7 +6652,7 @@ index 8aa0c2f..898cb52 100644
  	if (type == T2H_VERSION_CONF && len >= 3) {
  		LOG("t=%u ms: *** HTT VERSION_CONF %u.%u ***", g_ms, p[2], p[1]);
  		if (htt_state == 1) {
-@@ -4451,9 +6972,87 @@ htt_rx(const uint8_t *p, uint32_t len)
+@@ -4451,9 +6974,87 @@ htt_rx(const uint8_t *p, uint32_t len)
  	}
  }
  
@@ -6738,7 +6740,7 @@ index 8aa0c2f..898cb52 100644
  	if (htt_state == 1 && g_ms - htt_req_ms > 2000) {
  		LOG("t=%u ms: htt: no VERSION_CONF in 2 s, configuring anyway", g_ms);
  		htt_configure("timeout");
-@@ -4474,15 +7073,31 @@ scan_event(const uint8_t *t, uint32_t len)
+@@ -4474,15 +7075,31 @@ scan_event(const uint8_t *t, uint32_t len)
  	}
  	memcpy(e, t + 4, sizeof(e));
  	if (e[0] == 0x008 || e[0] == 0x100 || e[0] == 0x004) {
@@ -6770,7 +6772,7 @@ index 8aa0c2f..898cb52 100644
  		next_scan_ms = scans < 3 ? g_ms + 10000 : 0;
  		api_scans_done++;
  	}
-@@ -4524,6 +7139,7 @@ scan_mgmt_rx(const uint8_t *t, uint32_t len)
+@@ -4524,6 +7141,7 @@ scan_mgmt_rx(const uint8_t *t, uint32_t len)
  		return;                                 /* beacons and probe responses only */
  	}
  	scan_frames++;
@@ -6778,7 +6780,7 @@ index 8aa0c2f..898cb52 100644
  	int32_t rssi = (int32_t)hdr[1] - 95;
  	uint32_t chan = hdr[0];
  	char ssid[33] = "";
-@@ -4989,6 +7605,10 @@ static uint8_t s_ptk[48], s_anonce[32], s_snonce[32], s_group_cipher;
+@@ -4989,6 +7607,10 @@ static uint8_t s_ptk[48], s_anonce[32], s_snonce[32], s_group_cipher;
  static uint64_t s_replay;
  static uint8_t *s_mgmt_va;
  static uint64_t s_mgmt_pa;
@@ -6789,7 +6791,7 @@ index 8aa0c2f..898cb52 100644
  
  void (*topaz_wlan_rx_hook)(const uint8_t *frame, size_t length);
  void (*topaz_wlan_link_hook)(bool up);
-@@ -5000,10 +7620,16 @@ static uint8_t *
+@@ -5000,10 +7622,16 @@ static uint8_t *
  w_channel(uint8_t *p, uint32_t freq)
  {
  	uint8_t *c = wmi_put_tlv(p, TAG_CHANNEL, 24);
@@ -6807,7 +6809,7 @@ index 8aa0c2f..898cb52 100644
  	c = w_p32(c, (40u << 8) | (40u << 16));
  	return w_p32(c, 40u << 8);
  }
-@@ -5041,7 +7667,7 @@ htt_tx_frame(const uint8_t *f, uint32_t len, bool clear)
+@@ -5041,7 +7669,7 @@ htt_tx_frame(const uint8_t *f, uint32_t len, bool clear)
  	uint8_t m[20 + 52], *p = m;
  	uint32_t id, pf = (MIN(len, (uint32_t)PREFETCH_LEN) + 3) & ~3u;
  	if (tx_pool == NULL) {
@@ -6816,7 +6818,7 @@ index 8aa0c2f..898cb52 100644
  	}
  	if (tx_pool == NULL || htt_bank == NULL || htt_state != 2 || len > TX_SLOT_SIZE) {
  		return false;
-@@ -5098,21 +7724,113 @@ htt_tx_compl(const uint8_t *p, uint32_t len)
+@@ -5098,21 +7726,113 @@ htt_tx_compl(const uint8_t *p, uint32_t len)
  	}
  }
  
@@ -6934,7 +6936,7 @@ index 8aa0c2f..898cb52 100644
  }
  
  static bool
-@@ -5146,6 +7864,61 @@ w_peer_param(uint32_t param, uint32_t value)
+@@ -5146,6 +7866,61 @@ w_peer_param(uint32_t param, uint32_t value)
  	return wmi_send(CMD_PEER_SET_PARAM, m, sizeof(m));
  }
  
@@ -6996,7 +6998,7 @@ index 8aa0c2f..898cb52 100644
  static bool
  w_ps_off(void)
  {
-@@ -5158,10 +7931,16 @@ w_ps_off(void)
+@@ -5158,10 +7933,16 @@ w_ps_off(void)
  static bool
  w_mgmt_tx(const uint8_t *f, uint32_t len)
  {
@@ -7016,7 +7018,7 @@ index 8aa0c2f..898cb52 100644
  	}
  	if (s_mgmt_va == NULL || len > 0x1000 - 8) {
  		return false;
-@@ -5169,16 +7948,28 @@ w_mgmt_tx(const uint8_t *f, uint32_t len)
+@@ -5169,16 +7950,28 @@ w_mgmt_tx(const uint8_t *f, uint32_t len)
  	bzero(s_mgmt_va, ((len + 3) & ~3u) + 4);
  	memcpy(s_mgmt_va, f, len);
  	mb();
@@ -7049,7 +7051,7 @@ index 8aa0c2f..898cb52 100644
  }
  
  static uint32_t
-@@ -5198,14 +7989,14 @@ w_ap_rates(uint8_t *out)
+@@ -5198,14 +7991,14 @@ w_ap_rates(uint8_t *out)
  static bool
  w_peer_assoc(uint32_t caps)
  {
@@ -7066,7 +7068,7 @@ index 8aa0c2f..898cb52 100644
  	p = w_p32(p, caps);
  	p = w_p32(p, 1);                            /* listen interval */
  	p += 4 * 6;                                 /* ht caps, max mpdu, density, rate caps; nss below */
-@@ -5223,8 +8014,11 @@ w_peer_assoc(uint32_t caps)
+@@ -5223,8 +8016,11 @@ w_peer_assoc(uint32_t caps)
  	}
  	p = r + rl;
  	p = wmi_put_tlv(p, TAG_ARRAY_BYTE, 0);
@@ -7080,7 +7082,7 @@ index 8aa0c2f..898cb52 100644
  }
  
  static bool
-@@ -5330,6 +8124,9 @@ w_tx_ether(const uint8_t *e, size_t len, bool clear)
+@@ -5330,6 +8126,9 @@ w_tx_ether(const uint8_t *e, size_t len, bool clear)
  	memcpy(f + 24, snap, 6);
  	memcpy(f + 30, e + 12, 2);                  /* ethertype */
  	memcpy(f + 32, e + 14, len - 14);
@@ -7090,7 +7092,7 @@ index 8aa0c2f..898cb52 100644
  	return htt_tx_frame(f, (uint32_t)(len - 14 + 32), clear);
  }
  
-@@ -5449,6 +8246,26 @@ w_eapol_rx(const uint8_t *e, size_t elen)
+@@ -5449,6 +8248,26 @@ w_eapol_rx(const uint8_t *e, size_t elen)
  				}
  			}
  		}
@@ -7117,7 +7119,7 @@ index 8aa0c2f..898cb52 100644
  		w_eapol_send(0x030A, NULL, NULL, 0);
  		IOSleep(5);                             /* message 4 out in the clear before the keys go in */
  		w_install_key(false, 0, WMI_CIPHER_CCMP, s_ptk + 32, 16);
-@@ -5464,6 +8281,27 @@ w_eapol_rx(const uint8_t *e, size_t elen)
+@@ -5464,6 +8283,27 @@ w_eapol_rx(const uint8_t *e, size_t elen)
  	}
  }
  
@@ -7145,7 +7147,7 @@ index 8aa0c2f..898cb52 100644
  /* ---- the join, step by step from the modem thread */
  static void
  w_teardown(void)
-@@ -5472,16 +8310,22 @@ w_teardown(void)
+@@ -5472,16 +8312,22 @@ w_teardown(void)
  		if (s_state >= S_4WAY) {
  			w_vdev_simple(CMD_VDEV_DOWN, TAG_VDEV_DOWN);
  		}
@@ -7170,7 +7172,7 @@ index 8aa0c2f..898cb52 100644
  }
  
  static void
-@@ -5551,6 +8395,22 @@ w_join_begin(void)
+@@ -5551,6 +8397,22 @@ w_join_begin(void)
  	LOG("t=%u ms: join: %.*s %02x:%02x:%02x:**:**:** %u MHz %s", g_ms, (int)s_ssid_len, s_ssid, s_bssid[0], s_bssid[1],
  	    s_bssid[2], s_freq, s_rsn ? "WPA2" : "open");
  	w_ps_off();
@@ -7193,7 +7195,7 @@ index 8aa0c2f..898cb52 100644
  	if (!w_vdev_start(s_freq, bcn, dtim)) {
  		w_join_end(EIO);
  		return;
-@@ -5647,20 +8507,57 @@ w_join_poll(void)
+@@ -5647,20 +8509,57 @@ w_join_poll(void)
  		w_join_begin();
  		return;
  	}
@@ -7253,7 +7255,7 @@ index 8aa0c2f..898cb52 100644
  	} else if ((s_state == S_AUTH || s_state == S_ASSOC) && g_ms > s_deadline) {
  		if (s_tries >= 4) {
  			w_join_end(ETIMEDOUT);
-@@ -5688,6 +8585,9 @@ w_rx_native(const uint8_t *f, uint32_t len)
+@@ -5688,6 +8587,9 @@ w_rx_native(const uint8_t *f, uint32_t len)
  		return;                                 /* data frames only */
  	}
  	uint32_t hl = ((f[1] & 3) == 3) ? 30 : 24;
@@ -7263,7 +7265,7 @@ index 8aa0c2f..898cb52 100644
  	const uint8_t *da = f + 4, *sa = (f[1] & 2) ? f + 16 : f + 10;   /* from DS: addr3 is the source */
  	const uint8_t *llc = f + hl;
  	if (len < hl + 8 || llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03) {
-@@ -5711,6 +8611,23 @@ w_rx_native(const uint8_t *f, uint32_t len)
+@@ -5711,6 +8613,23 @@ w_rx_native(const uint8_t *f, uint32_t len)
  	}
  }
  
@@ -7287,7 +7289,7 @@ index 8aa0c2f..898cb52 100644
  /* ---- the C API */
  extern "C" {
  int topaz_wlan_join(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pass, unsigned pass_len);
-@@ -5848,6 +8765,77 @@ w_tx_pump(void)
+@@ -5848,6 +8767,77 @@ w_tx_pump(void)
  	}
  }
  
@@ -7365,7 +7367,7 @@ index 8aa0c2f..898cb52 100644
  static void
  wmi_rx(const uint8_t *d, uint32_t len)
  {
-@@ -5857,6 +8845,9 @@ wmi_rx(const uint8_t *d, uint32_t len)
+@@ -5857,6 +8847,9 @@ wmi_rx(const uint8_t *d, uint32_t len)
  	}
  	memcpy(&id, d, 4);
  	id &= 0xFFFFFF;
@@ -7375,7 +7377,7 @@ index 8aa0c2f..898cb52 100644
  	switch (id) {
  	case WMI_EV_SERVICE_AVAILABLE: {
  		uint16_t tag;
-@@ -5869,7 +8860,26 @@ wmi_rx(const uint8_t *d, uint32_t len)
+@@ -5869,7 +8862,26 @@ wmi_rx(const uint8_t *d, uint32_t len)
  	case WMI_EV_SERVICE_READY:
  		LOG("t=%u ms: wmi: SERVICE_READY, %u bytes", g_ms, len);
  		wmi_svc_ready(d + 4, len - 4);
@@ -7403,17 +7405,10 @@ index 8aa0c2f..898cb52 100644
  			wmi_send_init();
  		}
  		break;
-@@ -5887,25 +8897,207 @@ wmi_rx(const uint8_t *d, uint32_t len)
- 			}
- 			o += 4 + l;
- 		}
--		LOG("t=%u ms: *** WMI READY (fw MAC %02x:%02x:%02x:%02x:%02x:%02x) ***", g_ms, wmi_mac[0], wmi_mac[1],
--		    wmi_mac[2], wmi_mac[3], wmi_mac[4], wmi_mac[5]);
--		if (wmi_ready) {
--			htt_start();                        /* the host rx ring first, then the scan */
-+		LOG("t=%u ms: *** WMI READY (fw MAC %02x:%02x:%02x:%02x:%02x:%02x) ***", g_ms, wmi_mac[0], wmi_mac[1],
-+		    wmi_mac[2], wmi_mac[3], wmi_mac[4], wmi_mac[5]);
-+		if (wmi_ready) {
+@@ -5890,22 +8902,204 @@ wmi_rx(const uint8_t *d, uint32_t len)
+ 		LOG("t=%u ms: *** WMI READY (fw MAC %02x:%02x:%02x:%02x:%02x:%02x) ***", g_ms, wmi_mac[0], wmi_mac[1],
+ 		    wmi_mac[2], wmi_mac[3], wmi_mac[4], wmi_mac[5]);
+ 		if (wmi_ready) {
 +			w_socwake_req(2, "at WMI READY");   /* fix106: the WAL (CSS_SM) exists now */
 +			if (volcano && w_arg("wifihwm", 0xff) != 0xff) {
 +				bool hm = w_set_hw_mode(w_arg("wifihwm", 0xff));
@@ -7421,8 +7416,21 @@ index 8aa0c2f..898cb52 100644
 +					LOG("t=%u ms: fix122 set hw mode %u %s", g_ms, w_arg("wifihwm", 0xff), hm ? "sent" : "FAIL");
 +				}
 +			}
-+			htt_start();                        /* the host rx ring first, then the scan */
-+		}
+ 			htt_start();                        /* the host rx ring first, then the scan */
+ 		}
+-		break;
+-	case WMI_EV_SCAN:
+-		scan_event(d + 4, len - 4);
+-		break;
+-	case WMI_EV_MGMT_RX:
+-		scan_mgmt_rx(d + 4, len - 4);
+-		break;
+-	case 0x5001:                                /* VDEV_START_RESP */
+-	case 0x6001:                                /* PEER_STA_KICKOUT */
+-		w_join_event(id, d + 4, len - 4);
+-		break;
+-	default:
+-		break;
 +		break;
 +	case WMI_EV_SCAN:
 +		scan_event(d + 4, len - 4);
@@ -7564,20 +7572,7 @@ index 8aa0c2f..898cb52 100644
 +		w_auto_next_ms = g_ms + 12000;
 +		if (next_scan_ms == 0) {
 +			next_scan_ms = g_ms + 500;
- 		}
--		break;
--	case WMI_EV_SCAN:
--		scan_event(d + 4, len - 4);
--		break;
--	case WMI_EV_MGMT_RX:
--		scan_mgmt_rx(d + 4, len - 4);
--		break;
--	case 0x5001:                                /* VDEV_START_RESP */
--	case 0x6001:                                /* PEER_STA_KICKOUT */
--		w_join_event(id, d + 4, len - 4);
--		break;
--	default:
--		break;
++		}
 +		LOG("t=%u ms: wifi-auto: '%s' not heard (%u nets, miss %u)", g_ms, w_auto_pre, nbss, w_auto_miss);
 +		return;
 +	}
@@ -7612,7 +7607,7 @@ index 8aa0c2f..898cb52 100644
 +	if (!w_pmk_crypto_ok) {
 +		w_auto_tries = 4;
 +		return;
-+	}
+ 	}
 +	w_auto_tries++;
 +	memcpy(w_auto_last, bss[best].bssid, 6);
 +	s_ssid_len = blen;
@@ -7622,13 +7617,13 @@ index 8aa0c2f..898cb52 100644
 +	for (int k = 0; k < 2; k++) {
 +		LOG("t=%u ms: wifi-auto: try %u: %.*s %02x:%02x:%02x:**:**:** %u MHz rssi %d", g_ms, w_auto_tries, (int)s_ssid_len,
 +		    s_ssid, s_bssid[0], s_bssid[1], s_bssid[2], (unsigned)bss[best].freq, (int)bss[best].rssi);
- 	}
++	}
 +	s_join_asked = true;
 +	w_auto_next_ms = g_ms + 30000;
  }
  
  /* from the watch loop */
-@@ -5917,6 +9109,17 @@ radio_poll(unsigned ms)
+@@ -5917,6 +9111,17 @@ radio_poll(unsigned ms)
  		w_cap_retry_ms = 0;
  		w_simple(WLFW_CAP, "cap sent again");
  	}
@@ -7646,7 +7641,7 @@ index 8aa0c2f..898cb52 100644
  	if (!ce_up) {
  		return;
  	}
-@@ -5934,6 +9137,7 @@ radio_poll(unsigned ms)
+@@ -5934,6 +9139,7 @@ radio_poll(unsigned ms)
  	}
  	if (api_ready) {
  		w_join_poll();
@@ -7654,7 +7649,7 @@ index 8aa0c2f..898cb52 100644
  		w_tx_pump();
  	}
  	if (scan_started && !scanning && api_scan_asked && (s_state == S_IDLE || s_state == S_UP)) {
-@@ -5944,7 +9148,7 @@ radio_poll(unsigned ms)
+@@ -5944,7 +9150,7 @@ radio_poll(unsigned ms)
  			api_scans_done++;
  		}
  	}
@@ -7663,7 +7658,7 @@ index 8aa0c2f..898cb52 100644
  		next_scan_ms = 0;
  		scanning = scan_send_start();
  		LOG("t=%u ms: scan: passive scan %u %s", g_ms, scans + 1, scanning ? "requested" : "FAILED");
-@@ -6003,6 +9207,9 @@ static void
+@@ -6003,6 +9209,9 @@ static void
  svc_summary(void)
  {
  	LOG("WLFW: %s%s", w_step, w_fw_ready ? " (firmware ready)" : "");
@@ -7673,7 +7668,7 @@ index 8aa0c2f..898cb52 100644
  	LOG("services: pd-mapper %u reqs; tftp %u reqs (%u missing, %u writes); rmtfs reads %u writes %u (not kept) errors %u",
  	    pd_reqs, tftp_reqs, tftp_missing, tftp_writes, rmtfs_reads, rmtfs_writes, rmtfs_err);
  }
-@@ -6024,11 +9231,23 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -6024,11 +9233,23 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  		LOG("cannot create SMP2P item %u", ITEM_SMP2P_OUT);
  		return;
  	}
@@ -7698,7 +7693,7 @@ index 8aa0c2f..898cb52 100644
  			if (!glink) {
  				ready = false;  /* no retry */
  			}
-@@ -6056,6 +9275,24 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -6056,6 +9277,24 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  		if (in != NULL && ipa_in == NULL) {
  			ipa_in = smp2p_find(in, "ipa");
  		}
@@ -7723,7 +7718,7 @@ index 8aa0c2f..898cb52 100644
  		if (sk != NULL && *sk != sk_last) {
  			sk_last = *sk;
  			LOG("t=%u ms: slave-kernel %08x%s%s%s", ms, sk_last, (sk_last & 1) ? " FATAL" : "",
-@@ -6064,17 +9301,52 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -6064,17 +9303,52 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  				ready = true;
  				LOG("modem is up (MODEM READY)");
  			}
@@ -7777,7 +7772,7 @@ index 8aa0c2f..898cb52 100644
  				return;
  			}
  		}
-@@ -6093,6 +9365,103 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
+@@ -6093,6 +9367,103 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
  	if (glink) {
  		glink_summary();
  	}
@@ -7881,7 +7876,7 @@ index 8aa0c2f..898cb52 100644
  }
  
  /* ---------------------------------------------------------------- PAS boot */
-@@ -6103,6 +9472,411 @@ loadable(const struct elf32_phdr *p)
+@@ -6103,6 +9474,458 @@ loadable(const struct elf32_phdr *p)
  	return p->p_type == PT_LOAD && p->p_memsz != 0 && (p->p_flags & MDT_TYPE_MASK) != MDT_TYPE_HASH;
  }
  
@@ -8112,6 +8107,53 @@ index 8aa0c2f..898cb52 100644
 +	}
 +}
 +
++/* fix139: TLMM eGPIO ownership of pins 130..166 (CFG bit 11 EGPIO_PRESENT, bit 12 EGPIO_ENABLE = APPS owns).
++ * Android (Wi-Fi working) shows 132-137, 139, 144-161, 163-166 as "egpio" = bit 12 clear (owned by a
++ * subsystem, so the WPSS fw can drive the RF front-end lines itself). No Android DT node sets this.
++ * Logged as one char per pin: E remote, A apps, - no egpio. wifiegpio=1 (default) clears bit 12 on the
++ * Android list before the WPSS boot; wifiegpio=0 only logs. */
++static volatile uint32_t *s_egp;
++
++static void
++w_egpio(const char *when, unsigned give)
++{
++	static const uint8_t andr[] = { 132, 133, 134, 135, 136, 137, 139, 144, 145, 146, 147, 148, 149, 150, 151, 152,
++		                        153, 154, 155, 156, 157, 158, 159, 160, 161, 163, 164, 165, 166 };
++	if (s_egp == NULL) {
++		if (give == 0xffffffffu) {
++			return;
++		}
++		s_egp = (volatile uint32_t *)ml_io_map(0x0f100000ull + 0x1000ull * 130, 0x1000ull * 37);
++		if (s_egp == NULL) {
++			LOG("fix139 egpio map failed");
++			return;
++		}
++	}
++	char s[40];
++	unsigned changed = 0;
++	for (int k = 0; k < 2; k++) {
++		for (unsigned p = 130; p <= 166; p++) {
++			uint32_t c = s_egp[(p - 130) * 0x400];
++			s[p - 130] = (c & (1u << 11)) ? ((c & (1u << 12)) ? 'A' : 'E') : '-';
++		}
++		s[37] = 0;
++		LOG("fix139 egpio %s%s: 130 %s", when, k ? " after" : "", s);
++		if (k || give == 0xffffffffu || give == 0) {
++			break;
++		}
++		for (unsigned i = 0; i < sizeof(andr); i++) {
++			volatile uint32_t *g = &s_egp[(andr[i] - 130) * 0x400];
++			uint32_t c = *g;
++			if ((c & (1u << 11)) && (c & (1u << 12))) {
++				*g = c & ~(1u << 12);
++				changed++;
++			}
++		}
++		__asm__ volatile ("dsb sy" ::: "memory");
++		LOG("fix139 egpio %s: handed %u pins to the subsystem", when, changed);
++	}
++}
++
 +/* fix137b/fix138: TLMM (volcano base 0x0f100000 as in sweet_keys gpio71, 0x1000 per pin: +0 CFG, +4 IN_OUT).
 + * Android: gpio44 WL_EN out high, gpio53 BT_EN out high, gpio45 SW_CTRL in. fix137b showed that under iOS
 + * WL_EN sits as an input with pull-down at 0 before the WPSS boot (icnss2 drives wlan-en-gpio high on Android).
@@ -8293,7 +8335,7 @@ index 8aa0c2f..898cb52 100644
  static bool
  modem_boot(void)
  {
-@@ -6112,8 +9886,8 @@ modem_boot(void)
+@@ -6112,8 +9935,8 @@ modem_boot(void)
  	uint32_t min_a = ~0u, max_a = 0, hash = ~0u;
  	bool relocate = false, ok = false;
  
@@ -8304,7 +8346,7 @@ index 8aa0c2f..898cb52 100644
  	if (part == NULL) {
  		return false;
  	}
-@@ -6121,24 +9895,34 @@ modem_boot(void)
+@@ -6121,24 +9944,35 @@ modem_boot(void)
  		LOG("modem SMP2P item %u already exists: modem is not cold, not touching it", ITEM_SMP2P_IN);
  		return false;
  	}
@@ -8314,6 +8356,7 @@ index 8aa0c2f..898cb52 100644
 +	if (volcano) {
 +		w_pon_warm("boot");                     /* fix109 */
 +		w_ipa_rail();                           /* fix104 */
++		w_egpio("boot", w_arg("wifiegpio", 1) ? 1u : 0u);   /* fix139 */
 +		w_bten("boot", (w_arg("wifibten", 1) ? 1u : 0u) | (w_arg("wifiwlen", 1) ? 2u : 0u));   /* fix137b/fix138 */
 +	}
  	st = scm(SCM_FN(SCM_SVC_PIL, PIL_IS_SUPPORTED), 1, PAS_ID_MODEM, 0, 0, &res);
@@ -8343,7 +8386,7 @@ index 8aa0c2f..898cb52 100644
  			goto out;
  		}
  		struct elf32_phdr *ph = (struct elf32_phdr *)(mdt + eh->e_phoff);
-@@ -6156,8 +9940,8 @@ modem_boot(void)
+@@ -6156,8 +9990,8 @@ modem_boot(void)
  			max_a = MAX(max_a, ph[i].p_paddr + ph[i].p_memsz);
  		}
  		LOG("phdrs=%u hash=%u region %08x..%08x relocate=%u", eh->e_phnum, hash, min_a, max_a, relocate);
@@ -8354,7 +8397,7 @@ index 8aa0c2f..898cb52 100644
  			goto out;
  		}
  
-@@ -6175,7 +9959,7 @@ modem_boot(void)
+@@ -6175,7 +10009,7 @@ modem_boot(void)
  		} else {
  			/* split firmware: the hash segment is its own .bNN file (qcom_mdt_read_metadata) */
  			char hname[16];
@@ -8363,7 +8406,7 @@ index 8aa0c2f..898cb52 100644
  			int64_t got = fw_read(hname, meta + hdr, ph[hash].p_filesz);
  			LOG("hash from %s: %lld of %u bytes", hname, got, ph[hash].p_filesz);
  			if (got != (int64_t)ph[hash].p_filesz) {
-@@ -6214,7 +9998,7 @@ modem_boot(void)
+@@ -6214,7 +10048,7 @@ modem_boot(void)
  			uint8_t *dst = (uint8_t *)m->getVirtualAddress() + off;
  			int64_t got = 0;
  			if (ph[i].p_filesz != 0) {
@@ -8372,7 +8415,7 @@ index 8aa0c2f..898cb52 100644
  				got = fw_read(name, dst, ph[i].p_filesz);
  				if (got != (int64_t)ph[i].p_filesz) {
  					LOG("%s: %lld of %u bytes", name, got, ph[i].p_filesz);
-@@ -6277,14 +10061,19 @@ topaz_soc_map(void)
+@@ -6277,14 +10111,19 @@ topaz_soc_map(void)
  	uint8_t probe[16];
  	int err = EAGAIN;
  	for (int i = 0; i < 120 && err == EAGAIN; i++) {
@@ -8394,7 +8437,7 @@ index 8aa0c2f..898cb52 100644
  	tcsr_mutex = (volatile uint8_t *)ml_io_map(TCSR_MUTEX_PA, 0x4000);
  	if (err != 0) {
  		LOG("partition %s: %d", fw_part, err);
-@@ -6374,12 +10163,19 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -6374,12 +10213,19 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
  		return;
  	}
  	LOG("SMEM version %u", *(volatile uint32_t *)(smem + 64 + 7 * 4) >> 16);
@@ -8416,7 +8459,7 @@ index 8aa0c2f..898cb52 100644
  	}
  	/* keep the mappings: the modem uses SMEM from now on */
  	thread_terminate(current_thread());
-@@ -6387,6 +10183,69 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -6387,6 +10233,69 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
  
  extern "C" void topaz_sta_init(void);
  
@@ -8486,7 +8529,7 @@ index 8aa0c2f..898cb52 100644
  extern "C" void
  topaz_modem_init(void)
  {
-@@ -6394,11 +10253,33 @@ topaz_modem_init(void)
+@@ -6394,11 +10303,33 @@ topaz_modem_init(void)
  	uint32_t on = 0;
  	thread_t thread;
  
@@ -8522,7 +8565,7 @@ index 8aa0c2f..898cb52 100644
  	if (kernel_thread_start(topaz_modem_thread, NULL, &thread) == KERN_SUCCESS) {
  		thread_deallocate(thread);
  	}
-@@ -6406,4 +10287,5 @@ topaz_modem_init(void)
+@@ -6406,4 +10337,5 @@ topaz_modem_init(void)
  
  #else
  extern "C" void topaz_modem_init(void) {}
