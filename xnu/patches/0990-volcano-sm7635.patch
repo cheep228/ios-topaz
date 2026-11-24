@@ -3341,7 +3341,7 @@ index 1d3ee17..190991c 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..a732f34 100644
+index 8aa0c2f..7c454bb 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -20,15 +20,17 @@
@@ -11649,7 +11649,7 @@ index 8aa0c2f..a732f34 100644
  	}
  	started = true;
 -	topaz_sta_init();                           /* private: bsd/dev/topaz_sta.c (en0 + Apple80211 for wifid) */
-+	if (!volcano) {
++	if (!volcano || w_arg("wifista", 1) != 0) {     /* fix144: en0 + station on volcano too (wifista=0 off) */
 +		topaz_sta_init();                       /* private: bsd/dev/topaz_sta.c (en0 + Apple80211 for wifid) */
 +	}
  	if (kernel_thread_start(topaz_modem_thread, NULL, &thread) == KERN_SUCCESS) {
