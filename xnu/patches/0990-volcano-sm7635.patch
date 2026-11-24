@@ -3341,7 +3341,7 @@ index 1d3ee17..190991c 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..653173c 100644
+index 8aa0c2f..a732f34 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -20,15 +20,17 @@
@@ -5505,7 +5505,7 @@ index 8aa0c2f..653173c 100644
  	LOG("t=%u ms: scan: chan list (%u ch) %s, vdev %s, passive scan %s", g_ms, NFREQ, a ? "ok" : "FAILED",
  	    b ? "ok" : "FAILED", scanning ? "requested" : "FAILED");
  }
-@@ -4328,27 +5766,1039 @@ htt_publish(void)
+@@ -4328,1779 +5766,4515 @@ htt_publish(void)
  static uint8_t *put16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); return p + 2; }
  static uint8_t *put64(uint8_t *p, uint64_t v) { memcpy(p, &v, 8); return p + 8; }
  
@@ -5583,11 +5583,7 @@ index 8aa0c2f..653173c 100644
 +dp_dst_hw(struct dp_ring *r, uint32_t r0, uint32_t r2)
  {
 -	uint8_t m[64] = {}, *p = m;
-+	dp_rdp[r->id] = 0;
-+	vce_dst_init(r0, r2, r->pa, r->words, r->n, r->id, dp_rdp_pa + 4 * r->id);
-+	r->ptr_reg = r2 + 4;
-+}
- 
+-
 -	htt_state = 2;
 -	/* ath10k_htt_send_frag_desc_bank_cfg_64 */
 -	*p++ = H2T_FRAG_DESC_BANK_CFG;
@@ -5604,13 +5600,62 @@ index 8aa0c2f..653173c 100644
 -	*p++ = 0;
 -	bool a = htt_send(m, sizeof(m));
 -	/* ath10k_htt_send_rx_ring_cfg_64 */
-+static void
+-	for (uint32_t i = 0; i < HTT_RING_SIZE - 1; i++) {
+-		htt_post(htt_buf_pa + (uint64_t)i * HTT_BUF_SIZE);
+-	}
+-	uint8_t r[48] = {};
+-	p = r;
+-	*p++ = H2T_RX_RING_CFG;
+-	*p++ = 1;
+-	p = put16(p, 0);
+-	p = put64(p, htt_idx_pa);
+-	p = put64(p, htt_ring_pa);
+-	p = put16(p, HTT_RING_SIZE);
+-	p = put16(p, HTT_BUF_SIZE);
+-	p = put16(p, 0xFFFF);                       /* every frame type, management included */
+-	p = put16(p, 0);                            /* fw_idx_init_val */
+-	p = put16(p, OFF_HDR_STATUS);
+-	p = put16(p, OFF_MSDU_PAYLOAD);
+-	p = put16(p, OFF_PPDU_START);
+-	p = put16(p, OFF_PPDU_END);
+-	p = put16(p, OFF_MPDU_START);
+-	p = put16(p, OFF_MPDU_END);
+-	p = put16(p, OFF_MSDU_START);
+-	p = put16(p, OFF_MSDU_END);
+-	p = put16(p, OFF_ATTENTION);
+-	p = put16(p, OFF_FRAG_INFO);
+-	htt_publish();
+-	bool b = htt_send(r, sizeof(r));
+-	uint8_t g[4] = { H2T_AGGR_CFG, 64, 3, 0 };
+-	bool c = htt_send(g, sizeof(g));
+-	LOG("t=%u ms: htt (%s): frag bank %s, rx ring cfg %s (%u bufs), aggr cfg %s", g_ms, why, a ? "ok" : "FAILED",
+-	    b ? "ok" : "FAILED", HTT_RING_SIZE - 1, c ? "ok" : "FAILED");
+-	scan_start();
+-}
++	dp_rdp[r->id] = 0;
++	vce_dst_init(r0, r2, r->pa, r->words, r->n, r->id, dp_rdp_pa + 4 * r->id);
++	r->ptr_reg = r2 + 4;
++}
+ 
+ static void
+-htt_start(void)
 +dp_buf_info(volatile uint32_t *e, uint64_t pa, uint32_t cookie, uint32_t rbm)
-+{
+ {
+-	uint64_t pa = 0;
+-	uint32_t ring = (HTT_RING_SIZE * 8 + 64 + 0xfff) & ~0xfffu;
+-	uint32_t bank = (HTT_MAX_PENDING_TX * HTT_EXT_DESC_SIZE + 0xfff) & ~0xfffu;
 +	e[0] = (uint32_t)pa;
 +	e[1] = ((uint32_t)(pa >> 32) & 0xFF) | (rbm << 8) | (cookie << 11);
 +}
-+
+ 
+-	if (htt_state != 0) {
+-		return;
+-	}
+-	htt_blk = (uint8_t *)pool_alloc(ring + bank + HTT_RING_SIZE * HTT_BUF_SIZE, &pa);
+-	if (htt_blk == NULL) {
+-		LOG("htt: no memory, scanning without it");
+-		scan_start();
+-		return;
 +/* host-filled LMAC src ring (HP in wrp, TP from fw in rdp) */
 +static bool
 +dp_lmac_post(struct dp_ring *r, uint64_t pa, uint32_t cookie)
@@ -5619,27 +5664,68 @@ index 8aa0c2f..653173c 100644
 +	uint32_t nx = (r->idx + 1) % r->n;
 +	if (nx == tp) {
 +		return false;
-+	}
+ 	}
+-	htt_ring = (volatile uint64_t *)htt_blk;
+-	htt_ring_pa = pa;
+-	htt_idx = (volatile uint32_t *)(htt_blk + HTT_RING_SIZE * 8);
+-	htt_idx_pa = pa + HTT_RING_SIZE * 8;
+-	htt_bank = htt_blk + ring;
+-	htt_bank_pa = pa + ring;
+-	htt_buf = htt_blk + ring + bank;
+-	htt_buf_pa = pa + ring + bank;
+-	htt_state = 1;
+-	htt_req_ms = g_ms;
+-	uint8_t m[4] = { H2T_VERSION_REQ, 0, 0, 0 };
+-	LOG("t=%u ms: htt: VERSION_REQ %s", g_ms, htt_send(m, sizeof(m)) ? "sent" : "FAILED");
 +	dp_buf_info(r->va + r->words * r->idx, pa, cookie, g_rx_rbm);
 +	r->idx = nx;
 +	return true;
-+}
-+
+ }
+ 
+-static void
+-htt_rx(const uint8_t *p, uint32_t len)
 +/* fix108: rx buffer ownership (1 = posted to hw); a buffer must never sit in the refill ring twice */
 +static uint8_t dp_rx_hw[DP_N_REFILL];
 +static uint32_t dp_rx_dup, dp_rx_full;
 +
 +static bool
 +dp_rx_post(uint64_t pa, uint32_t cookie)
-+{
+ {
+-	uint8_t type = len != 0 ? p[0] : 0xFF;
+-	htt_msgs++;
+-	if (type == T2H_VERSION_CONF && len >= 3) {
+-		LOG("t=%u ms: *** HTT VERSION_CONF %u.%u ***", g_ms, p[2], p[1]);
+-		if (htt_state == 1) {
+-			htt_configure("version conf");
+-		}
+-		return;
 +	if (cookie == 0 || cookie >= DP_N_REFILL || dp_rx_hw[cookie] != 0) {
 +		dp_rx_dup++;
 +		return false;
-+	}
+ 	}
+-	if (type == 0x07 && len >= 4) {            /* TX_COMPL_IND */
+-		htt_tx_compl(p, len);
+-		return;
 +	if (!dp_lmac_post(&dp_refill, pa, cookie)) {
 +		dp_rx_full++;
 +		return false;
-+	}
+ 	}
+-	if (type == T2H_RX_IN_ORD_PADDR_IND && len >= 8) {
+-		uint16_t n;
+-		memcpy(&n, p + 6, 2);
+-		const uint8_t *d = p + 8;
+-		for (uint32_t i = 0; i < n && 8 + (i + 1) * 12 <= len; i++, d += 12) {
+-			uint64_t pa;
+-			memcpy(&pa, d, 8);
+-			if (pa < htt_buf_pa || pa >= htt_buf_pa + (uint64_t)HTT_RING_SIZE * HTT_BUF_SIZE ||
+-			    ((pa - htt_buf_pa) % HTT_BUF_SIZE) != 0) {
+-				continue;
+-			}
+-			htt_msdus++;
+-			uint16_t mlen;
+-			memcpy(&mlen, d + 8, 2);
+-			if (mlen <= HTT_BUF_SIZE - 4 * OFF_MSDU_PAYLOAD) {
+-				w_rx_native(htt_buf + (pa - htt_buf_pa) + 4 * OFF_MSDU_PAYLOAD, mlen);
 +	dp_rx_hw[cookie] = 1;
 +	return true;
 +}
@@ -5653,30 +5739,43 @@ index 8aa0c2f..653173c 100644
 +		if (dp_rx_dup <= 6) {
 +			for (int q = 0; q < 2; q++) {
 +				LOG("t=%u ms: dp rx DUP return cookie %u (dup %u)", g_ms, cookie, dp_rx_dup);
-+			}
-+		}
+ 			}
+-			htt_post(pa);                       /* recycle the same buffer */
+ 		}
+-		htt_publish();
 +		return false;
-+	}
+ 	}
 +	dp_rx_hw[cookie] = 0;
 +	return true;
-+}
-+
-+static void
+ }
+ 
+ static void
+-htt_poll(void)
 +dp_lmac_publish(struct dp_ring *r)
-+{
+ {
+-	if (htt_state == 1 && g_ms - htt_req_ms > 2000) {
+-		LOG("t=%u ms: htt: no VERSION_CONF in 2 s, configuring anyway", g_ms);
+-		htt_configure("timeout");
+-	}
 +	mb();
 +	dp_wrp[r->id - DP_LMAC0] = r->idx * r->words;
 +	mb();
-+}
-+
+ }
+ 
 +/* ath11k_dp_alloc: srng_common_setup + wbm idle list + reo_setup, then pdev rx rings with buffers */
-+static void
+ static void
+-scan_event(const uint8_t *t, uint32_t len)
 +dp_common_setup(void)
-+{
+ {
+-	uint16_t tag;
+-	uint32_t e[6];
+-	if (len < 4 + 24) {
 +	uint64_t link_pa = 0;
 +	if (dp_up || !volcano) {
-+		return;
-+	}
+ 		return;
+ 	}
+-	memcpy(&tag, t + 2, 2);
+-	if (tag != TAG_SCAN_EVENT) {
 +	dp_rdp = (volatile uint32_t *)pool_alloc_w(0x1000, &dp_rdp_pa);
 +	dp_wrp = (volatile uint32_t *)pool_alloc_w(0x1000, &dp_wrp_pa);
 +	bool ok = dp_rdp != NULL && dp_wrp != NULL;
@@ -5698,8 +5797,11 @@ index 8aa0c2f..653173c 100644
 +		for (int k = 0; k < 3; k++) {
 +			LOG("t=%u ms: dp: alloc failed (pool used %llu)", g_ms, pool_used);
 +		}
-+		return;
-+	}
+ 		return;
+ 	}
+-	memcpy(e, t + 4, sizeof(e));
+-	if (e[0] == 0x008 || e[0] == 0x100 || e[0] == 0x004) {
+-		return;                                 /* foreign channel / exit / bss channel */
 +	for (uint32_t i = 0; i < 4; i++) {
 +		dp_dst_hw(&dp_reo[i], DP_REO + 0x1ec + 0x58 * i, DP_REO + 0x3028 + 8 * i);
 +	}
@@ -5750,10 +5852,18 @@ index 8aa0c2f..653173c 100644
 +	PE_parse_boot_argn("wifirxn", &rxn, sizeof(rxn));
 +	if (rxn > DP_REFILL_POST) {
 +		rxn = DP_REFILL_POST;
-+	}
+ 	}
+-	if (e[0] == 0x001) {
+-		LOG("t=%u ms: scan: STARTED", g_ms);
 +	for (uint32_t i = 0; i < ((g_dpmask & 1) ? rxn : 0); i++) {
 +		dp_rx_post(dp_rxb_pa + (uint64_t)i * DP_BUF, i + 1);     /* fix108 */
-+	}
+ 	}
+-	if (e[0] == 0x002 || e[0] == 0x040 || e[0] == 0x010) {
+-		scanning = false;
+-		scans++;
+-		LOG("t=%u ms: *** scan %u done (event %x): %u networks, %u beacons/probe responses, %u htt msdus ***", g_ms, scans, e[0], nbss, scan_frames, htt_msdus);
+-		next_scan_ms = scans < 3 ? g_ms + 10000 : 0;
+-		api_scans_done++;
 +	dp_lmac_publish(&dp_refill);
 +	/* experiment: fw never moves refill buffers into the mac buf ring; host feeds RXDMA directly */
 +	for (uint32_t i = 0; i < DP_N_MON - 1; i++) {
@@ -5766,9 +5876,9 @@ index 8aa0c2f..653173c 100644
 +	for (int k = 0; k < 3; k++) {
 +		LOG("t=%u ms: dp: rings up, rdp %llx wrp %llx links %llx rxb %llx | REO1 base %08x misc %08x idle misc %08x gen %08x (was %08x) misc_ctl %08x",
 +		    g_ms, dp_rdp_pa, dp_wrp_pa, link_pa, dp_rxb_pa, r1, r2, r3, r4, v, mc);
-+	}
-+}
-+
+ 	}
+ }
+ 
 +/* ath11k_dp_tx_htt_srng_setup */
 +static bool
 +dp_htt_ring(struct dp_ring *r, uint32_t htt_id, uint32_t htt_type, bool src, uint32_t mac = 0)
@@ -5797,9 +5907,21 @@ index 8aa0c2f..653173c 100644
 +static uint64_t s_rst_qpa;
 +static uint32_t s_rst_num;
 +
-+static void
+ static void
+-scan_mgmt_rx(const uint8_t *t, uint32_t len)
 +dp_reo_selftest(const char *why)
-+{
+ {
+-	uint32_t hdr[6];
+-	const uint8_t *f = NULL;
+-	uint32_t flen = 0;
+-	bool have_hdr = false;
+-
+-	for (uint32_t o = 0; o + 4 <= len;) {
+-		uint16_t l, tag;
+-		memcpy(&l, t + o, 2);
+-		memcpy(&tag, t + o + 2, 2);
+-		if (o + 4 + l > len) {
+-			break;
 +	if (!dp_up || w_arg("wifireost", 1) == 0) {
 +		return;
 +	}
@@ -5808,19 +5930,28 @@ index 8aa0c2f..653173c 100644
 +		uint8_t *va = (uint8_t *)pool_alloc_w(512 + 128, &pa);
 +		if (va == NULL) {
 +			return;
-+		}
+ 		}
+-		if (tag == TAG_MGMT_RX_HDR && l >= 24 && !have_hdr) {
+-			memcpy(hdr, t + o + 4, sizeof(hdr));
+-			have_hdr = true;
+-		} else if (tag == TAG_ARRAY_BYTE && f == NULL) {
+-			f = t + o + 4;
+-			flen = l;
 +		uint32_t adj = (uint32_t)((128 - (pa & 127)) & 127);
 +		s_rst_qva = va + adj;
 +		s_rst_qpa = pa + adj;
 +		volatile uint32_t *q = (volatile uint32_t *)s_rst_qva;
 +		for (int i = 0; i < 128; i++) {
 +			q[i] = 0;
-+		}
+ 		}
+-		o += 4 + l;
 +		q[0] = 4 | (8u << 4) | (0xDDBEEFu << 8);
 +		q[1] = 16;
 +		q[2] = 1 | (1u << 1) | (3u << 5) | (1u << 8) | (1u << 25);
 +		mb();
-+	}
+ 	}
+-	if (!have_hdr || f == NULL) {
+-		return;
 +	struct dp_ring *c = &dp_reo_cmd, *st = &dp_reo_sts;
 +	uint32_t hp0 = w_v_rd(c->ptr_reg), tp0 = w_v_rd(c->ptr_reg + 4), sh0 = w_v_rd(DP_REO + 0x3070);
 +	uint32_t rdc0 = dp_rdp[c->id], rds0 = dp_rdp[st->id];
@@ -5832,7 +5963,10 @@ index 8aa0c2f..653173c 100644
 +	e[3] = (uint32_t)(s_rst_qpa >> 32) & 0xFF;
 +	for (uint32_t i = 4; i < c->words; i++) {
 +		e[i] = 0;
-+	}
+ 	}
+-	flen = MIN(hdr[4], flen);
+-	if (flen >= 24 && (f[0] & 0x0C) == 0 && (f[0] >> 4) != 8 && (f[0] >> 4) != 5) {
+-		w_assoc_mgmt_rx(f, flen);               /* auth, assoc response, deauth, disassoc */
 +	mb();
 +	c->idx = (c->idx + 1) % c->n;
 +	w_v_wr(c->ptr_reg, c->idx * c->words);
@@ -5867,8 +6001,10 @@ index 8aa0c2f..653173c 100644
 +{
 +	if (!dp_up) {
 +		LOG("t=%u ms: dp: rings not up, no HTT srng setup", g_ms);
-+		return;
-+	}
+ 		return;
+ 	}
+-	if (flen < 36 || (f[0] & 0x0C) != 0 || ((f[0] >> 4) != 8 && (f[0] >> 4) != 5)) {
+-		return;                                 /* beacons and probe responses only */
 +	bool a = (g_dpmask & 16) ? dp_htt_ring(&dp_refill, 5, 2, true) : false;   /* HTT_HOST1_TO_FW_RXBUF_RING, SW_TO_SW */
 +	if (g_dpmask & 32) {
 +		/* fix92: qcacld MCL model (what Android runs on this fw): host buffers go straight to RXDMA on
@@ -5964,7 +6100,24 @@ index 8aa0c2f..653173c 100644
 +	o[0] = 0;
 +	for (uint32_t i = 0; i < n && k + 3 < osz; i++) {
 +		k += (size_t)snprintf(o + k, osz - k, "%02x", p[i]);
-+	}
+ 	}
+-	scan_frames++;
+-	int32_t rssi = (int32_t)hdr[1] - 95;
+-	uint32_t chan = hdr[0];
+-	char ssid[33] = "";
+-	for (uint32_t o = 36; o + 2 <= flen && o + 2 + f[o + 1] <= flen; o += 2 + f[o + 1]) {
+-		if (f[o] == 0) {
+-			uint32_t n = MIN((uint32_t)f[o + 1], 32u);
+-			for (uint32_t i = 0; i < n; i++) {
+-				uint8_t ch = f[o + 2 + i];
+-				ssid[i] = (ch >= 0x20 && ch != 0x7F) ? (char)ch : '?';
+-			}
+-			ssid[n] = 0;
+-			if (n == 0 || f[o + 2] == 0) {
+-				strlcpy(ssid, "<hidden>", sizeof(ssid));
+-			}
+-		} else if (f[o] == 3 && f[o + 1] == 1) {
+-			chan = f[o + 2];
 +}
 +
 +/* a native wifi frame (802.11 header without QoS, LLC, payload) */
@@ -5978,15 +6131,23 @@ index 8aa0c2f..653173c 100644
 +		dtx_pool = (uint8_t *)pool_alloc_w((uint64_t)DTX_SLOTS * DP_BUF, &dtx_pool_pa);
 +		if (dtx_pool == NULL) {
 +			return false;
-+		}
-+	}
+ 		}
+ 	}
+-	struct bss *b = NULL;
+-	bool fresh = false;
+-	for (uint32_t i = 0; i < nbss; i++) {
+-		if (memcmp(bss[i].bssid, f + 16, 6) == 0) {
+-			b = &bss[i];
 +	int slot = -1;
 +	for (int i = 0; i < DTX_SLOTS; i++) {
 +		if (!(dtx_busy & (1u << i))) {
 +			slot = i;
-+			break;
-+		}
-+	}
+ 			break;
+ 		}
+ 	}
+-	if (b == NULL) {
+-		if (nbss >= 64) {
+-			return;
 +	uint32_t tp = (dp_rdp[dp_tcl0.id] / dp_tcl0.words) % dp_tcl0.n;
 +	uint32_t nx = (dp_tcl0.idx + 1) % dp_tcl0.n;
 +	if (slot < 0 || nx == tp) {
@@ -6015,8 +6176,28 @@ index 8aa0c2f..653173c 100644
 +		w_hex(h, sizeof(h), f, MIN(len, 34u));
 +		for (int k = 0; k < 2; k++) {
 +			LOG("t=%u ms: dp tx #%u slot %d len %u: %s", g_ms, dtx_sent, slot, len, h);
-+		}
-+	}
+ 		}
+-		b = &bss[nbss++];
+-		bzero(b, sizeof(*b));
+-		memcpy(b->bssid, f + 16, 6);
+-		fresh = true;
+ 	}
+-	b->seen++;
+-	b->rssi = (int8_t)rssi;
+-	b->chan = (uint8_t)chan;
+-	b->freq = (uint16_t)(chan == 14 ? 2484 : chan < 14 ? 2407 + 5 * chan : 5000 + 5 * chan);
+-	b->last_ms = g_ms;
+-	memcpy(&b->bintval, f + 32, 2);
+-	memcpy(&b->capab, f + 34, 2);
+-	b->ie_len = (uint16_t)MIN(flen - 36, (uint32_t)sizeof(b->ie));
+-	memcpy(b->ie, f + 36, b->ie_len);
+-	strlcpy(b->ssid, ssid, sizeof(b->ssid));
+-	b->raw_ssid_len = 0;
+-	for (uint32_t o = 36; o + 2 <= flen && o + 2 + f[o + 1] <= flen; o += 2 + f[o + 1]) {
+-		if (f[o] == 0) {
+-			b->raw_ssid_len = (uint8_t)MIN((uint32_t)f[o + 1], 32u);
+-			memcpy(b->raw_ssid, f + o + 2, b->raw_ssid_len);
+-			break;
 +	return true;
 +}
 +
@@ -6032,8 +6213,9 @@ index 8aa0c2f..653173c 100644
 +		for (int k = 0; k < 2; k++) {
 +			LOG("t=%u ms: dp tx done #%u slot %u src %u: %08x %08x %08x %08x", g_ms, dtx_done, slot, e[2] & 7,
 +			    e[2], e[3], e[4], e[5]);
-+		}
-+	}
+ 		}
+ 	}
+-	if (!fresh) {
 +}
 +
 +/* an rx buffer out of a REO2SW ring: hal_rx_desc (384 B, qcn9074 layout) + l3 pad + the msdu */
@@ -6059,19 +6241,79 @@ index 8aa0c2f..653173c 100644
 +		}
 +	}
 +	if (mlen == 0 || 384 + pad + mlen > DP_BUF) {
-+		return;
-+	}
+ 		return;
+ 	}
+-	LOG("t=%u ms: net %2u: %02x:%02x:%02x:**:**:** ch %3u %4d dBm '%s'", g_ms, nbss, b->bssid[0], b->bssid[1],
+-	    b->bssid[2], b->chan, b->rssi, b->ssid);
 +	if (decap == 2) {
 +		w_rx_ether(b + 384 + pad, mlen);
 +	} else {
 +		w_rx_native(b + 384 + pad, mlen);
 +	}
-+}
-+
+ }
+ 
+-/* ---------------- the radio for the rest of the kernel (sys-independent C API) */
+-
+-/*
+- * What another part of the kernel may ask of the radio once it is up: a scan, and what the
+- * scans heard (each access point with its beacon's information elements, from which a reader
+- * tells the network's protection). The modem thread does the work; a caller's scan waits.
+- */
+-extern "C" {
+-struct topaz_wlan_bss {
+-	uint8_t bssid[6];
+-	uint8_t ssid[32], ssid_length;
+-	uint16_t frequency;                         /* MHz */
+-	int16_t rssi;                               /* dBm */
+-	uint16_t beacon_interval, capability;
+-	uint32_t age_ms;
+-	uint16_t elements_length;
+-	uint8_t elements[768];
+-};
+-void (*topaz_wlan_ready_hook)(void);
+-bool topaz_wlan_ready(void);
+-int topaz_wlan_scan(void);
+-bool topaz_wlan_heard(unsigned index, struct topaz_wlan_bss *bss);
+-void topaz_wlan_address(uint8_t address[6]);
+-}
+-
+-static volatile bool api_scan_asked;
+-static bool api_ready;
+-
+-bool
+-topaz_wlan_ready(void)
+-{
+-	return api_ready;
+-}
+-
+-void
+-topaz_wlan_address(uint8_t address[6])
+-{
+-	memcpy(address, our_mac, 6);
+-}
+-
+-int
+-topaz_wlan_scan(void)
+-{
+-	if (!api_ready) {
+-		return ENXIO;
+-	}
+-	uint32_t before = api_scans_done;
+-	api_scan_asked = true;
+-	for (int i = 0; i < 300 && api_scans_done == before; i++) {   /* 30 s */
+-		IOSleep(100);
+-	}
+-	return api_scans_done != before ? 0 : ETIMEDOUT;
+-}
+-
+-bool
+-topaz_wlan_heard(unsigned index, struct topaz_wlan_bss *out)
 +/* consume a HW-produced ring; rx buffers go straight back to the refill ring */
 +static bool
 +dp_reap(struct dp_ring *r, bool lmac)
-+{
+ {
+-	if (index >= nbss) {
+-		return false;
 +	bool any = false;
 +	for (int k = 0; k < 64; k++) {
 +		uint32_t hp = (dp_rdp[r->id] / r->words) % r->n;
@@ -6120,17 +6362,49 @@ index 8aa0c2f..653173c 100644
 +		} else {
 +			vce_ptr_wr(r->ptr_reg, r->idx * r->words);
 +		}
-+	}
+ 	}
+-	const struct bss *b = &bss[index];
+-	bzero(out, sizeof(*out));
+-	memcpy(out->bssid, b->bssid, 6);
+-	memcpy(out->ssid, b->raw_ssid, b->raw_ssid_len);
+-	out->ssid_length = b->raw_ssid_len;
+-	out->frequency = b->freq;
+-	out->rssi = b->rssi;
+-	out->beacon_interval = b->bintval;
+-	out->capability = b->capab;
+-	out->age_ms = g_ms - b->last_ms;
+-	out->elements_length = MIN(b->ie_len, (uint16_t)sizeof(out->elements));
+-	memcpy(out->elements, b->ie, out->elements_length);
+-	return true;
 +	return any;
-+}
-+
+ }
+ 
+-/* ---------------- WPA2-PSK crypto, self-contained (SHA-1, HMAC, PBKDF2, PRF, AES-128 unwrap) */
+-
+-/*
+- * The handshake is done here, in the kernel: wifid hands over the passphrase as typed. Small and
+- * self-contained on purpose: libkern's SHA-1/AES go through corecrypto, which this kernel may not
+- * have registered.
+- */
+-struct w_sha1 { uint32_t h[5]; uint64_t n; uint8_t b[64]; uint32_t bl; };
+-
+-static inline uint32_t rol32(uint32_t v, int s) { return (v << s) | (v >> (32 - s)); }
+-
+-static void
+-w_sha1_block(struct w_sha1 *c, const uint8_t *p)
 +/* fix84: fw ring b768 (first LMAC dst ring = RXDMA2SW0, our rxerr 116) must be empty at
 + * whalRecvDmaLeakDetect (assert 1483). The fw never mirrors its hp into rdp, so drain it by
 + * ring memory content: consume nonzero entries, zero them, move tp in wrp. */
 +static uint32_t dp_err_seen, dp_err_recyc;
 +static bool
 +dp_err_drain(struct dp_ring *r)
-+{
+ {
+-	uint32_t w[80], a = c->h[0], b = c->h[1], d = c->h[2], e = c->h[3], f = c->h[4];
+-	for (int i = 0; i < 16; i++) {
+-		w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
+-	}
+-	for (int i = 16; i < 80; i++) {
+-		w[i] = rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
 +	bool any = false;
 +	static uint32_t last_scan;
 +	if (g_ms - last_scan >= 20) {               /* fix87: entries may start anywhere: find the first nonzero one */
@@ -6148,13 +6422,25 @@ index 8aa0c2f..653173c 100644
 +				}
 +			}
 +		}
-+	}
+ 	}
+-	for (int i = 0; i < 80; i++) {
+-		uint32_t k, x;
+-		if (i < 20) {
+-			x = (b & d) | (~b & e); k = 0x5A827999;
+-		} else if (i < 40) {
+-			x = b ^ d ^ e; k = 0x6ED9EBA1;
+-		} else if (i < 60) {
+-			x = (b & d) | (b & e) | (d & e); k = 0x8F1BBCDC;
+-		} else {
+-			x = b ^ d ^ e; k = 0xCA62C1D6;
 +	for (int k = 0; k < 64; k++) {
 +		volatile uint32_t *e = r->va + r->words * r->idx;
 +		bool nz = false;
 +		for (uint32_t w = 0; w < r->words; w++) {
 +			nz |= e[w] != 0;
-+		}
+ 		}
+-		uint32_t t = rol32(a, 5) + x + f + k + w[i];
+-		f = e; e = d; d = rol32(b, 30); b = a; a = t;
 +		if (!nz) {
 +			break;
 +		}
@@ -6177,15 +6463,21 @@ index 8aa0c2f..653173c 100644
 +		r->idx = (r->idx + 1) % r->n;
 +		mb();
 +		dp_wrp[r->id - DP_LMAC0] = r->idx * r->words;
-+	}
+ 	}
+-	c->h[0] += a; c->h[1] += b; c->h[2] += d; c->h[3] += e; c->h[4] += f;
 +	return any;
-+}
-+
+ }
+ 
 +/* fix126: last UMAC snapshot of the RXDMA output rings, re-logged as @@U@@ beacons at a fw crash */
 +static uint32_t g_u126[24];
 +static uint32_t g_u126n;
 +
-+static void
+ static void
+-w_sha1_init(struct w_sha1 *c)
+-{
+-	c->h[0] = 0x67452301; c->h[1] = 0xEFCDAB89; c->h[2] = 0x98BADCFE; c->h[3] = 0x10325476; c->h[4] = 0xC3D2E1F0;
+-	c->n = 0;
+-	c->bl = 0;
 +u126_snap(void)
 +{
 +	/* fix127: WBM link descriptor path (idle list -> WBM2TQM/REO/RXDMA0/FW link rings) */
@@ -6214,21 +6506,43 @@ index 8aa0c2f..653173c 100644
 +	g_u126[22] = w_v_rd(DP_REO + 0x3000);
 +	g_u126[23] = w_v_rd(DP_WBM + 0x8);
 +	g_u126n++;
-+}
-+
-+static void
+ }
+ 
+ static void
+-w_sha1_update(struct w_sha1 *c, const uint8_t *p, size_t len)
 +u126_log(const char *tag)
-+{
+ {
+-	c->n += len;
+-	while (len > 0) {
+-		uint32_t take = (uint32_t)MIN((size_t)(64 - c->bl), len);
+-		memcpy(c->b + c->bl, p, take);
+-		c->bl += take;
+-		p += take;
+-		len -= take;
+-		if (c->bl == 64) {
+-			w_sha1_block(c, c->b);
+-			c->bl = 0;
+-		}
+-	}
 +	const uint32_t *u = g_u126;
 +	LOG("%s t=%u n%u: link_en %x misc_en %x idlectl %x idlesz %x | idle base %x misc %x st %x hp %x tp %x | tqm base %x misc %x hp %x tp %x | reo base %x hp %x tp %x | rxdma0 base %x hp %x tp %x | fw hp %x tp %x | r2r hp %x buf_en %x@@E@@", tag, u[0], g_u126n, u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15], u[16], u[17], u[18], u[19], u[20], u[21], u[22], u[23]);
-+}
-+
-+static void
+ }
+ 
+ static void
+-w_sha1_final(struct w_sha1 *c, uint8_t out[20])
 +dp_poll(void)
-+{
+ {
+-	uint64_t bits = c->n * 8;
+-	uint8_t pad = 0x80, z = 0;
+-	w_sha1_update(c, &pad, 1);
+-	while (c->bl != 56) {
+-		w_sha1_update(c, &z, 1);
 +	if (!dp_up) {
 +		return;
-+	}
+ 	}
+-	uint8_t l[8];
+-	for (int i = 0; i < 8; i++) {
+-		l[i] = (uint8_t)(bits >> (56 - 8 * i));
 +	if (g_ms - es_last_ms >= ((g_ms - es_setup_ms < 4000) ? 150u : 1000u)) {
 +		es_req();
 +	}
@@ -6261,7 +6575,13 @@ index 8aa0c2f..653173c 100644
 +				}
 +			}
 +		}
-+	}
+ 	}
+-	w_sha1_update(c, l, 8);
+-	for (int i = 0; i < 5; i++) {
+-		out[4 * i] = (uint8_t)(c->h[i] >> 24);
+-		out[4 * i + 1] = (uint8_t)(c->h[i] >> 16);
+-		out[4 * i + 2] = (uint8_t)(c->h[i] >> 8);
+-		out[4 * i + 3] = (uint8_t)c->h[i];
 +	{
 +		static uint32_t next_es;
 +		if (g_ms >= next_es) {
@@ -6299,7 +6619,20 @@ index 8aa0c2f..653173c 100644
 +			LOG("t=%u ms: dp ringmem reo1 %u exc %u wbm0 %u wbm1 %u wbm2 %u rel %u wbm4 %u err1 %u mb1 %u", g_ms,
 +			    nz[0], nz[1], nz[2], nz[3], nz[4], nz[5], nz[6], nz[7], nz[8]);
 +		}
-+	}
+ 	}
+-}
+-
+-/* HMAC-SHA1 over up to three pieces */
+-static void
+-w_hmac_sha1(const uint8_t *key, size_t klen, const uint8_t *a, size_t al, const uint8_t *b, size_t bl,
+-    const uint8_t *c3, size_t cl, uint8_t out[20])
+-{
+-	uint8_t k[64] = {}, ipad[64], opad[64], inner[20];
+-	struct w_sha1 s;
+-	if (klen > 64) {
+-		w_sha1_init(&s);
+-		w_sha1_update(&s, key, klen);
+-		w_sha1_final(&s, k);
 +	bool any = false;
 +	for (uint32_t i = 0; i < 4; i++) {
 +		any |= dp_reap(&dp_reo[i], false);
@@ -6313,10 +6646,14 @@ index 8aa0c2f..653173c 100644
 +	if (g_errdrain) {
 +		any |= dp_err_drain(&dp_rxerr);
 +		any |= dp_err_drain(&dp_rxerr1);
-+	} else {
+ 	} else {
+-		memcpy(k, key, klen);
 +		any |= dp_reap(&dp_rxerr, true);
 +		any |= dp_reap(&dp_rxerr1, true);
-+	}
+ 	}
+-	for (int i = 0; i < 64; i++) {
+-		ipad[i] = k[i] ^ 0x36;
+-		opad[i] = k[i] ^ 0x5c;
 +	if (any) {
 +		dp_lmac_publish(&dp_refill);
 +	}
@@ -6519,12 +6856,34 @@ index 8aa0c2f..653173c 100644
 +			dp_recycled, dp_bad);
 +			LOG("dp t=%u: rx own: dup %u full %u", g_ms, dp_rx_dup, dp_rx_full);
 +		}
-+	}
-+}
-+
-+static void
+ 	}
+-	w_sha1_init(&s);
+-	w_sha1_update(&s, ipad, 64);
+-	if (al) w_sha1_update(&s, a, al);
+-	if (bl) w_sha1_update(&s, b, bl);
+-	if (cl) w_sha1_update(&s, c3, cl);
+-	w_sha1_final(&s, inner);
+-	w_sha1_init(&s);
+-	w_sha1_update(&s, opad, 64);
+-	w_sha1_update(&s, inner, 20);
+-	w_sha1_final(&s, out);
+ }
+ 
+-/* PMK = PBKDF2-HMAC-SHA1(passphrase, ssid, 4096, 32) */
+ static void
+-w_pbkdf2_pmk(const uint8_t *pass, size_t plen, const uint8_t *ssid, size_t slen, uint8_t pmk[32])
 +htt_configure(const char *why)
-+{
+ {
+-	for (uint32_t blk = 1; blk <= 2; blk++) {
+-		uint8_t cnt[4] = { (uint8_t)(blk >> 24), (uint8_t)(blk >> 16), (uint8_t)(blk >> 8), (uint8_t)blk };
+-		uint8_t u[20], t[20];
+-		w_hmac_sha1(pass, plen, ssid, slen, cnt, 4, NULL, 0, u);
+-		memcpy(t, u, 20);
+-		for (int i = 1; i < 4096; i++) {
+-			w_hmac_sha1(pass, plen, u, 20, NULL, 0, NULL, 0, u);
+-			for (int j = 0; j < 20; j++) {
+-				t[j] ^= u[j];
+-			}
 +	uint8_t m[64] = {}, *p = m;
 +
 +	htt_state = 2;
@@ -6541,7 +6900,8 @@ index 8aa0c2f..653173c 100644
 +			/* fix119: the fw crashes ~0.1-0.5 s into the first scan; let the SRNG_INFO reply land first */
 +			es_scan_at = g_ms + w_arg("wifiesdelay", 300);
 +			return;
-+		}
+ 		}
+-		memcpy(pmk + 20 * (blk - 1), t, blk == 1 ? 20 : 12);
 +		scan_start();
 +		return;
 +	}
@@ -6560,22 +6920,113 @@ index 8aa0c2f..653173c 100644
 +	*p++ = 0;
 +	bool a = htt_send(m, sizeof(m));
 +	/* ath10k_htt_send_rx_ring_cfg_64 */
- 	for (uint32_t i = 0; i < HTT_RING_SIZE - 1; i++) {
- 		htt_post(htt_buf_pa + (uint64_t)i * HTT_BUF_SIZE);
++	for (uint32_t i = 0; i < HTT_RING_SIZE - 1; i++) {
++		htt_post(htt_buf_pa + (uint64_t)i * HTT_BUF_SIZE);
  	}
-@@ -4392,7 +6842,7 @@ htt_start(void)
- 	if (htt_state != 0) {
- 		return;
- 	}
--	htt_blk = (uint8_t *)pool_alloc(ring + bank + HTT_RING_SIZE * HTT_BUF_SIZE, &pa);
-+	htt_blk = (uint8_t *)pool_alloc_w(ring + bank + HTT_RING_SIZE * HTT_BUF_SIZE, &pa);
- 	if (htt_blk == NULL) {
- 		LOG("htt: no memory, scanning without it");
- 		scan_start();
-@@ -4417,6 +6867,82 @@ htt_rx(const uint8_t *p, uint32_t len)
++	uint8_t r[48] = {};
++	p = r;
++	*p++ = H2T_RX_RING_CFG;
++	*p++ = 1;
++	p = put16(p, 0);
++	p = put64(p, htt_idx_pa);
++	p = put64(p, htt_ring_pa);
++	p = put16(p, HTT_RING_SIZE);
++	p = put16(p, HTT_BUF_SIZE);
++	p = put16(p, 0xFFFF);                       /* every frame type, management included */
++	p = put16(p, 0);                            /* fw_idx_init_val */
++	p = put16(p, OFF_HDR_STATUS);
++	p = put16(p, OFF_MSDU_PAYLOAD);
++	p = put16(p, OFF_PPDU_START);
++	p = put16(p, OFF_PPDU_END);
++	p = put16(p, OFF_MPDU_START);
++	p = put16(p, OFF_MPDU_END);
++	p = put16(p, OFF_MSDU_START);
++	p = put16(p, OFF_MSDU_END);
++	p = put16(p, OFF_ATTENTION);
++	p = put16(p, OFF_FRAG_INFO);
++	htt_publish();
++	bool b = htt_send(r, sizeof(r));
++	uint8_t g[4] = { H2T_AGGR_CFG, 64, 3, 0 };
++	bool c = htt_send(g, sizeof(g));
++	LOG("t=%u ms: htt (%s): frag bank %s, rx ring cfg %s (%u bufs), aggr cfg %s", g_ms, why, a ? "ok" : "FAILED",
++	    b ? "ok" : "FAILED", HTT_RING_SIZE - 1, c ? "ok" : "FAILED");
++	scan_start();
+ }
+ 
+-/* IEEE 802.11 PRF-SHA1 */
+ static void
+-w_prf(const uint8_t *key, size_t klen, const char *label, const uint8_t *data, size_t dlen, uint8_t *out, size_t olen)
++htt_start(void)
  {
- 	uint8_t type = len != 0 ? p[0] : 0xFF;
- 	htt_msgs++;
+-	uint8_t buf[128], h[20];
+-	size_t ll = strlen(label);
+-	for (uint8_t i = 0; olen > 0; i++) {
+-		memcpy(buf, label, ll);
+-		buf[ll] = 0;
+-		memcpy(buf + ll + 1, data, dlen);
+-		buf[ll + 1 + dlen] = i;
+-		w_hmac_sha1(key, klen, buf, ll + 2 + dlen, NULL, 0, NULL, 0, h);
+-		size_t take = MIN(olen, (size_t)20);
+-		memcpy(out, h, take);
+-		out += take;
+-		olen -= take;
++	uint64_t pa = 0;
++	uint32_t ring = (HTT_RING_SIZE * 8 + 64 + 0xfff) & ~0xfffu;
++	uint32_t bank = (HTT_MAX_PENDING_TX * HTT_EXT_DESC_SIZE + 0xfff) & ~0xfffu;
++
++	if (htt_state != 0) {
++		return;
++	}
++	htt_blk = (uint8_t *)pool_alloc_w(ring + bank + HTT_RING_SIZE * HTT_BUF_SIZE, &pa);
++	if (htt_blk == NULL) {
++		LOG("htt: no memory, scanning without it");
++		scan_start();
++		return;
+ 	}
++	htt_ring = (volatile uint64_t *)htt_blk;
++	htt_ring_pa = pa;
++	htt_idx = (volatile uint32_t *)(htt_blk + HTT_RING_SIZE * 8);
++	htt_idx_pa = pa + HTT_RING_SIZE * 8;
++	htt_bank = htt_blk + ring;
++	htt_bank_pa = pa + ring;
++	htt_buf = htt_blk + ring + bank;
++	htt_buf_pa = pa + ring + bank;
++	htt_state = 1;
++	htt_req_ms = g_ms;
++	uint8_t m[4] = { H2T_VERSION_REQ, 0, 0, 0 };
++	LOG("t=%u ms: htt: VERSION_REQ %s", g_ms, htt_send(m, sizeof(m)) ? "sent" : "FAILED");
+ }
+ 
+-/* AES-128 decryption of one block (FIPS-197), for the key unwrap of the GTK */
+-static const uint8_t aes_sbox[256] = {
+-	0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+-	0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+-	0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+-	0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+-	0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+-	0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+-	0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+-	0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
+-};
+-
+-static uint8_t aes_xt(uint8_t x) { return (uint8_t)((x << 1) ^ ((x & 0x80) ? 0x1b : 0)); }
+-static uint8_t aes_mul(uint8_t a, uint8_t b) { uint8_t r = 0; while (b) { if (b & 1) r ^= a; a = aes_xt(a); b >>= 1; } return r; }
+-
+ static void
+-aes128_expand(const uint8_t key[16], uint8_t rk[176])
++htt_rx(const uint8_t *p, uint32_t len)
+ {
+-	uint8_t rcon = 1;
+-	memcpy(rk, key, 16);
+-	for (int i = 16; i < 176; i += 4) {
+-		uint8_t t[4];
+-		memcpy(t, rk + i - 4, 4);
+-		if (i % 16 == 0) {
+-			uint8_t x = t[0];
+-			t[0] = aes_sbox[t[1]] ^ rcon; t[1] = aes_sbox[t[2]]; t[2] = aes_sbox[t[3]]; t[3] = aes_sbox[x];
+-			rcon = aes_xt(rcon);
++	uint8_t type = len != 0 ? p[0] : 0xFF;
++	htt_msgs++;
 +	if (volcano && (type == 0x03 || type == 0x1e) && len >= 12) {
 +		/* fix68: HTT_T2H PEER_MAP (v1: word0 type 7:0, vdev 15:8, peer_id 31:16; mac_l32; mac_h16) */
 +		s_peer_id = (uint32_t)(p[2] | p[3] << 8);
@@ -6583,7 +7034,9 @@ index 8aa0c2f..653173c 100644
 +		for (int k = 0; k < 2; k++) {
 +			LOG("t=%u ms: *** HTT PEER_MAP type %x vdev %u peer_id %u mac %02x:%02x:%02x:**:**:** ***", g_ms, type, p[1],
 +			    s_peer_id, p[4], p[5], p[6]);
-+		}
+ 		}
+-		for (int j = 0; j < 4; j++) {
+-			rk[i + j] = rk[i - 16 + j] ^ t[j];
 +	}
 +	{
 +		static uint32_t htt_more;
@@ -6652,19 +7105,52 @@ index 8aa0c2f..653173c 100644
 +		}
 +		return;
 +	}
- 	if (type == T2H_VERSION_CONF && len >= 3) {
- 		LOG("t=%u ms: *** HTT VERSION_CONF %u.%u ***", g_ms, p[2], p[1]);
- 		if (htt_state == 1) {
-@@ -4451,9 +6977,87 @@ htt_rx(const uint8_t *p, uint32_t len)
++	if (type == T2H_VERSION_CONF && len >= 3) {
++		LOG("t=%u ms: *** HTT VERSION_CONF %u.%u ***", g_ms, p[2], p[1]);
++		if (htt_state == 1) {
++			htt_configure("version conf");
++		}
++		return;
++	}
++	if (type == 0x07 && len >= 4) {            /* TX_COMPL_IND */
++		htt_tx_compl(p, len);
++		return;
++	}
++	if (type == T2H_RX_IN_ORD_PADDR_IND && len >= 8) {
++		uint16_t n;
++		memcpy(&n, p + 6, 2);
++		const uint8_t *d = p + 8;
++		for (uint32_t i = 0; i < n && 8 + (i + 1) * 12 <= len; i++, d += 12) {
++			uint64_t pa;
++			memcpy(&pa, d, 8);
++			if (pa < htt_buf_pa || pa >= htt_buf_pa + (uint64_t)HTT_RING_SIZE * HTT_BUF_SIZE ||
++			    ((pa - htt_buf_pa) % HTT_BUF_SIZE) != 0) {
++				continue;
++			}
++			htt_msdus++;
++			uint16_t mlen;
++			memcpy(&mlen, d + 8, 2);
++			if (mlen <= HTT_BUF_SIZE - 4 * OFF_MSDU_PAYLOAD) {
++				w_rx_native(htt_buf + (pa - htt_buf_pa) + 4 * OFF_MSDU_PAYLOAD, mlen);
++			}
++			htt_post(pa);                       /* recycle the same buffer */
+ 		}
++		htt_publish();
  	}
  }
  
-+static void
+ static void
+-aes128_decrypt(const uint8_t rk[176], uint8_t s[16])
 +es_req(void)
-+{
+ {
+-	uint8_t inv[256];
+-	for (int i = 0; i < 256; i++) {
+-		inv[aes_sbox[i]] = (uint8_t)i;
 +	if (w_arg("wifiestats", 1) == 0 || htt_state < 2) {
 +		return;
-+	}
+ 	}
+-	for (int j = 0; j < 16; j++) {
+-		s[j] ^= rk[160 + j];
 +	/* fix118: htt_ext_stats_cfg_cmd {msg 0x10, pdev_mask, stats_type 15 SRNG_INFO}, cfg0..3, rsvd, cookie */
 +	uint32_t q[8] = {};
 +	uint32_t pm = (es_reqs & 1) ? 1 : 2;
@@ -6678,7 +7164,13 @@ index 8aa0c2f..653173c 100644
 +		for (int k = 0; k < 2; k++) {
 +			LOG("t=%u ms: es: SRNG_INFO req #%u mask %u %s", g_ms, es_reqs, pm, ok ? "sent" : "FAILED");
 +		}
-+	}
+ 	}
+-	for (int r = 9; r >= 0; r--) {
+-		uint8_t t[16];
+-		for (int c = 0; c < 4; c++) {           /* inverse shift rows + inverse sub bytes */
+-			for (int row = 0; row < 4; row++) {
+-				t[4 * ((c + row) % 4) + row] = inv[s[4 * c + row]];
+-			}
 +}
 +
 +static void
@@ -6699,13 +7191,18 @@ index 8aa0c2f..653173c 100644
 +		uint32_t h = w[6] & 0xffff, t = w[6] >> 16;
 +		if (h == t && (w[5] >> 16) == 0 && (w[7] >> 16) == 0) {
 +			continue;
-+		}
+ 		}
+-		for (int j = 0; j < 16; j++) {
+-			t[j] ^= rk[16 * r + j];
 +		shown++;
 +		for (int k = 0; k < copies; k++) {
 +			LOG("@@G@@ #%02u m%u r%u a%u e%u sz%u es%u av%u vl%u h%u t%u ce%u pf%u pc%u it%u b%08x@@E@@", i, w[0] & 0xff,
 +			    (w[0] >> 8) & 0xff, (w[0] >> 16) & 0xff, (w[0] >> 24) & 1, w[3], w[4], w[5] & 0xffff, w[5] >> 16, h, t,
 +			    w[7] & 0xffff, w[7] >> 16, w[8] & 0xffff, w[8] >> 16, w[1]);
-+		}
+ 		}
+-		if (r == 0) {
+-			memcpy(s, t, 16);
+-			break;
 +		LOG("---- es ---------------------------------------------------------------------------------------------");
 +		LOG("---- es ---------------------------------------------------------------------------------------------");
 +		LOG("---- es ---------------------------------------------------------------------------------------------");
@@ -6717,58 +7214,126 @@ index 8aa0c2f..653173c 100644
 +		for (uint32_t i = i0; i < es_n && i < i0 + 8; i++) {
 +			const uint32_t *w = es_ring[i];
 +			o += snprintf(b + o, sizeof(b) - o, " %u.%u.%u:%u/%u", i, (w[0] >> 8) & 0xff, w[0] & 0xff, w[6] & 0xffff, w[6] >> 16);
-+		}
+ 		}
+-		for (int c = 0; c < 4; c++) {           /* inverse mix columns */
+-			uint8_t *q = t + 4 * c, a0 = q[0], a1 = q[1], a2 = q[2], a3 = q[3];
+-			s[4 * c] = aes_mul(a0, 14) ^ aes_mul(a1, 11) ^ aes_mul(a2, 13) ^ aes_mul(a3, 9);
+-			s[4 * c + 1] = aes_mul(a0, 9) ^ aes_mul(a1, 14) ^ aes_mul(a2, 11) ^ aes_mul(a3, 13);
+-			s[4 * c + 2] = aes_mul(a0, 13) ^ aes_mul(a1, 9) ^ aes_mul(a2, 14) ^ aes_mul(a3, 11);
+-			s[4 * c + 3] = aes_mul(a0, 11) ^ aes_mul(a1, 13) ^ aes_mul(a2, 9) ^ aes_mul(a3, 14);
 +		for (int k = 0; k < copies; k++) {
 +			LOG("@@G@@ L%s@@E@@", b);
-+		}
+ 		}
 +		LOG("---- es ---------------------------------------------------------------------------------------------");
 +		LOG("---- es ---------------------------------------------------------------------------------------------");
 +		LOG("---- es ---------------------------------------------------------------------------------------------");
-+	}
-+}
-+
- static void
- htt_poll(void)
+ 	}
+ }
+ 
+-/* RFC 3394 key unwrap with a 128-bit KEK; out gets len-8 bytes. False if the check value is wrong. */
+-static bool
+-aes_unwrap(const uint8_t kek[16], const uint8_t *in, size_t len, uint8_t *out)
++static void
++htt_poll(void)
  {
+-	uint8_t rk[176], a[8], b[16];
+-	size_t n = len / 8 - 1;
+-	if (len < 24 || len % 8 != 0) {
+-		return false;
+-	}
+-	aes128_expand(kek, rk);
+-	memcpy(a, in, 8);
+-	memcpy(out, in + 8, len - 8);
+-	for (int j = 5; j >= 0; j--) {
+-		for (size_t i = n; i >= 1; i--) {
+-			uint64_t t = (uint64_t)n * (uint64_t)j + i;
+-			memcpy(b, a, 8);
+-			for (int k = 0; k < 8; k++) {
+-				b[7 - k] ^= (uint8_t)(t >> (8 * k));
 +	if (volcano) {
 +		dp_poll();
 +		if (es_scan_at != 0 && (int32_t)(g_ms - es_scan_at) >= 0) {
 +			es_scan_at = 0;
 +			for (int k = 0; k < 2; k++) {
 +				LOG("t=%u ms: es: deferred scan start (es confs %u done %u n %u)", g_ms, es_confs, es_done, es_n);
-+			}
+ 			}
+-			memcpy(b + 8, out + 8 * (i - 1), 8);
+-			aes128_decrypt(rk, b);
+-			memcpy(a, b, 8);
+-			memcpy(out + 8 * (i - 1), b + 8, 8);
 +			scan_start();
-+		}
-+	}
- 	if (htt_state == 1 && g_ms - htt_req_ms > 2000) {
- 		LOG("t=%u ms: htt: no VERSION_CONF in 2 s, configuring anyway", g_ms);
- 		htt_configure("timeout");
-@@ -4474,15 +7078,35 @@ scan_event(const uint8_t *t, uint32_t len)
+ 		}
  	}
- 	memcpy(e, t + 4, sizeof(e));
- 	if (e[0] == 0x008 || e[0] == 0x100 || e[0] == 0x004) {
+-	for (int k = 0; k < 8; k++) {
+-		if (a[k] != 0xA6) {
+-			return false;
+-		}
++	if (htt_state == 1 && g_ms - htt_req_ms > 2000) {
++		LOG("t=%u ms: htt: no VERSION_CONF in 2 s, configuring anyway", g_ms);
++		htt_configure("timeout");
+ 	}
+-	return true;
+ }
+ 
+-static bool
+-w_crypto_selftest(void)
++static void
++scan_event(const uint8_t *t, uint32_t len)
+ {
+-	static const uint8_t kek[16] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+-	static const uint8_t ct[24] = { 0x1F,0xA6,0x8B,0x0A,0x81,0x12,0xB4,0x47,0xAE,0xF3,0x4B,0xD8,0xFB,0x5A,0x7B,0x82,
+-		0x9D,0x3E,0x86,0x23,0x71,0xD2,0xCF,0xE5 };
+-	static const uint8_t pt[16] = { 0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF };
+-	static const uint8_t pmk_ref[4] = { 0xf4, 0x2c, 0x6f, 0xc5 };     /* "password"/"IEEE" (802.11 annex) */
+-	uint8_t out[16], pmk[32];
+-	bool a = aes_unwrap(kek, ct, 24, out) && memcmp(out, pt, 16) == 0;
+-	w_pbkdf2_pmk((const uint8_t *)"password", 8, (const uint8_t *)"IEEE", 4, pmk);
+-	bool b = memcmp(pmk, pmk_ref, 4) == 0;
+-	LOG("wpa: crypto self-test: key unwrap %s, pbkdf2 %s", a ? "ok" : "FAILED", b ? "ok" : "FAILED");
+-	return a && b;
+-}
+-
+-/* ---------------- station: HTT data TX, association, WPA2-PSK, Ethernet bridge */
+-
+-/*
+- * Port of topaz-woa assoc.c and the TX half of htt.c, plus the 4-way handshake that Windows did
+- * there: VDEV_START on the AP's channel, PEER_CREATE, open-system AUTH and ASSOC REQ as WMI
+- * management frames, PEER_ASSOC + VDEV_UP, then EAPOL over the data path, keys by
+- * VDEV_INSTALL_KEY. Frames to and from the rest of the kernel are Ethernet; the radio's are
+- * native wifi (802.11 header without QoS + LLC/SNAP).
++	uint16_t tag;
++	uint32_t e[6];
++	if (len < 4 + 24) {
++		return;
++	}
++	memcpy(&tag, t + 2, 2);
++	if (tag != TAG_SCAN_EVENT) {
++		return;
++	}
++	memcpy(e, t + 4, sizeof(e));
++	if (e[0] == 0x008 || e[0] == 0x100 || e[0] == 0x004) {
 +		static uint32_t nfc;
 +		if (e[0] == 0x008 && volcano && nfc < 40) {
 +			nfc++;
 +			LOG("t=%u ms: scan chan %u (#%u) nets %u frames %u", g_ms, e[2], nfc, nbss, scan_frames);
 +		}
- 		return;                                 /* foreign channel / exit / bss channel */
- 	}
- 	if (e[0] == 0x001) {
- 		LOG("t=%u ms: scan: STARTED", g_ms);
- 	}
++		return;                                 /* foreign channel / exit / bss channel */
++	}
++	if (e[0] == 0x001) {
++		LOG("t=%u ms: scan: STARTED", g_ms);
++	}
 +	if (volcano) {
 +		for (int k = 0; k < 3; k++) {
 +			LOG("t=%u ms: scan ev %x reason %x freq %u req %x id %x vdev %u", g_ms, e[0], e[1], e[2], e[3], e[4], e[5]);
 +		}
 +	}
- 	if (e[0] == 0x002 || e[0] == 0x040 || e[0] == 0x010) {
- 		scanning = false;
++	if (e[0] == 0x002 || e[0] == 0x040 || e[0] == 0x010) {
++		scanning = false;
 +		if (volcano) {
 +			wev_table();
 +		}
- 		scans++;
- 		LOG("t=%u ms: *** scan %u done (event %x): %u networks, %u beacons/probe responses, %u htt msdus ***", g_ms, scans, e[0], nbss, scan_frames, htt_msdus);
++		scans++;
++		LOG("t=%u ms: *** scan %u done (event %x): %u networks, %u beacons/probe responses, %u htt msdus ***", g_ms, scans, e[0], nbss, scan_frames, htt_msdus);
 +		for (int k = 0; k < 3; k++) {
 +			LOG("t=%u ms: fix135 scan %u presp %u of %u frames", g_ms, scans, scan_presp, scan_frames);
 +		}
@@ -6776,59 +7341,682 @@ index 8aa0c2f..653173c 100644
 +		if (scans == 1) {
 +			w_pmdiff("scan");   /* fix140 */
 +		}
- 		next_scan_ms = scans < 3 ? g_ms + 10000 : 0;
- 		api_scans_done++;
- 	}
-@@ -4524,6 +7148,7 @@ scan_mgmt_rx(const uint8_t *t, uint32_t len)
- 		return;                                 /* beacons and probe responses only */
- 	}
- 	scan_frames++;
++		next_scan_ms = scans < 3 ? g_ms + 10000 : 0;
++		api_scans_done++;
++	}
++}
++
++static void
++scan_mgmt_rx(const uint8_t *t, uint32_t len)
++{
++	uint32_t hdr[6];
++	const uint8_t *f = NULL;
++	uint32_t flen = 0;
++	bool have_hdr = false;
++
++	for (uint32_t o = 0; o + 4 <= len;) {
++		uint16_t l, tag;
++		memcpy(&l, t + o, 2);
++		memcpy(&tag, t + o + 2, 2);
++		if (o + 4 + l > len) {
++			break;
++		}
++		if (tag == TAG_MGMT_RX_HDR && l >= 24 && !have_hdr) {
++			memcpy(hdr, t + o + 4, sizeof(hdr));
++			have_hdr = true;
++		} else if (tag == TAG_ARRAY_BYTE && f == NULL) {
++			f = t + o + 4;
++			flen = l;
++		}
++		o += 4 + l;
++	}
++	if (!have_hdr || f == NULL) {
++		return;
++	}
++	flen = MIN(hdr[4], flen);
++	if (flen >= 24 && (f[0] & 0x0C) == 0 && (f[0] >> 4) != 8 && (f[0] >> 4) != 5) {
++		w_assoc_mgmt_rx(f, flen);               /* auth, assoc response, deauth, disassoc */
++		return;
++	}
++	if (flen < 36 || (f[0] & 0x0C) != 0 || ((f[0] >> 4) != 8 && (f[0] >> 4) != 5)) {
++		return;                                 /* beacons and probe responses only */
++	}
++	scan_frames++;
 +	scan_presp += (f[0] >> 4) == 5 ? 1 : 0;   /* fix135: probe responses prove our probe req TX */
- 	int32_t rssi = (int32_t)hdr[1] - 95;
- 	uint32_t chan = hdr[0];
- 	char ssid[33] = "";
-@@ -4989,6 +7614,10 @@ static uint8_t s_ptk[48], s_anonce[32], s_snonce[32], s_group_cipher;
- static uint64_t s_replay;
- static uint8_t *s_mgmt_va;
- static uint64_t s_mgmt_pa;
++	int32_t rssi = (int32_t)hdr[1] - 95;
++	uint32_t chan = hdr[0];
++	char ssid[33] = "";
++	for (uint32_t o = 36; o + 2 <= flen && o + 2 + f[o + 1] <= flen; o += 2 + f[o + 1]) {
++		if (f[o] == 0) {
++			uint32_t n = MIN((uint32_t)f[o + 1], 32u);
++			for (uint32_t i = 0; i < n; i++) {
++				uint8_t ch = f[o + 2 + i];
++				ssid[i] = (ch >= 0x20 && ch != 0x7F) ? (char)ch : '?';
++			}
++			ssid[n] = 0;
++			if (n == 0 || f[o + 2] == 0) {
++				strlcpy(ssid, "<hidden>", sizeof(ssid));
++			}
++		} else if (f[o] == 3 && f[o + 1] == 1) {
++			chan = f[o + 2];
++		}
++	}
++	struct bss *b = NULL;
++	bool fresh = false;
++	for (uint32_t i = 0; i < nbss; i++) {
++		if (memcmp(bss[i].bssid, f + 16, 6) == 0) {
++			b = &bss[i];
++			break;
++		}
++	}
++	if (b == NULL) {
++		if (nbss >= 64) {
++			return;
++		}
++		b = &bss[nbss++];
++		bzero(b, sizeof(*b));
++		memcpy(b->bssid, f + 16, 6);
++		fresh = true;
++	}
++	b->seen++;
++	b->rssi = (int8_t)rssi;
++	b->chan = (uint8_t)chan;
++	b->freq = (uint16_t)(chan == 14 ? 2484 : chan < 14 ? 2407 + 5 * chan : 5000 + 5 * chan);
++	b->last_ms = g_ms;
++	memcpy(&b->bintval, f + 32, 2);
++	memcpy(&b->capab, f + 34, 2);
++	b->ie_len = (uint16_t)MIN(flen - 36, (uint32_t)sizeof(b->ie));
++	memcpy(b->ie, f + 36, b->ie_len);
++	strlcpy(b->ssid, ssid, sizeof(b->ssid));
++	b->raw_ssid_len = 0;
++	for (uint32_t o = 36; o + 2 <= flen && o + 2 + f[o + 1] <= flen; o += 2 + f[o + 1]) {
++		if (f[o] == 0) {
++			b->raw_ssid_len = (uint8_t)MIN((uint32_t)f[o + 1], 32u);
++			memcpy(b->raw_ssid, f + o + 2, b->raw_ssid_len);
++			break;
++		}
++	}
++	if (!fresh) {
++		return;
++	}
++	LOG("t=%u ms: net %2u: %02x:%02x:%02x:**:**:** ch %3u %4d dBm '%s'", g_ms, nbss, b->bssid[0], b->bssid[1],
++	    b->bssid[2], b->chan, b->rssi, b->ssid);
++}
++
++/* ---------------- the radio for the rest of the kernel (sys-independent C API) */
++
++/*
++ * What another part of the kernel may ask of the radio once it is up: a scan, and what the
++ * scans heard (each access point with its beacon's information elements, from which a reader
++ * tells the network's protection). The modem thread does the work; a caller's scan waits.
+  */
+-#define CMD_VDEV_START          0x5003
+-#define CMD_VDEV_UP             0x5005
+-#define CMD_VDEV_STOP           0x5006
+-#define CMD_VDEV_DOWN           0x5007
+-#define CMD_VDEV_INSTALL_KEY    0x5009
+-#define CMD_PEER_CREATE         0x6001
+-#define CMD_PEER_DELETE         0x6002
+-#define CMD_PEER_SET_PARAM      0x6004
+-#define CMD_PEER_ASSOC          0x6005
+-#define CMD_MGMT_TX_SEND        0x7008
+-#define CMD_STA_PS_MODE         0x9001
+-#define TAG_VDEV_START          0x58
+-#define TAG_VDEV_UP             0x5c
+-#define TAG_VDEV_STOP           0x5d
+-#define TAG_VDEV_DOWN           0x5e
+-#define TAG_VDEV_INSTALL_KEY    0x60
+-#define TAG_PEER_CREATE         0x61
+-#define TAG_PEER_DELETE         0x62
+-#define TAG_PEER_SET_PARAM      0x64
+-#define TAG_PEER_ASSOC          0x65
+-#define TAG_VHT_RATE_SET        0x66
+-#define TAG_STA_PS_MODE         0x6c
+-#define TAG_MGMT_TX             0x1a6
+-#define PEER_FLAG_AUTH          0x1
+-#define PEER_FLAG_NEED_PTK_4WAY 0x4
+-#define PEER_PARAM_AUTHORIZE    3
+-#define WMI_CIPHER_TKIP         2
+-#define WMI_CIPHER_CCMP         4
+-#define FC_ASSOC_REQ            0x00
+-#define FC_ASSOC_RESP           0x10
+-#define FC_DISASSOC             0xA0
+-#define FC_AUTH                 0xB0
+-#define FC_DEAUTH               0xC0
++extern "C" {
++struct topaz_wlan_bss {
++	uint8_t bssid[6];
++	uint8_t ssid[32], ssid_length;
++	uint16_t frequency;                         /* MHz */
++	int16_t rssi;                               /* dBm */
++	uint16_t beacon_interval, capability;
++	uint32_t age_ms;
++	uint16_t elements_length;
++	uint8_t elements[768];
++};
++void (*topaz_wlan_ready_hook)(void);
++bool topaz_wlan_ready(void);
++int topaz_wlan_scan(void);
++bool topaz_wlan_heard(unsigned index, struct topaz_wlan_bss *bss);
++void topaz_wlan_address(uint8_t address[6]);
++}
+ 
+-enum sta_state { S_IDLE, S_START, S_AUTH, S_ASSOC, S_4WAY, S_UP };
+-static volatile enum sta_state s_state;
+-static volatile int s_result;                   /* of the last join: 0 joined, else an errno (EAUTH: passphrase) */
+-static volatile bool s_join_asked, s_leave_asked;
+-static volatile uint32_t s_join_done;           /* bumped when a join ends either way */
+-static uint8_t s_ssid[32], s_ssid_len, s_bssid[6], s_pmk[32];
+-static uint8_t s_body[768];                     /* the AP's beacon IEs */
+-static uint32_t s_body_len, s_freq, s_aid, s_tries, s_deadline, s_desc, s_msg1s;
+-static bool s_rsn, s_start_resp, s_ptk_set;
+-static int32_t s_start_status;
+-static uint8_t s_assoc_req[512];
+-static uint32_t s_assoc_req_len;
+-static uint8_t s_rsn_ie[22];
+-static uint8_t s_ptk[48], s_anonce[32], s_snonce[32], s_group_cipher;
+-static uint64_t s_replay;
+-static uint8_t *s_mgmt_va;
+-static uint64_t s_mgmt_pa;
++static volatile bool api_scan_asked;
++static bool api_ready;
++
++bool
++topaz_wlan_ready(void)
++{
++	return api_ready;
++}
++
++void
++topaz_wlan_address(uint8_t address[6])
++{
++	memcpy(address, our_mac, 6);
++}
++
++int
++topaz_wlan_scan(void)
++{
++	if (!api_ready) {
++		return ENXIO;
++	}
++	uint32_t before = api_scans_done;
++	api_scan_asked = true;
++	for (int i = 0; i < 300 && api_scans_done == before; i++) {   /* 30 s */
++		IOSleep(100);
++	}
++	return api_scans_done != before ? 0 : ETIMEDOUT;
++}
++
++bool
++topaz_wlan_heard(unsigned index, struct topaz_wlan_bss *out)
++{
++	if (index >= nbss) {
++		return false;
++	}
++	const struct bss *b = &bss[index];
++	bzero(out, sizeof(*out));
++	memcpy(out->bssid, b->bssid, 6);
++	memcpy(out->ssid, b->raw_ssid, b->raw_ssid_len);
++	out->ssid_length = b->raw_ssid_len;
++	out->frequency = b->freq;
++	out->rssi = b->rssi;
++	out->beacon_interval = b->bintval;
++	out->capability = b->capab;
++	out->age_ms = g_ms - b->last_ms;
++	out->elements_length = MIN(b->ie_len, (uint16_t)sizeof(out->elements));
++	memcpy(out->elements, b->ie, out->elements_length);
++	return true;
++}
++
++/* ---------------- WPA2-PSK crypto, self-contained (SHA-1, HMAC, PBKDF2, PRF, AES-128 unwrap) */
++
++/*
++ * The handshake is done here, in the kernel: wifid hands over the passphrase as typed. Small and
++ * self-contained on purpose: libkern's SHA-1/AES go through corecrypto, which this kernel may not
++ * have registered.
++ */
++struct w_sha1 { uint32_t h[5]; uint64_t n; uint8_t b[64]; uint32_t bl; };
++
++static inline uint32_t rol32(uint32_t v, int s) { return (v << s) | (v >> (32 - s)); }
++
++static void
++w_sha1_block(struct w_sha1 *c, const uint8_t *p)
++{
++	uint32_t w[80], a = c->h[0], b = c->h[1], d = c->h[2], e = c->h[3], f = c->h[4];
++	for (int i = 0; i < 16; i++) {
++		w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
++	}
++	for (int i = 16; i < 80; i++) {
++		w[i] = rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
++	}
++	for (int i = 0; i < 80; i++) {
++		uint32_t k, x;
++		if (i < 20) {
++			x = (b & d) | (~b & e); k = 0x5A827999;
++		} else if (i < 40) {
++			x = b ^ d ^ e; k = 0x6ED9EBA1;
++		} else if (i < 60) {
++			x = (b & d) | (b & e) | (d & e); k = 0x8F1BBCDC;
++		} else {
++			x = b ^ d ^ e; k = 0xCA62C1D6;
++		}
++		uint32_t t = rol32(a, 5) + x + f + k + w[i];
++		f = e; e = d; d = rol32(b, 30); b = a; a = t;
++	}
++	c->h[0] += a; c->h[1] += b; c->h[2] += d; c->h[3] += e; c->h[4] += f;
++}
++
++static void
++w_sha1_init(struct w_sha1 *c)
++{
++	c->h[0] = 0x67452301; c->h[1] = 0xEFCDAB89; c->h[2] = 0x98BADCFE; c->h[3] = 0x10325476; c->h[4] = 0xC3D2E1F0;
++	c->n = 0;
++	c->bl = 0;
++}
++
++static void
++w_sha1_update(struct w_sha1 *c, const uint8_t *p, size_t len)
++{
++	c->n += len;
++	while (len > 0) {
++		uint32_t take = (uint32_t)MIN((size_t)(64 - c->bl), len);
++		memcpy(c->b + c->bl, p, take);
++		c->bl += take;
++		p += take;
++		len -= take;
++		if (c->bl == 64) {
++			w_sha1_block(c, c->b);
++			c->bl = 0;
++		}
++	}
++}
++
++static void
++w_sha1_final(struct w_sha1 *c, uint8_t out[20])
++{
++	uint64_t bits = c->n * 8;
++	uint8_t pad = 0x80, z = 0;
++	w_sha1_update(c, &pad, 1);
++	while (c->bl != 56) {
++		w_sha1_update(c, &z, 1);
++	}
++	uint8_t l[8];
++	for (int i = 0; i < 8; i++) {
++		l[i] = (uint8_t)(bits >> (56 - 8 * i));
++	}
++	w_sha1_update(c, l, 8);
++	for (int i = 0; i < 5; i++) {
++		out[4 * i] = (uint8_t)(c->h[i] >> 24);
++		out[4 * i + 1] = (uint8_t)(c->h[i] >> 16);
++		out[4 * i + 2] = (uint8_t)(c->h[i] >> 8);
++		out[4 * i + 3] = (uint8_t)c->h[i];
++	}
++}
++
++/* HMAC-SHA1 over up to three pieces */
++static void
++w_hmac_sha1(const uint8_t *key, size_t klen, const uint8_t *a, size_t al, const uint8_t *b, size_t bl,
++    const uint8_t *c3, size_t cl, uint8_t out[20])
++{
++	uint8_t k[64] = {}, ipad[64], opad[64], inner[20];
++	struct w_sha1 s;
++	if (klen > 64) {
++		w_sha1_init(&s);
++		w_sha1_update(&s, key, klen);
++		w_sha1_final(&s, k);
++	} else {
++		memcpy(k, key, klen);
++	}
++	for (int i = 0; i < 64; i++) {
++		ipad[i] = k[i] ^ 0x36;
++		opad[i] = k[i] ^ 0x5c;
++	}
++	w_sha1_init(&s);
++	w_sha1_update(&s, ipad, 64);
++	if (al) w_sha1_update(&s, a, al);
++	if (bl) w_sha1_update(&s, b, bl);
++	if (cl) w_sha1_update(&s, c3, cl);
++	w_sha1_final(&s, inner);
++	w_sha1_init(&s);
++	w_sha1_update(&s, opad, 64);
++	w_sha1_update(&s, inner, 20);
++	w_sha1_final(&s, out);
++}
++
++/* PMK = PBKDF2-HMAC-SHA1(passphrase, ssid, 4096, 32) */
++static void
++w_pbkdf2_pmk(const uint8_t *pass, size_t plen, const uint8_t *ssid, size_t slen, uint8_t pmk[32])
++{
++	for (uint32_t blk = 1; blk <= 2; blk++) {
++		uint8_t cnt[4] = { (uint8_t)(blk >> 24), (uint8_t)(blk >> 16), (uint8_t)(blk >> 8), (uint8_t)blk };
++		uint8_t u[20], t[20];
++		w_hmac_sha1(pass, plen, ssid, slen, cnt, 4, NULL, 0, u);
++		memcpy(t, u, 20);
++		for (int i = 1; i < 4096; i++) {
++			w_hmac_sha1(pass, plen, u, 20, NULL, 0, NULL, 0, u);
++			for (int j = 0; j < 20; j++) {
++				t[j] ^= u[j];
++			}
++		}
++		memcpy(pmk + 20 * (blk - 1), t, blk == 1 ? 20 : 12);
++	}
++}
++
++/* IEEE 802.11 PRF-SHA1 */
++static void
++w_prf(const uint8_t *key, size_t klen, const char *label, const uint8_t *data, size_t dlen, uint8_t *out, size_t olen)
++{
++	uint8_t buf[128], h[20];
++	size_t ll = strlen(label);
++	for (uint8_t i = 0; olen > 0; i++) {
++		memcpy(buf, label, ll);
++		buf[ll] = 0;
++		memcpy(buf + ll + 1, data, dlen);
++		buf[ll + 1 + dlen] = i;
++		w_hmac_sha1(key, klen, buf, ll + 2 + dlen, NULL, 0, NULL, 0, h);
++		size_t take = MIN(olen, (size_t)20);
++		memcpy(out, h, take);
++		out += take;
++		olen -= take;
++	}
++}
++
++/* AES-128 decryption of one block (FIPS-197), for the key unwrap of the GTK */
++static const uint8_t aes_sbox[256] = {
++	0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
++	0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
++	0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
++	0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
++	0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
++	0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
++	0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
++	0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
++};
++
++static uint8_t aes_xt(uint8_t x) { return (uint8_t)((x << 1) ^ ((x & 0x80) ? 0x1b : 0)); }
++static uint8_t aes_mul(uint8_t a, uint8_t b) { uint8_t r = 0; while (b) { if (b & 1) r ^= a; a = aes_xt(a); b >>= 1; } return r; }
++
++static void
++aes128_expand(const uint8_t key[16], uint8_t rk[176])
++{
++	uint8_t rcon = 1;
++	memcpy(rk, key, 16);
++	for (int i = 16; i < 176; i += 4) {
++		uint8_t t[4];
++		memcpy(t, rk + i - 4, 4);
++		if (i % 16 == 0) {
++			uint8_t x = t[0];
++			t[0] = aes_sbox[t[1]] ^ rcon; t[1] = aes_sbox[t[2]]; t[2] = aes_sbox[t[3]]; t[3] = aes_sbox[x];
++			rcon = aes_xt(rcon);
++		}
++		for (int j = 0; j < 4; j++) {
++			rk[i + j] = rk[i - 16 + j] ^ t[j];
++		}
++	}
++}
++
++static void
++aes128_decrypt(const uint8_t rk[176], uint8_t s[16])
++{
++	uint8_t inv[256];
++	for (int i = 0; i < 256; i++) {
++		inv[aes_sbox[i]] = (uint8_t)i;
++	}
++	for (int j = 0; j < 16; j++) {
++		s[j] ^= rk[160 + j];
++	}
++	for (int r = 9; r >= 0; r--) {
++		uint8_t t[16];
++		for (int c = 0; c < 4; c++) {           /* inverse shift rows + inverse sub bytes */
++			for (int row = 0; row < 4; row++) {
++				t[4 * ((c + row) % 4) + row] = inv[s[4 * c + row]];
++			}
++		}
++		for (int j = 0; j < 16; j++) {
++			t[j] ^= rk[16 * r + j];
++		}
++		if (r == 0) {
++			memcpy(s, t, 16);
++			break;
++		}
++		for (int c = 0; c < 4; c++) {           /* inverse mix columns */
++			uint8_t *q = t + 4 * c, a0 = q[0], a1 = q[1], a2 = q[2], a3 = q[3];
++			s[4 * c] = aes_mul(a0, 14) ^ aes_mul(a1, 11) ^ aes_mul(a2, 13) ^ aes_mul(a3, 9);
++			s[4 * c + 1] = aes_mul(a0, 9) ^ aes_mul(a1, 14) ^ aes_mul(a2, 11) ^ aes_mul(a3, 13);
++			s[4 * c + 2] = aes_mul(a0, 13) ^ aes_mul(a1, 9) ^ aes_mul(a2, 14) ^ aes_mul(a3, 11);
++			s[4 * c + 3] = aes_mul(a0, 11) ^ aes_mul(a1, 13) ^ aes_mul(a2, 9) ^ aes_mul(a3, 14);
++		}
++	}
++}
++
++/* RFC 3394 key unwrap with a 128-bit KEK; out gets len-8 bytes. False if the check value is wrong. */
++static bool
++aes_unwrap(const uint8_t kek[16], const uint8_t *in, size_t len, uint8_t *out)
++{
++	uint8_t rk[176], a[8], b[16];
++	size_t n = len / 8 - 1;
++	if (len < 24 || len % 8 != 0) {
++		return false;
++	}
++	aes128_expand(kek, rk);
++	memcpy(a, in, 8);
++	memcpy(out, in + 8, len - 8);
++	for (int j = 5; j >= 0; j--) {
++		for (size_t i = n; i >= 1; i--) {
++			uint64_t t = (uint64_t)n * (uint64_t)j + i;
++			memcpy(b, a, 8);
++			for (int k = 0; k < 8; k++) {
++				b[7 - k] ^= (uint8_t)(t >> (8 * k));
++			}
++			memcpy(b + 8, out + 8 * (i - 1), 8);
++			aes128_decrypt(rk, b);
++			memcpy(a, b, 8);
++			memcpy(out + 8 * (i - 1), b + 8, 8);
++		}
++	}
++	for (int k = 0; k < 8; k++) {
++		if (a[k] != 0xA6) {
++			return false;
++		}
++	}
++	return true;
++}
++
++static bool
++w_crypto_selftest(void)
++{
++	static const uint8_t kek[16] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
++	static const uint8_t ct[24] = { 0x1F,0xA6,0x8B,0x0A,0x81,0x12,0xB4,0x47,0xAE,0xF3,0x4B,0xD8,0xFB,0x5A,0x7B,0x82,
++		0x9D,0x3E,0x86,0x23,0x71,0xD2,0xCF,0xE5 };
++	static const uint8_t pt[16] = { 0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF };
++	static const uint8_t pmk_ref[4] = { 0xf4, 0x2c, 0x6f, 0xc5 };     /* "password"/"IEEE" (802.11 annex) */
++	uint8_t out[16], pmk[32];
++	bool a = aes_unwrap(kek, ct, 24, out) && memcmp(out, pt, 16) == 0;
++	w_pbkdf2_pmk((const uint8_t *)"password", 8, (const uint8_t *)"IEEE", 4, pmk);
++	bool b = memcmp(pmk, pmk_ref, 4) == 0;
++	LOG("wpa: crypto self-test: key unwrap %s, pbkdf2 %s", a ? "ok" : "FAILED", b ? "ok" : "FAILED");
++	return a && b;
++}
++
++/* ---------------- station: HTT data TX, association, WPA2-PSK, Ethernet bridge */
++
++/*
++ * Port of topaz-woa assoc.c and the TX half of htt.c, plus the 4-way handshake that Windows did
++ * there: VDEV_START on the AP's channel, PEER_CREATE, open-system AUTH and ASSOC REQ as WMI
++ * management frames, PEER_ASSOC + VDEV_UP, then EAPOL over the data path, keys by
++ * VDEV_INSTALL_KEY. Frames to and from the rest of the kernel are Ethernet; the radio's are
++ * native wifi (802.11 header without QoS + LLC/SNAP).
++ */
++#define CMD_VDEV_START          0x5003
++#define CMD_VDEV_UP             0x5005
++#define CMD_VDEV_STOP           0x5006
++#define CMD_VDEV_DOWN           0x5007
++#define CMD_VDEV_INSTALL_KEY    0x5009
++#define CMD_PEER_CREATE         0x6001
++#define CMD_PEER_DELETE         0x6002
++#define CMD_PEER_SET_PARAM      0x6004
++#define CMD_PEER_ASSOC          0x6005
++#define CMD_MGMT_TX_SEND        0x7008
++#define CMD_STA_PS_MODE         0x9001
++#define TAG_VDEV_START          0x58
++#define TAG_VDEV_UP             0x5c
++#define TAG_VDEV_STOP           0x5d
++#define TAG_VDEV_DOWN           0x5e
++#define TAG_VDEV_INSTALL_KEY    0x60
++#define TAG_PEER_CREATE         0x61
++#define TAG_PEER_DELETE         0x62
++#define TAG_PEER_SET_PARAM      0x64
++#define TAG_PEER_ASSOC          0x65
++#define TAG_VHT_RATE_SET        0x66
++#define TAG_STA_PS_MODE         0x6c
++#define TAG_MGMT_TX             0x1a6
++#define PEER_FLAG_AUTH          0x1
++#define PEER_FLAG_NEED_PTK_4WAY 0x4
++#define PEER_PARAM_AUTHORIZE    3
++#define WMI_CIPHER_TKIP         2
++#define WMI_CIPHER_CCMP         4
++#define FC_ASSOC_REQ            0x00
++#define FC_ASSOC_RESP           0x10
++#define FC_DISASSOC             0xA0
++#define FC_AUTH                 0xB0
++#define FC_DEAUTH               0xC0
++
++enum sta_state { S_IDLE, S_START, S_AUTH, S_ASSOC, S_4WAY, S_UP };
++static volatile enum sta_state s_state;
++static volatile int s_result;                   /* of the last join: 0 joined, else an errno (EAUTH: passphrase) */
++static volatile bool s_join_asked, s_leave_asked;
++static volatile uint32_t s_join_done;           /* bumped when a join ends either way */
++static uint8_t s_ssid[32], s_ssid_len, s_bssid[6], s_pmk[32];
++static uint8_t s_body[768];                     /* the AP's beacon IEs */
++static uint32_t s_body_len, s_freq, s_aid, s_tries, s_deadline, s_desc, s_msg1s;
++static bool s_rsn, s_start_resp, s_ptk_set;
++static int32_t s_start_status;
++static uint8_t s_assoc_req[512];
++static uint32_t s_assoc_req_len;
++static uint8_t s_rsn_ie[22];
++static uint8_t s_ptk[48], s_anonce[32], s_snonce[32], s_group_cipher;
++static uint64_t s_replay;
++static uint8_t *s_mgmt_va;
++static uint64_t s_mgmt_pa;
 +static bool s_peer_up, s_vdev_started, s_keys_pending;
 +static uint32_t s_vstage, s_bcn, s_dtim, s_keys_at;
 +static uint8_t s_gtk[32], s_gtk_len, s_gtk_idx;
 +static int s_msg4_slot = -1;
- 
- void (*topaz_wlan_rx_hook)(const uint8_t *frame, size_t length);
- void (*topaz_wlan_link_hook)(bool up);
-@@ -5000,10 +7629,16 @@ static uint8_t *
- w_channel(uint8_t *p, uint32_t freq)
- {
- 	uint8_t *c = wmi_put_tlv(p, TAG_CHANNEL, 24);
++
++void (*topaz_wlan_rx_hook)(const uint8_t *frame, size_t length);
++void (*topaz_wlan_link_hook)(bool up);
++
++static uint8_t *w_p32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); return p + 4; }
++static uint8_t *w_pmac(uint8_t *p, const uint8_t *mac) { bzero(p, 8); memcpy(p, mac, 6); return p + 8; }
++
++static uint8_t *
++w_channel(uint8_t *p, uint32_t freq)
++{
++	uint8_t *c = wmi_put_tlv(p, TAG_CHANNEL, 24);
 +	uint32_t info = freq < 4000 ? 1 : 0;
 +	if (w_arg("wifivch", 1) != 0) {
 +		uint32_t mode = w_arg("wifivmode", freq < 4000 ? 21 : 16);
 +		info = (mode & 0x3f) | (1u << 11) | (freq < 4000 ? 0 : (1u << 12)) | (1u << 16);
 +	}
 +	info |= w_arg("wifivflags", 0);
- 	c = w_p32(c, freq);
- 	c = w_p32(c, freq);
- 	c = w_p32(c, 0);
--	c = w_p32(c, freq < 4000 ? 1 : 0);
++	c = w_p32(c, freq);
++	c = w_p32(c, freq);
++	c = w_p32(c, 0);
 +	c = w_p32(c, info);
- 	c = w_p32(c, (40u << 8) | (40u << 16));
- 	return w_p32(c, 40u << 8);
- }
-@@ -5041,7 +7676,7 @@ htt_tx_frame(const uint8_t *f, uint32_t len, bool clear)
- 	uint8_t m[20 + 52], *p = m;
- 	uint32_t id, pf = (MIN(len, (uint32_t)PREFETCH_LEN) + 3) & ~3u;
- 	if (tx_pool == NULL) {
--		tx_pool = (uint8_t *)pool_alloc(TX_SLOTS * TX_SLOT_SIZE, &tx_pool_pa);
++	c = w_p32(c, (40u << 8) | (40u << 16));
++	return w_p32(c, 40u << 8);
++}
++
++static const uint8_t *
++w_find_ie(const uint8_t *ies, uint32_t len, uint8_t id)
++{
++	for (uint32_t o = 0; o + 2 <= len && o + 2 + ies[o + 1] <= len; o += 2 + ies[o + 1]) {
++		if (ies[o] == id) {
++			return ies + o;
++		}
++	}
++	return NULL;
++}
++
++/* ---- HTT data TX (ath10k_htt_tx_64, native wifi) */
++#define TX_SLOTS        64
++#define TX_SLOT_SIZE    2048
++#define H2T_TX_FRM      1
++#define TXF0_MAC_HDR    0x01
++#define TXF0_NO_ENCRYPT 0x04
++#define TXF0_NATIVE     (1u << 5)
++#define TXF1_TID_NONQOS (16u << 6)
++#define TXF1_POSTPONED  (1u << 11)
++#define PREFETCH_LEN    50
++#define T2H_TX_COMPL_IND 0x07
++
++static uint8_t *tx_pool;
++static uint64_t tx_pool_pa, tx_busy;
++static uint32_t tx_sent, tx_done, tx_fail, tx_drop, rx_up;
++
++static bool
++htt_tx_frame(const uint8_t *f, uint32_t len, bool clear)
++{
++	uint8_t m[20 + 52], *p = m;
++	uint32_t id, pf = (MIN(len, (uint32_t)PREFETCH_LEN) + 3) & ~3u;
++	if (tx_pool == NULL) {
 +		tx_pool = (uint8_t *)pool_alloc_w(TX_SLOTS * TX_SLOT_SIZE, &tx_pool_pa);
- 	}
- 	if (tx_pool == NULL || htt_bank == NULL || htt_state != 2 || len > TX_SLOT_SIZE) {
- 		return false;
-@@ -5098,21 +7733,113 @@ htt_tx_compl(const uint8_t *p, uint32_t len)
- 	}
- }
- 
++	}
++	if (tx_pool == NULL || htt_bank == NULL || htt_state != 2 || len > TX_SLOT_SIZE) {
++		return false;
++	}
++	for (id = 0; id < TX_SLOTS && (tx_busy & (1ull << id)) != 0; id++) {
++	}
++	if (id == TX_SLOTS) {
++		return false;
++	}
++	uint64_t pa = tx_pool_pa + (uint64_t)id * TX_SLOT_SIZE;
++	memcpy(tx_pool + id * TX_SLOT_SIZE, f, len);
++	uint8_t *ext = htt_bank + id * HTT_EXT_DESC_SIZE;  /* frags[0] at +24: paddr_lo, paddr_hi16, len16 */
++	bzero(ext, HTT_EXT_DESC_SIZE);
++	uint32_t lo = (uint32_t)pa;
++	uint16_t hi = (uint16_t)(pa >> 32), l16 = (uint16_t)len;
++	memcpy(ext + 24, &lo, 4);
++	memcpy(ext + 28, &hi, 2);
++	memcpy(ext + 30, &l16, 2);
++	mb();
++	bzero(m, sizeof(m));
++	*p++ = H2T_TX_FRM;
++	*p++ = (uint8_t)(TXF0_MAC_HDR | TXF0_NATIVE | (clear ? TXF0_NO_ENCRYPT : 0));
++	p = put16(p, (uint16_t)(TXF1_TID_NONQOS | TXF1_POSTPONED));   /* vdev 0 */
++	p = put16(p, (uint16_t)len);
++	p = put16(p, (uint16_t)id);
++	p = put64(p, htt_bank_pa + (uint64_t)id * HTT_EXT_DESC_SIZE);
++	p = w_p32(p, 0xFFFF);                       /* peer id: invalid */
++	memcpy(p, f, MIN(len, pf));
++	if (!htt_send(m, 20 + pf)) {
++		return false;
++	}
++	tx_busy |= 1ull << id;
++	tx_sent++;
++	return true;
++}
++
++static void
++htt_tx_compl(const uint8_t *p, uint32_t len)
++{
++	uint32_t n = p[2], st = p[1] & 7;
++	for (uint32_t i = 0; i < n && 4 + 2 * (i + 1) <= len; i++) {
++		uint16_t id;
++		memcpy(&id, p + 4 + 2 * i, 2);
++		if (id < TX_SLOTS) {
++			tx_busy &= ~(1ull << id);
++		}
++	}
++	tx_done += n;
++	if (st != 0) {
++		tx_fail += n;
++		if (tx_fail <= 4) {
++			LOG("t=%u ms: htt tx: %u frame(s) status %u", g_ms, n, st);
++		}
++	}
++}
++
 +/* fix128: the auth never leaves the fw TX queue (TQM takes no link desc, 1862 after ~1.5 s). Ask the fw why:
 + * WMI_REQUEST_STATS (0x16001, tag 0x8f, PDEV_STAT) -> UPDATE_STATS 0x1d004 (chan_nf, tx/rx/rx_clear/cycle counts,
 + * tx: local_enqued/freed, hw_queued/reaped, underrun, hw_paused, tx_abort...) and PDEV_BSS_CHAN_INFO_REQUEST
@@ -6906,12 +8094,10 @@ index 8aa0c2f..653173c 100644
 +	}
 +}
 +
- /* ---- WMI commands for the join (layouts: ath10k wmi-tlv) */
- static bool
- w_vdev_start(uint32_t freq, uint32_t bcn, uint32_t dtim)
- {
--	uint8_t m[4 + 72 + 4 + 24 + 4] = {}, *p;
--	p = wmi_put_tlv(m, TAG_VDEV_START, 72);
++/* ---- WMI commands for the join (layouts: ath10k wmi-tlv) */
++static bool
++w_vdev_start(uint32_t freq, uint32_t bcn, uint32_t dtim)
++{
 +	/* fix98: ath11k wmi_vdev_start_request_cmd is 100 bytes: + preferred rx/tx streams, cac, regdomain,
 +	 * he_ops, mbssid flags/tx vdev. The 72-byte form left the stream counts to the fw (0). wifivsl=0: old form */
 +	uint32_t vsl = 1, nss = 1;
@@ -6920,33 +8106,57 @@ index 8aa0c2f..653173c 100644
 +	uint32_t tl = vsl ? 100 : 72;
 +	uint8_t m[4 + 100 + 4 + 24 + 4] = {}, *p;
 +	p = wmi_put_tlv(m, TAG_VDEV_START, tl);
- 	p = w_p32(p, 0);
- 	p = w_p32(p, 0);
- 	p = w_p32(p, bcn);
- 	p = w_p32(p, dtim);
- 	p = w_p32(p, 0);
- 	p += 36 + 16;                               /* ssid (empty for a station), tx rate/power, noa, hw ack */
++	p = w_p32(p, 0);
++	p = w_p32(p, 0);
++	p = w_p32(p, bcn);
++	p = w_p32(p, dtim);
++	p = w_p32(p, 0);
++	p += 36 + 16;                               /* ssid (empty for a station), tx rate/power, noa, hw ack */
 +	if (vsl) {
 +		p = w_p32(p, nss);                      /* preferred_rx_streams */
 +		p = w_p32(p, nss);                      /* preferred_tx_streams */
 +		p += 20;                                /* cac, regdomain, he_ops, mbssid flags, mbssid tx vdev */
 +	}
 +	uint8_t *ch = p;
- 	p = w_channel(p, freq);
--	wmi_put_tlv(p, TAG_ARRAY_STRUCT, 0);
--	return wmi_send(CMD_VDEV_START, m, sizeof(m));
++	p = w_channel(p, freq);
 +	p = wmi_put_tlv(p, TAG_ARRAY_STRUCT, 0);
 +	for (int k = 0; k < 2; k++) {
 +		LOG("t=%u ms: fix130 vdev start chan %u info %x", g_ms, freq, ch[16] | (ch[17] << 8) | (ch[18] << 16) | ((uint32_t)ch[19] << 24));
 +	}
 +	return wmi_send(CMD_VDEV_START, m, (uint32_t)(p - m));
- }
- 
- static bool
-@@ -5146,6 +7873,61 @@ w_peer_param(uint32_t param, uint32_t value)
- 	return wmi_send(CMD_PEER_SET_PARAM, m, sizeof(m));
- }
- 
++}
++
++static bool
++w_vdev_simple(uint32_t cmd, uint16_t tag)
++{
++	uint8_t m[8], *p = wmi_put_tlv(m, tag, 4);
++	w_p32(p, 0);
++	return wmi_send(cmd, m, sizeof(m));
++}
++
++static bool
++w_peer(uint32_t cmd, uint16_t tag, bool create)
++{
++	uint8_t m[4 + 16] = {}, *p = wmi_put_tlv(m, tag, create ? 16 : 12);
++	p = w_p32(p, 0);
++	p = w_pmac(p, s_bssid);
++	if (create) {
++		w_p32(p, 0);
++	}
++	return wmi_send(cmd, m, create ? 20 : 16);
++}
++
++static bool
++w_peer_param(uint32_t param, uint32_t value)
++{
++	uint8_t m[4 + 20], *p = wmi_put_tlv(m, TAG_PEER_SET_PARAM, 20);
++	p = w_p32(p, 0);
++	p = w_pmac(p, s_bssid);
++	p = w_p32(p, param);
++	w_p32(p, value);
++	return wmi_send(CMD_PEER_SET_PARAM, m, sizeof(m));
++}
++
 +/* fix68: ath11k_peer_rx_tid_setup / ath11k_hal_reo_qdesc_setup (ba 1, ssn 0, no PN), then
 + * WMI_PEER_REORDER_QUEUE_SETUP_CMDID 0x6013 (tag 0x225) per tid 0..16 */
 +#define WMI_PEER_SET_DEFAULT_ROUTING 0x13
@@ -7002,15 +8212,18 @@ index 8aa0c2f..653173c 100644
 +	return ok;
 +}
 +
- static bool
- w_ps_off(void)
- {
-@@ -5158,10 +7940,16 @@ w_ps_off(void)
- static bool
- w_mgmt_tx(const uint8_t *f, uint32_t len)
- {
--	uint8_t m[4 + 28 + 4 + 64] = {}, *p;
--	uint32_t buf = (MIN(len, 64u) + 3) & ~3u;
++static bool
++w_ps_off(void)
++{
++	uint8_t m[12], *p = wmi_put_tlv(m, TAG_STA_PS_MODE, 8);
++	p = w_p32(p, 0);
++	w_p32(p, 0);
++	return wmi_send(CMD_STA_PS_MODE, m, sizeof(m));
++}
++
++static bool
++w_mgmt_tx(const uint8_t *f, uint32_t len)
++{
 +	uint8_t m[4 + 40 + 4 + 64] = {}, *p;
 +	uint32_t blen = MIN(len, 64u), buf = (blen + 3) & ~3u;
 +	bool exact = w_arg("wifimgmtbl", 1) != 0;
@@ -7019,25 +8232,21 @@ index 8aa0c2f..653173c 100644
 +	if (fl != 28 && fl != 40) {
 +		fl = 32;
 +	}
- 	if (s_mgmt_va == NULL) {
--		s_mgmt_va = (uint8_t *)pool_alloc(0x1000, &s_mgmt_pa);
++	if (s_mgmt_va == NULL) {
 +		s_mgmt_va = (uint8_t *)pool_alloc_w(0x1000, &s_mgmt_pa);
- 	}
- 	if (s_mgmt_va == NULL || len > 0x1000 - 8) {
- 		return false;
-@@ -5169,16 +7957,28 @@ w_mgmt_tx(const uint8_t *f, uint32_t len)
- 	bzero(s_mgmt_va, ((len + 3) & ~3u) + 4);
- 	memcpy(s_mgmt_va, f, len);
- 	mb();
--	p = wmi_put_tlv(m, TAG_MGMT_TX, 28);
++	}
++	if (s_mgmt_va == NULL || len > 0x1000 - 8) {
++		return false;
++	}
++	bzero(s_mgmt_va, ((len + 3) & ~3u) + 4);
++	memcpy(s_mgmt_va, f, len);
++	mb();
 +	p = wmi_put_tlv(m, TAG_MGMT_TX, fl);
- 	p = w_p32(p, 0);
- 	p = w_p32(p, ++s_desc);
- 	p = w_p32(p, 0);
- 	p = put64(p, s_mgmt_pa);
- 	p = w_p32(p, len);
--	p = w_p32(p, buf);
--	p = wmi_put_tlv(p, TAG_ARRAY_BYTE, buf);
++	p = w_p32(p, 0);
++	p = w_p32(p, ++s_desc);
++	p = w_p32(p, 0);
++	p = put64(p, s_mgmt_pa);
++	p = w_p32(p, len);
 +	p = w_p32(p, exact ? blen : buf);
 +	if (fl == 32) {
 +		p = w_p32(p, 0);                        /* tx_params_valid */
@@ -7048,61 +8257,306 @@ index 8aa0c2f..653173c 100644
 +		p = w_p32(p, w_arg("wifirssi", 0xFFFFFFC1u));   /* -63 dBm, the AP as seen by Android */
 +	}
 +	p = wmi_put_tlv(p, TAG_ARRAY_BYTE, exact ? blen : buf);
- 	memcpy(p, s_mgmt_va, buf);
--	return wmi_send(CMD_MGMT_TX_SEND, m, 4 + 28 + 4 + buf);
++	memcpy(p, s_mgmt_va, buf);
 +	static uint32_t nlog;
 +	if (nlog++ < 6) {
 +		LOG("t=%u ms: mgmt tx fc %02x len %u desc %u tlv %u", g_ms, f[0], len, s_desc, fl);
 +	}
 +	return wmi_send(CMD_MGMT_TX_SEND, m, (uint32_t)(p - m) + buf);
- }
- 
- static uint32_t
-@@ -5198,14 +7998,14 @@ w_ap_rates(uint8_t *out)
- static bool
- w_peer_assoc(uint32_t caps)
- {
--	uint8_t m[4 + 76 + 4 + 16 + 4 + 4 + 16] = {}, *p, *r, rates[16];
++}
++
++static uint32_t
++w_ap_rates(uint8_t *out)
++{
++	static const uint8_t ids[2] = { 1, 50 };
++	uint32_t n = 0;
++	for (int k = 0; k < 2; k++) {
++		const uint8_t *ie = w_find_ie(s_body, s_body_len, ids[k]);
++		for (uint32_t i = 0; ie != NULL && i < ie[1] && n < 16; i++) {
++			out[n++] = ie[2 + i];
++		}
++	}
++	return n;
++}
++
++static bool
++w_peer_assoc(uint32_t caps)
++{
 +	uint8_t m[4 + 76 + 4 + 16 + 4 + 4 + 16 + 4] = {}, *p, *r, rates[16];
- 	uint32_t n = w_ap_rates(rates), rl = (MIN(n, 16u) + 3) & ~3u;
- 	p = wmi_put_tlv(m, TAG_PEER_ASSOC, 76);
- 	p = w_pmac(p, s_bssid);
- 	p = w_p32(p, 0);
- 	p = w_p32(p, 1);                            /* new assoc */
- 	p = w_p32(p, s_aid);
--	p = w_p32(p, PEER_FLAG_AUTH | (s_rsn ? PEER_FLAG_NEED_PTK_4WAY : 0));
++	uint32_t n = w_ap_rates(rates), rl = (MIN(n, 16u) + 3) & ~3u;
++	p = wmi_put_tlv(m, TAG_PEER_ASSOC, 76);
++	p = w_pmac(p, s_bssid);
++	p = w_p32(p, 0);
++	p = w_p32(p, 1);                            /* new assoc */
++	p = w_p32(p, s_aid);
 +	p = w_p32(p, (s_rsn && volcano ? 0 : PEER_FLAG_AUTH) | (s_rsn ? PEER_FLAG_NEED_PTK_4WAY : 0));
- 	p = w_p32(p, caps);
- 	p = w_p32(p, 1);                            /* listen interval */
- 	p += 4 * 6;                                 /* ht caps, max mpdu, density, rate caps; nss below */
-@@ -5223,8 +8023,11 @@ w_peer_assoc(uint32_t caps)
- 	}
- 	p = r + rl;
- 	p = wmi_put_tlv(p, TAG_ARRAY_BYTE, 0);
--	wmi_put_tlv(p, TAG_VHT_RATE_SET, 16);
--	return wmi_send(CMD_PEER_ASSOC, m, 4 + 76 + 4 + rl + 4 + 4 + 16);
++	p = w_p32(p, caps);
++	p = w_p32(p, 1);                            /* listen interval */
++	p += 4 * 6;                                 /* ht caps, max mpdu, density, rate caps; nss below */
++	p -= 4 * 2;
++	p = w_p32(p, 1);                            /* nss */
++	p = w_p32(p, 0);                            /* vht caps */
++	p = w_p32(p, s_freq < 4000 ? 1 : 0);        /* phy mode: 11g / 11a */
++	p += 8;
++	p = w_p32(p, MIN(n, 16u));
++	p = w_p32(p, 0);
++	r = wmi_put_tlv(p, TAG_ARRAY_BYTE, rl);
++	for (uint32_t i = 0; i < n && i < 16; i++) {
++		uint8_t v = rates[i] & 0x7F;
++		r[i] = (v == 2 || v == 4 || v == 11 || v == 22) ? (uint8_t)(v | 0x80) : v;
++	}
++	p = r + rl;
++	p = wmi_put_tlv(p, TAG_ARRAY_BYTE, 0);
 +	p = wmi_put_tlv(p, TAG_VHT_RATE_SET, 16);
 +	if (volcano) {
 +		wmi_put_tlv(p + 16, TAG_ARRAY_STRUCT, 0);   /* ath11k: he_rate_set array (empty) */
 +	}
 +	return wmi_send(CMD_PEER_ASSOC, m, 4 + 76 + 4 + rl + 4 + 4 + 16 + (volcano ? 4 : 0));
- }
- 
- static bool
-@@ -5330,6 +8133,9 @@ w_tx_ether(const uint8_t *e, size_t len, bool clear)
- 	memcpy(f + 24, snap, 6);
- 	memcpy(f + 30, e + 12, 2);                  /* ethertype */
- 	memcpy(f + 32, e + 14, len - 14);
++}
++
++static bool
++w_install_key(bool group, uint32_t idx, uint32_t cipher, const uint8_t *key, uint32_t klen)
++{
++	uint8_t m[4 + 92 + 4 + 32] = {}, *p;
++	uint32_t kl = (klen + 3) & ~3u;
++	p = wmi_put_tlv(m, TAG_VDEV_INSTALL_KEY, 92);
++	p = w_p32(p, 0);
++	p = w_pmac(p, s_bssid);
++	p = w_p32(p, idx);
++	p = w_p32(p, group ? 1 : 0);
++	p = w_p32(p, cipher);
++	p += 3 * 8 + 16 + 16;
++	p = w_p32(p, klen);
++	p = w_p32(p, cipher == WMI_CIPHER_TKIP ? 8 : 0);
++	p = w_p32(p, cipher == WMI_CIPHER_TKIP ? 8 : 0);
++	p = wmi_put_tlv(p, TAG_ARRAY_BYTE, kl);
++	memcpy(p, key, klen);
++	return wmi_send(CMD_VDEV_INSTALL_KEY, m, 4 + 92 + 4 + kl);
++}
++
++/* ---- 802.11 management frames */
++static uint8_t *
++w_mgmt_hdr(uint8_t *f, uint8_t fc)
++{
++	bzero(f, 24);
++	f[0] = fc;
++	memcpy(f + 4, s_bssid, 6);
++	memcpy(f + 10, our_mac, 6);
++	memcpy(f + 16, s_bssid, 6);
++	return f + 24;
++}
++
++static bool
++w_send_auth(void)
++{
++	uint8_t f[30], *b = w_mgmt_hdr(f, FC_AUTH);
++	bzero(b, 6);
++	b[2] = 1;                                   /* open system, transaction 1 */
++	return w_mgmt_tx(f, sizeof(f));
++}
++
++static void
++w_build_assoc_req(void)
++{
++	uint8_t *f = s_assoc_req, *p = w_mgmt_hdr(f, FC_ASSOC_REQ), rates[16];
++	uint32_t n = w_ap_rates(rates), cap = 0x0001 | 0x0020 | 0x0400;   /* ESS, short preamble, short slot */
++	if (s_rsn) {
++		cap |= 0x0010;
++	}
++	*p++ = (uint8_t)cap;
++	*p++ = (uint8_t)(cap >> 8);
++	*p++ = 10;
++	*p++ = 0;
++	*p++ = 0;
++	*p++ = s_ssid_len;
++	memcpy(p, s_ssid, s_ssid_len);
++	p += s_ssid_len;
++	*p++ = 1;
++	*p++ = (uint8_t)MIN(n, 8u);
++	for (uint32_t k = 0; k < n && k < 8; k++) {
++		*p++ = rates[k];
++	}
++	if (n > 8) {
++		*p++ = 50;
++		*p++ = (uint8_t)(n - 8);
++		for (uint32_t k = 8; k < n; k++) {
++			*p++ = rates[k];
++		}
++	}
++	if (s_rsn) {
++		memcpy(p, s_rsn_ie, sizeof(s_rsn_ie));
++		p += sizeof(s_rsn_ie);
++	}
++	s_assoc_req_len = (uint32_t)(p - f);
++}
++
++/* ---- Ethernet <-> native wifi */
++static void
++w_link(bool up)
++{
++	if (topaz_wlan_link_hook != NULL) {
++		topaz_wlan_link_hook(up);
++	}
++}
++
++/* an Ethernet frame (dst, src, type, payload) to the AP as a to-DS data frame */
++static bool
++w_tx_ether(const uint8_t *e, size_t len, bool clear)
++{
++	uint8_t f[TX_SLOT_SIZE];
++	if (len < 14 || len - 14 + 24 + 8 > sizeof(f)) {
++		return false;
++	}
++	bzero(f, 24);
++	f[0] = 0x08;                                /* data */
++	f[1] = (uint8_t)(0x01 | (s_ptk_set && !clear ? 0x40 : 0));   /* to DS (+ protected once keyed) */
++	memcpy(f + 4, s_bssid, 6);                  /* addr1: the AP */
++	memcpy(f + 10, our_mac, 6);                 /* addr2: us */
++	memcpy(f + 16, e, 6);                       /* addr3: the destination */
++	static const uint8_t snap[6] = { 0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00 };
++	memcpy(f + 24, snap, 6);
++	memcpy(f + 30, e + 12, 2);                  /* ethertype */
++	memcpy(f + 32, e + 14, len - 14);
 +	if (volcano) {
 +		return dp_tx_frame(f, (uint32_t)(len - 14 + 32));
 +	}
- 	return htt_tx_frame(f, (uint32_t)(len - 14 + 32), clear);
++	return htt_tx_frame(f, (uint32_t)(len - 14 + 32), clear);
++}
+ 
+-void (*topaz_wlan_rx_hook)(const uint8_t *frame, size_t length);
+-void (*topaz_wlan_link_hook)(bool up);
++/* ---- WPA2 4-way handshake (EAPOL-Key, descriptor version 2: HMAC-SHA1-128 MIC, AES key wrap) */
++static void w_join_end(int result);
+ 
+-static uint8_t *w_p32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); return p + 4; }
+-static uint8_t *w_pmac(uint8_t *p, const uint8_t *mac) { bzero(p, 8); memcpy(p, mac, 6); return p + 8; }
++static void
++w_eapol_send(uint16_t info, const uint8_t *nonce, const uint8_t *data, uint16_t dlen)
++{
++	uint8_t e[14 + 4 + 95 + 64] = {}, *k = e + 14 + 4, mic[20];
++	memcpy(e, s_bssid, 6);
++	memcpy(e + 6, our_mac, 6);
++	e[12] = 0x88;
++	e[13] = 0x8E;
++	uint16_t body = (uint16_t)(95 + dlen);
++	e[14] = 1;                                  /* EAPOL version */
++	e[15] = 3;                                  /* key */
++	e[16] = (uint8_t)(body >> 8);
++	e[17] = (uint8_t)body;
++	k[0] = 2;                                   /* RSN key descriptor */
++	k[1] = (uint8_t)(info >> 8);
++	k[2] = (uint8_t)info;
++	k[3] = 0;                                   /* key length 0 (from the STA) */
++	k[4] = 0;
++	for (int i = 0; i < 8; i++) {
++		k[5 + i] = (uint8_t)(s_replay >> (56 - 8 * i));
++	}
++	if (nonce != NULL) {
++		memcpy(k + 13, nonce, 32);
++	}
++	k[93] = (uint8_t)(dlen >> 8);
++	k[94] = (uint8_t)dlen;
++	if (dlen) {
++		memcpy(k + 95, data, dlen);
++	}
++	w_hmac_sha1(s_ptk, 16, e + 14, 4 + body, NULL, 0, NULL, 0, mic);
++	memcpy(k + 77, mic, 16);
++	(void)w_tx_ether(e, 14 + 4 + body, true);
++}
+ 
+-static uint8_t *
+-w_channel(uint8_t *p, uint32_t freq)
++static bool
++w_eapol_mic_ok(uint8_t *eapol, size_t len)
+ {
+-	uint8_t *c = wmi_put_tlv(p, TAG_CHANNEL, 24);
+-	c = w_p32(c, freq);
+-	c = w_p32(c, freq);
+-	c = w_p32(c, 0);
+-	c = w_p32(c, freq < 4000 ? 1 : 0);
+-	c = w_p32(c, (40u << 8) | (40u << 16));
+-	return w_p32(c, 40u << 8);
++	uint8_t want[16], got[20];
++	if (len < 4 + 95) {
++		return false;
++	}
++	memcpy(want, eapol + 4 + 77, 16);
++	bzero(eapol + 4 + 77, 16);
++	w_hmac_sha1(s_ptk, 16, eapol, len, NULL, 0, NULL, 0, got);
++	memcpy(eapol + 4 + 77, want, 16);
++	return memcmp(want, got, 16) == 0;
  }
  
-@@ -5449,6 +8255,26 @@ w_eapol_rx(const uint8_t *e, size_t elen)
- 				}
- 			}
+-static const uint8_t *
+-w_find_ie(const uint8_t *ies, uint32_t len, uint8_t id)
++static void
++w_eapol_rx(const uint8_t *e, size_t elen)
+ {
+-	for (uint32_t o = 0; o + 2 <= len && o + 2 + ies[o + 1] <= len; o += 2 + ies[o + 1]) {
+-		if (ies[o] == id) {
+-			return ies + o;
++	uint8_t frame[512];
++	const uint8_t *src = e + 6;
++	if (s_state != S_4WAY || elen < 14 + 4 + 95 || elen - 14 > sizeof(frame) || memcmp(src, s_bssid, 6) != 0) {
++		return;
++	}
++	size_t len = elen - 14;
++	memcpy(frame, e + 14, len);
++	uint8_t *k = frame + 4;
++	if (frame[1] != 3 || k[0] != 2) {
++		return;
++	}
++	uint16_t info = (uint16_t)(k[1] << 8 | k[2]), dlen = (uint16_t)(k[93] << 8 | k[94]);
++	uint64_t replay = 0;
++	for (int i = 0; i < 8; i++) {
++		replay = replay << 8 | k[5 + i];
++	}
++	if (95 + (size_t)dlen > len - 4) {
++		return;
++	}
++	bool pairwise = info & 0x0008, ack = info & 0x0080, has_mic = info & 0x0100, install = info & 0x0040;
++	if (pairwise && ack && !has_mic) {
++		/* message 1: ANonce -> PTK, answer with message 2 */
++		if (++s_msg1s > 3) {
++			LOG("t=%u ms: wpa: the AP keeps sending message 1: wrong passphrase", g_ms);
++			w_join_end(EAUTH);
++			return;
  		}
++		s_replay = replay;
++		memcpy(s_anonce, k + 13, 32);
++		read_random(s_snonce, 32);
++		uint8_t data[76];
++		const uint8_t *aa = s_bssid, *spa = our_mac;
++		bool amin = memcmp(aa, spa, 6) < 0, nmin = memcmp(s_anonce, s_snonce, 32) < 0;
++		memcpy(data, amin ? aa : spa, 6);
++		memcpy(data + 6, amin ? spa : aa, 6);
++		memcpy(data + 12, nmin ? s_anonce : s_snonce, 32);
++		memcpy(data + 44, nmin ? s_snonce : s_anonce, 32);
++		w_prf(s_pmk, 32, "Pairwise key expansion", data, sizeof(data), s_ptk, 48);
++		w_eapol_send(0x010A, s_snonce, s_rsn_ie, sizeof(s_rsn_ie));
++		LOG("t=%u ms: wpa: message 1 -> message 2 sent", g_ms);
++		return;
++	}
++	if (pairwise && ack && has_mic && install) {
++		/* message 3: check, unwrap the GTK, answer with message 4, install the keys */
++		if (!w_eapol_mic_ok(frame, len)) {
++			LOG("t=%u ms: wpa: message 3 MIC wrong: wrong passphrase", g_ms);
++			w_join_end(EAUTH);
++			return;
++		}
++		s_replay = replay;
++		uint8_t plain[256];
++		uint8_t gtk[32], gtk_len = 0, gtk_idx = 1;
++		if ((info & 0x1000) && dlen >= 24 && dlen <= sizeof(plain) + 8 && aes_unwrap(s_ptk + 16, k + 95, dlen, plain)) {
++			for (uint32_t o = 0; o + 2 <= (uint32_t)dlen - 8 && o + 2 + plain[o + 1] <= (uint32_t)dlen - 8; o += 2 + plain[o + 1]) {
++				if (plain[o] == 0xDD && plain[o + 1] >= 6 && plain[o + 2] == 0x00 && plain[o + 3] == 0x0F &&
++				    plain[o + 4] == 0xAC && plain[o + 5] == 0x01) {
++					gtk_idx = plain[o + 6] & 3;
++					gtk_len = (uint8_t)MIN((uint32_t)plain[o + 1] - 6, 32u);
++					memcpy(gtk, plain + o + 8, gtk_len);
++				}
++			}
++		}
 +		if (volcano) {
 +			if (s_keys_pending) {
 +				bzero(gtk, sizeof(gtk));
@@ -7123,13 +8577,33 @@ index 8aa0c2f..653173c 100644
 +			}
 +			return;
 +		}
- 		w_eapol_send(0x030A, NULL, NULL, 0);
- 		IOSleep(5);                             /* message 4 out in the clear before the keys go in */
- 		w_install_key(false, 0, WMI_CIPHER_CCMP, s_ptk + 32, 16);
-@@ -5464,6 +8290,27 @@ w_eapol_rx(const uint8_t *e, size_t elen)
++		w_eapol_send(0x030A, NULL, NULL, 0);
++		IOSleep(5);                             /* message 4 out in the clear before the keys go in */
++		w_install_key(false, 0, WMI_CIPHER_CCMP, s_ptk + 32, 16);
++		if (gtk_len != 0) {
++			w_install_key(true, gtk_idx, s_group_cipher == 2 ? WMI_CIPHER_TKIP : WMI_CIPHER_CCMP, gtk, gtk_len);
++		}
++		w_peer_param(PEER_PARAM_AUTHORIZE, 1);
++		s_ptk_set = true;
++		bzero(gtk, sizeof(gtk));
++		LOG("t=%u ms: *** WPA2 keys installed (group key %s, idx %u) ***", g_ms, gtk_len ? "yes" : "NO", gtk_idx);
++		w_join_end(0);
++		return;
  	}
+-	return NULL;
  }
  
+-/* ---- HTT data TX (ath10k_htt_tx_64, native wifi) */
+-#define TX_SLOTS        64
+-#define TX_SLOT_SIZE    2048
+-#define H2T_TX_FRM      1
+-#define TXF0_MAC_HDR    0x01
+-#define TXF0_NO_ENCRYPT 0x04
+-#define TXF0_NATIVE     (1u << 5)
+-#define TXF1_TID_NONQOS (16u << 6)
+-#define TXF1_POSTPONED  (1u << 11)
+-#define PREFETCH_LEN    50
+-#define T2H_TX_COMPL_IND 0x07
 +/* fix68: the keys go in once message 4 has left the TCL ring */
 +static void
 +w_keys_install(void)
@@ -7150,39 +8624,114 @@ index 8aa0c2f..653173c 100644
 +	s_gtk_len = 0;
 +	w_join_end(0);
 +}
-+
- /* ---- the join, step by step from the modem thread */
- static void
- w_teardown(void)
-@@ -5472,16 +8319,22 @@ w_teardown(void)
- 		if (s_state >= S_4WAY) {
- 			w_vdev_simple(CMD_VDEV_DOWN, TAG_VDEV_DOWN);
- 		}
--		if (s_state >= S_AUTH) {
+ 
+-static uint8_t *tx_pool;
+-static uint64_t tx_pool_pa, tx_busy;
+-static uint32_t tx_sent, tx_done, tx_fail, tx_drop, rx_up;
++/* ---- the join, step by step from the modem thread */
++static void
++w_teardown(void)
++{
++	if (s_state >= S_START) {
++		if (s_state >= S_4WAY) {
++			w_vdev_simple(CMD_VDEV_DOWN, TAG_VDEV_DOWN);
++		}
 +		if (s_peer_up || s_state >= S_AUTH) {
- 			w_peer(CMD_PEER_DELETE, TAG_PEER_DELETE, false);
- 		}
--		w_vdev_simple(CMD_VDEV_STOP, TAG_VDEV_STOP);
++			w_peer(CMD_PEER_DELETE, TAG_PEER_DELETE, false);
++		}
 +		if (s_vdev_started) {
 +			w_vdev_simple(CMD_VDEV_STOP, TAG_VDEV_STOP);
 +		}
- 	}
- 	if (s_state == S_UP) {
- 		w_link(false);
- 	}
- 	s_state = S_IDLE;
- 	s_ptk_set = false;
++	}
++	if (s_state == S_UP) {
++		w_link(false);
++	}
++	s_state = S_IDLE;
++	s_ptk_set = false;
 +	s_peer_up = false;
 +	s_vdev_started = false;
 +	s_keys_pending = false;
 +	s_vstage = 0;
- }
++}
  
- static void
-@@ -5551,6 +8404,22 @@ w_join_begin(void)
- 	LOG("t=%u ms: join: %.*s %02x:%02x:%02x:**:**:** %u MHz %s", g_ms, (int)s_ssid_len, s_ssid, s_bssid[0], s_bssid[1],
- 	    s_bssid[2], s_freq, s_rsn ? "WPA2" : "open");
- 	w_ps_off();
+-static bool
+-htt_tx_frame(const uint8_t *f, uint32_t len, bool clear)
++static void
++w_join_end(int result)
+ {
+-	uint8_t m[20 + 52], *p = m;
+-	uint32_t id, pf = (MIN(len, (uint32_t)PREFETCH_LEN) + 3) & ~3u;
+-	if (tx_pool == NULL) {
+-		tx_pool = (uint8_t *)pool_alloc(TX_SLOTS * TX_SLOT_SIZE, &tx_pool_pa);
++	if (result != 0) {
++		LOG("t=%u ms: join: failed (%d) in state %u", g_ms, result, s_state);
++		w_teardown();
++	} else {
++		s_state = S_UP;
++		LOG("t=%u ms: *** joined %.*s ***", g_ms, (int)s_ssid_len, s_ssid);
++		w_link(true);
+ 	}
+-	if (tx_pool == NULL || htt_bank == NULL || htt_state != 2 || len > TX_SLOT_SIZE) {
+-		return false;
++	bzero(s_pmk, sizeof(s_pmk));
++	s_result = result;
++	s_join_done++;
++}
++
++static void
++w_join_begin(void)
++{
++	/* the AP: the strongest one heard with that name (or the BSSID asked for) */
++	int best = -1;
++	for (uint32_t i = 0; i < nbss; i++) {
++		if (bss[i].raw_ssid_len == s_ssid_len && memcmp(bss[i].raw_ssid, s_ssid, s_ssid_len) == 0 &&
++		    (best < 0 || bss[i].rssi > bss[best].rssi)) {
++			best = (int)i;
++		}
+ 	}
+-	for (id = 0; id < TX_SLOTS && (tx_busy & (1ull << id)) != 0; id++) {
++	bool want_bssid = false;
++	for (int i = 0; i < 6; i++) {
++		want_bssid |= s_bssid[i] != 0;
+ 	}
+-	if (id == TX_SLOTS) {
+-		return false;
++	if (want_bssid) {
++		for (uint32_t i = 0; i < nbss; i++) {
++			if (memcmp(bss[i].bssid, s_bssid, 6) == 0) {
++				best = (int)i;
++			}
++		}
++	}
++	if (best < 0) {
++		LOG("join: no such network heard");
++		w_join_end(ENOENT);
++		return;
++	}
++	memcpy(s_bssid, bss[best].bssid, 6);
++	s_freq = bss[best].freq;
++	s_body_len = bss[best].ie_len;
++	memcpy(s_body, bss[best].ie, s_body_len);
++	const uint8_t *rsn = w_find_ie(s_body, s_body_len, 48);
++	s_rsn = rsn != NULL;
++	s_group_cipher = (rsn != NULL && rsn[1] >= 8) ? rsn[2 + 2 + 3] : 4;
++	static const uint8_t hdr[4] = { 48, 20, 1, 0 };
++	memcpy(s_rsn_ie, hdr, 4);
++	uint8_t *q = s_rsn_ie + 4;
++	*q++ = 0x00; *q++ = 0x0F; *q++ = 0xAC; *q++ = s_group_cipher;
++	*q++ = 1; *q++ = 0; *q++ = 0x00; *q++ = 0x0F; *q++ = 0xAC; *q++ = 4;   /* pairwise CCMP */
++	*q++ = 1; *q++ = 0; *q++ = 0x00; *q++ = 0x0F; *q++ = 0xAC; *q++ = 2;   /* AKM PSK */
++	*q++ = 0; *q++ = 0;
++	uint32_t bcn = bss[best].bintval ? bss[best].bintval : 100, dtim = 1;
++	const uint8_t *tim = w_find_ie(s_body, s_body_len, 5);
++	if (tim != NULL && tim[1] >= 2 && tim[3] != 0) {
++		dtim = tim[3];
++	}
++	s_msg1s = 0;
++	s_start_resp = false;
++	LOG("t=%u ms: join: %.*s %02x:%02x:%02x:**:**:** %u MHz %s", g_ms, (int)s_ssid_len, s_ssid, s_bssid[0], s_bssid[1],
++	    s_bssid[2], s_freq, s_rsn ? "WPA2" : "open");
++	w_ps_off();
 +	s_bcn = bcn;
 +	s_dtim = dtim;
 +	if (volcano) {
@@ -7196,17 +8745,203 @@ index 8aa0c2f..653173c 100644
 +			LOG("t=%u ms: join: peer create %s, waiting for PEER_MAP", g_ms, s_peer_up ? "sent" : "FAILED");
 +		}
 +		return;
-+	}
+ 	}
+-	uint64_t pa = tx_pool_pa + (uint64_t)id * TX_SLOT_SIZE;
+-	memcpy(tx_pool + id * TX_SLOT_SIZE, f, len);
+-	uint8_t *ext = htt_bank + id * HTT_EXT_DESC_SIZE;  /* frags[0] at +24: paddr_lo, paddr_hi16, len16 */
+-	bzero(ext, HTT_EXT_DESC_SIZE);
+-	uint32_t lo = (uint32_t)pa;
+-	uint16_t hi = (uint16_t)(pa >> 32), l16 = (uint16_t)len;
+-	memcpy(ext + 24, &lo, 4);
+-	memcpy(ext + 28, &hi, 2);
+-	memcpy(ext + 30, &l16, 2);
+-	mb();
+-	bzero(m, sizeof(m));
+-	*p++ = H2T_TX_FRM;
+-	*p++ = (uint8_t)(TXF0_MAC_HDR | TXF0_NATIVE | (clear ? TXF0_NO_ENCRYPT : 0));
+-	p = put16(p, (uint16_t)(TXF1_TID_NONQOS | TXF1_POSTPONED));   /* vdev 0 */
+-	p = put16(p, (uint16_t)len);
+-	p = put16(p, (uint16_t)id);
+-	p = put64(p, htt_bank_pa + (uint64_t)id * HTT_EXT_DESC_SIZE);
+-	p = w_p32(p, 0xFFFF);                       /* peer id: invalid */
+-	memcpy(p, f, MIN(len, pf));
+-	if (!htt_send(m, 20 + pf)) {
+-		return false;
 +	s_vdev_started = true;
 +	s_vstage = 2;
- 	if (!w_vdev_start(s_freq, bcn, dtim)) {
- 		w_join_end(EIO);
- 		return;
-@@ -5647,20 +8516,57 @@ w_join_poll(void)
- 		w_join_begin();
- 		return;
++	if (!w_vdev_start(s_freq, bcn, dtim)) {
++		w_join_end(EIO);
++		return;
  	}
--	if (s_state == S_START) {
+-	tx_busy |= 1ull << id;
+-	tx_sent++;
+-	return true;
++	s_state = S_START;
++	s_deadline = g_ms + 1500;
+ }
+ 
+ static void
+-htt_tx_compl(const uint8_t *p, uint32_t len)
++w_assoc_mgmt_rx(const uint8_t *f, uint32_t len)
+ {
+-	uint32_t n = p[2], st = p[1] & 7;
+-	for (uint32_t i = 0; i < n && 4 + 2 * (i + 1) <= len; i++) {
+-		uint16_t id;
+-		memcpy(&id, p + 4 + 2 * i, 2);
+-		if (id < TX_SLOTS) {
+-			tx_busy &= ~(1ull << id);
+-		}
++	if (len < 26 || s_state == S_IDLE || memcmp(f + 10, s_bssid, 6) != 0) {
++		return;
+ 	}
+-	tx_done += n;
+-	if (st != 0) {
+-		tx_fail += n;
+-		if (tx_fail <= 4) {
+-			LOG("t=%u ms: htt tx: %u frame(s) status %u", g_ms, n, st);
++	uint8_t fc = f[0];
++	uint16_t v = (uint16_t)(f[24] | f[25] << 8);
++	if (fc == FC_AUTH && s_state == S_AUTH && len >= 30 && f[26] == 2) {
++		v = (uint16_t)(f[28] | f[29] << 8);
++		LOG("t=%u ms: join: auth reply status %u", g_ms, v);
++		if (v != 0) {
++			w_join_end(ECONNREFUSED);
++			return;
++		}
++		s_state = S_ASSOC;
++		s_tries = 1;
++		w_build_assoc_req();
++		w_mgmt_tx(s_assoc_req, s_assoc_req_len);
++		s_deadline = g_ms + 400;
++	} else if (fc == FC_ASSOC_RESP && s_state == S_ASSOC && len >= 30) {
++		v = (uint16_t)(f[26] | f[27] << 8);
++		s_aid = (uint32_t)(f[28] | f[29] << 8) & 0x3FFF;
++		LOG("t=%u ms: join: assoc reply status %u aid %u", g_ms, v, s_aid);
++		if (v != 0) {
++			w_join_end(ECONNREFUSED);
++			return;
++		}
++		w_peer_assoc((uint32_t)(f[24] | f[25] << 8));
++		uint8_t m[20], *p = wmi_put_tlv(m, TAG_VDEV_UP, 16);
++		p = w_p32(p, 0);
++		p = w_p32(p, s_aid);
++		w_pmac(p, s_bssid);
++		wmi_send(CMD_VDEV_UP, m, sizeof(m));
++		if (!s_rsn) {
++			w_peer_param(PEER_PARAM_AUTHORIZE, 1);
++			s_state = S_4WAY;                   /* (teardown order) */
++			w_join_end(0);
++		} else {
++			s_state = S_4WAY;
++			s_deadline = g_ms + 8000;
++			LOG("t=%u ms: join: associated, waiting for the 4-way handshake", g_ms);
++		}
++	} else if (fc == FC_DEAUTH || fc == FC_DISASSOC) {
++		LOG("t=%u ms: join: the AP ended the link, reason %u (state %u)", g_ms, v, s_state);
++		if (s_state == S_UP) {
++			w_teardown();
++		} else {
++			w_join_end(s_state == S_4WAY ? EAUTH : ECONNREFUSED);
+ 		}
+ 	}
+ }
+ 
+-/* ---- WMI commands for the join (layouts: ath10k wmi-tlv) */
+-static bool
+-w_vdev_start(uint32_t freq, uint32_t bcn, uint32_t dtim)
+-{
+-	uint8_t m[4 + 72 + 4 + 24 + 4] = {}, *p;
+-	p = wmi_put_tlv(m, TAG_VDEV_START, 72);
+-	p = w_p32(p, 0);
+-	p = w_p32(p, 0);
+-	p = w_p32(p, bcn);
+-	p = w_p32(p, dtim);
+-	p = w_p32(p, 0);
+-	p += 36 + 16;                               /* ssid (empty for a station), tx rate/power, noa, hw ack */
+-	p = w_channel(p, freq);
+-	wmi_put_tlv(p, TAG_ARRAY_STRUCT, 0);
+-	return wmi_send(CMD_VDEV_START, m, sizeof(m));
+-}
+-
+-static bool
+-w_vdev_simple(uint32_t cmd, uint16_t tag)
+-{
+-	uint8_t m[8], *p = wmi_put_tlv(m, tag, 4);
+-	w_p32(p, 0);
+-	return wmi_send(cmd, m, sizeof(m));
+-}
+-
+-static bool
+-w_peer(uint32_t cmd, uint16_t tag, bool create)
++static void
++w_join_event(uint32_t id, const uint8_t *t, uint32_t len)
+ {
+-	uint8_t m[4 + 16] = {}, *p = wmi_put_tlv(m, tag, create ? 16 : 12);
+-	p = w_p32(p, 0);
+-	p = w_pmac(p, s_bssid);
+-	if (create) {
+-		w_p32(p, 0);
++	uint16_t l = 0;
++	uint32_t v[4] = {};
++	if (len >= 4) {
++		memcpy(&l, t, 2);
++	}
++	if (len < 4u + l) {
++		return;
++	}
++	memcpy(v, t + 4, MIN((uint32_t)l, (uint32_t)sizeof(v)));
++	if (id == 0x5001 && l >= 16) {             /* VDEV_START_RESP {vdev, req, type, status} */
++		s_start_status = (int32_t)v[3];
++		s_start_resp = true;
++	} else if (id == 0x6001 && s_state == S_UP) {   /* PEER_STA_KICKOUT */
++		LOG("t=%u ms: join: peer kickout", g_ms);
++		w_teardown();
+ 	}
+-	return wmi_send(cmd, m, create ? 20 : 16);
+-}
+-
+-static bool
+-w_peer_param(uint32_t param, uint32_t value)
+-{
+-	uint8_t m[4 + 20], *p = wmi_put_tlv(m, TAG_PEER_SET_PARAM, 20);
+-	p = w_p32(p, 0);
+-	p = w_pmac(p, s_bssid);
+-	p = w_p32(p, param);
+-	w_p32(p, value);
+-	return wmi_send(CMD_PEER_SET_PARAM, m, sizeof(m));
+-}
+-
+-static bool
+-w_ps_off(void)
+-{
+-	uint8_t m[12], *p = wmi_put_tlv(m, TAG_STA_PS_MODE, 8);
+-	p = w_p32(p, 0);
+-	w_p32(p, 0);
+-	return wmi_send(CMD_STA_PS_MODE, m, sizeof(m));
+ }
+ 
+-static bool
+-w_mgmt_tx(const uint8_t *f, uint32_t len)
++/* every pass of the modem loop */
++static void
++w_join_poll(void)
+ {
+-	uint8_t m[4 + 28 + 4 + 64] = {}, *p;
+-	uint32_t buf = (MIN(len, 64u) + 3) & ~3u;
+-	if (s_mgmt_va == NULL) {
+-		s_mgmt_va = (uint8_t *)pool_alloc(0x1000, &s_mgmt_pa);
++	if (s_leave_asked) {
++		s_leave_asked = false;
++		w_teardown();
+ 	}
+-	if (s_mgmt_va == NULL || len > 0x1000 - 8) {
+-		return false;
++	if (s_join_asked && !scanning) {
++		s_join_asked = false;
++		w_teardown();
++		w_join_begin();
++		return;
++	}
 +	if (s_keys_pending && s_state == S_4WAY && g_ms >= s_keys_at &&
 +	    (s_msg4_slot < 0 || !(dtx_busy & (1u << s_msg4_slot)) || g_ms > s_keys_at + 200)) {
 +		w_keys_install();
@@ -7232,17 +8967,16 @@ index 8aa0c2f..653173c 100644
 +			s_deadline = g_ms + 1500;
 +		}
 +	} else if (s_state == S_START) {
- 		if (s_start_resp) {
++		if (s_start_resp) {
 +			for (int k = 0; k < (volcano ? 2 : 0); k++) {
 +				LOG("t=%u ms: join: VDEV_START_RESP status %d", g_ms, (int)s_start_status);
 +			}
- 			if (s_start_status != 0) {
- 				w_join_end(EIO);
- 				return;
- 			}
- 			s_state = S_AUTH;
- 			s_tries = 1;
--			w_peer(CMD_PEER_CREATE, TAG_PEER_CREATE, true);
++			if (s_start_status != 0) {
++				w_join_end(EIO);
++				return;
++			}
++			s_state = S_AUTH;
++			s_tries = 1;
 +			if (!s_peer_up) {
 +				s_peer_up = w_peer(CMD_PEER_CREATE, TAG_PEER_CREATE, true);
 +			}
@@ -7251,35 +8985,118 @@ index 8aa0c2f..653173c 100644
 +			w_andr_tpc(s_freq);
 +			p128_req("before auth");
 +			g_p128next = g_ms + 150;
- 			w_send_auth();
- 			s_deadline = g_ms + 400;
- 		} else if (g_ms > s_deadline) {
- 			w_join_end(ETIMEDOUT);
- 		}
++			w_send_auth();
++			s_deadline = g_ms + 400;
++		} else if (g_ms > s_deadline) {
++			w_join_end(ETIMEDOUT);
++		}
 +	} else if (s_state == S_AUTH && g_ms >= g_p128next && g_ms <= s_deadline) {
 +		g_p128next = g_ms + 150;
 +		p128_req("auth wait");
- 	} else if ((s_state == S_AUTH || s_state == S_ASSOC) && g_ms > s_deadline) {
- 		if (s_tries >= 4) {
- 			w_join_end(ETIMEDOUT);
-@@ -5688,6 +8594,9 @@ w_rx_native(const uint8_t *f, uint32_t len)
- 		return;                                 /* data frames only */
++	} else if ((s_state == S_AUTH || s_state == S_ASSOC) && g_ms > s_deadline) {
++		if (s_tries >= 4) {
++			w_join_end(ETIMEDOUT);
++		} else {
++			s_tries++;
++			if (s_state == S_AUTH) {
++				w_send_auth();
++			} else {
++				w_mgmt_tx(s_assoc_req, s_assoc_req_len);
++			}
++			s_deadline = g_ms + 400;
++		}
++	} else if (s_state == S_4WAY && g_ms > s_deadline) {
++		LOG("t=%u ms: join: no 4-way handshake (%u message 1s)", g_ms, s_msg1s);
++		w_join_end(s_msg1s != 0 ? EAUTH : ETIMEDOUT);
  	}
- 	uint32_t hl = ((f[1] & 3) == 3) ? 30 : 24;
+-	bzero(s_mgmt_va, ((len + 3) & ~3u) + 4);
+-	memcpy(s_mgmt_va, f, len);
+-	mb();
+-	p = wmi_put_tlv(m, TAG_MGMT_TX, 28);
+-	p = w_p32(p, 0);
+-	p = w_p32(p, ++s_desc);
+-	p = w_p32(p, 0);
+-	p = put64(p, s_mgmt_pa);
+-	p = w_p32(p, len);
+-	p = w_p32(p, buf);
+-	p = wmi_put_tlv(p, TAG_ARRAY_BYTE, buf);
+-	memcpy(p, s_mgmt_va, buf);
+-	return wmi_send(CMD_MGMT_TX_SEND, m, 4 + 28 + 4 + buf);
+ }
+ 
+-static uint32_t
+-w_ap_rates(uint8_t *out)
++/* a received data frame (native wifi, from the HTT rx ring) */
++static void
++w_rx_native(const uint8_t *f, uint32_t len)
+ {
+-	static const uint8_t ids[2] = { 1, 50 };
+-	uint32_t n = 0;
+-	for (int k = 0; k < 2; k++) {
+-		const uint8_t *ie = w_find_ie(s_body, s_body_len, ids[k]);
+-		for (uint32_t i = 0; ie != NULL && i < ie[1] && n < 16; i++) {
+-			out[n++] = ie[2 + i];
+-		}
++	uint8_t e[14 + 1600];
++	if (len < 24 + 8 || (f[0] & 0x0C) != 0x08) {
++		return;                                 /* data frames only */
++	}
++	uint32_t hl = ((f[1] & 3) == 3) ? 30 : 24;
 +	if ((f[0] & 0x80) && len >= hl + 2 + 8 && f[hl] != 0xAA && f[hl + 2] == 0xAA && f[hl + 3] == 0xAA) {
 +		hl += 2;                                /* QoS data that kept its QoS control */
 +	}
- 	const uint8_t *da = f + 4, *sa = (f[1] & 2) ? f + 16 : f + 10;   /* from DS: addr3 is the source */
- 	const uint8_t *llc = f + hl;
- 	if (len < hl + 8 || llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03) {
-@@ -5711,6 +8620,23 @@ w_rx_native(const uint8_t *f, uint32_t len)
++	const uint8_t *da = f + 4, *sa = (f[1] & 2) ? f + 16 : f + 10;   /* from DS: addr3 is the source */
++	const uint8_t *llc = f + hl;
++	if (len < hl + 8 || llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03) {
++		return;
++	}
++	uint32_t plen = len - hl - 8;
++	if (plen > 1600 - 0) {
++		return;
++	}
++	memcpy(e, da, 6);
++	memcpy(e + 6, sa, 6);
++	memcpy(e + 12, llc + 6, 2);
++	memcpy(e + 14, llc + 8, plen);
++	if (e[12] == 0x88 && e[13] == 0x8E) {
++		w_eapol_rx(e, 14 + plen);
++		return;
++	}
++	if (s_state == S_UP && topaz_wlan_rx_hook != NULL) {
++		rx_up++;
++		topaz_wlan_rx_hook(e, 14 + plen);
  	}
+-	return n;
  }
  
+-static bool
+-w_peer_assoc(uint32_t caps)
 +/* fix68: an Ethernet-decapped msdu (rx decap 2) */
 +static void
 +w_rx_ether(const uint8_t *e, uint32_t len)
-+{
+ {
+-	uint8_t m[4 + 76 + 4 + 16 + 4 + 4 + 16] = {}, *p, *r, rates[16];
+-	uint32_t n = w_ap_rates(rates), rl = (MIN(n, 16u) + 3) & ~3u;
+-	p = wmi_put_tlv(m, TAG_PEER_ASSOC, 76);
+-	p = w_pmac(p, s_bssid);
+-	p = w_p32(p, 0);
+-	p = w_p32(p, 1);                            /* new assoc */
+-	p = w_p32(p, s_aid);
+-	p = w_p32(p, PEER_FLAG_AUTH | (s_rsn ? PEER_FLAG_NEED_PTK_4WAY : 0));
+-	p = w_p32(p, caps);
+-	p = w_p32(p, 1);                            /* listen interval */
+-	p += 4 * 6;                                 /* ht caps, max mpdu, density, rate caps; nss below */
+-	p -= 4 * 2;
+-	p = w_p32(p, 1);                            /* nss */
+-	p = w_p32(p, 0);                            /* vht caps */
+-	p = w_p32(p, s_freq < 4000 ? 1 : 0);        /* phy mode: 11g / 11a */
+-	p += 8;
+-	p = w_p32(p, MIN(n, 16u));
+-	p = w_p32(p, 0);
+-	r = wmi_put_tlv(p, TAG_ARRAY_BYTE, rl);
+-	for (uint32_t i = 0; i < n && i < 16; i++) {
+-		uint8_t v = rates[i] & 0x7F;
+-		r[i] = (v == 2 || v == 4 || v == 11 || v == 22) ? (uint8_t)(v | 0x80) : v;
 +	if (len < 14 || len > 14 + 1600) {
 +		return;
 +	}
@@ -7290,16 +9107,261 @@ index 8aa0c2f..653173c 100644
 +	if (s_state == S_UP && topaz_wlan_rx_hook != NULL) {
 +		rx_up++;
 +		topaz_wlan_rx_hook(e, len);
-+	}
-+}
-+
- /* ---- the C API */
- extern "C" {
- int topaz_wlan_join(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pass, unsigned pass_len);
-@@ -5848,6 +8774,77 @@ w_tx_pump(void)
  	}
+-	p = r + rl;
+-	p = wmi_put_tlv(p, TAG_ARRAY_BYTE, 0);
+-	wmi_put_tlv(p, TAG_VHT_RATE_SET, 16);
+-	return wmi_send(CMD_PEER_ASSOC, m, 4 + 76 + 4 + rl + 4 + 4 + 16);
  }
  
+-static bool
+-w_install_key(bool group, uint32_t idx, uint32_t cipher, const uint8_t *key, uint32_t klen)
+-{
+-	uint8_t m[4 + 92 + 4 + 32] = {}, *p;
+-	uint32_t kl = (klen + 3) & ~3u;
+-	p = wmi_put_tlv(m, TAG_VDEV_INSTALL_KEY, 92);
+-	p = w_p32(p, 0);
+-	p = w_pmac(p, s_bssid);
+-	p = w_p32(p, idx);
+-	p = w_p32(p, group ? 1 : 0);
+-	p = w_p32(p, cipher);
+-	p += 3 * 8 + 16 + 16;
+-	p = w_p32(p, klen);
+-	p = w_p32(p, cipher == WMI_CIPHER_TKIP ? 8 : 0);
+-	p = w_p32(p, cipher == WMI_CIPHER_TKIP ? 8 : 0);
+-	p = wmi_put_tlv(p, TAG_ARRAY_BYTE, kl);
+-	memcpy(p, key, klen);
+-	return wmi_send(CMD_VDEV_INSTALL_KEY, m, 4 + 92 + 4 + kl);
++/* ---- the C API */
++extern "C" {
++int topaz_wlan_join(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pass, unsigned pass_len);
++int topaz_wlan_join_pmk(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t pmk[32]);
++int topaz_wlan_leave(void);
++bool topaz_wlan_joined(void);
++bool topaz_wlan_transmit(const uint8_t *frame, size_t length);
+ }
+ 
+-/* ---- 802.11 management frames */
+-static uint8_t *
+-w_mgmt_hdr(uint8_t *f, uint8_t fc)
++static int w_join_with(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pmk);
++
++/* Blocks until joined or failed (EAUTH: wrong passphrase; ENOENT: not heard; ETIMEDOUT). */
++int
++topaz_wlan_join(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pass, unsigned pass_len)
+ {
+-	bzero(f, 24);
+-	f[0] = fc;
+-	memcpy(f + 4, s_bssid, 6);
+-	memcpy(f + 10, our_mac, 6);
+-	memcpy(f + 16, s_bssid, 6);
+-	return f + 24;
++	static bool tested, crypto_ok;
++	if (!api_ready || ssid_len == 0 || ssid_len > 32) {
++		return api_ready ? EINVAL : ENXIO;
++	}
++	if (!tested) {
++		tested = true;
++		crypto_ok = w_crypto_selftest();
++	}
++	if (pass_len != 0 && (!crypto_ok || pass_len < 8 || pass_len > 63)) {
++		return crypto_ok ? EINVAL : EIO;
++	}
++	uint8_t pmk[32] = {};
++	if (pass_len != 0) {
++		w_pbkdf2_pmk(pass, pass_len, ssid, ssid_len, pmk);
++	}
++	int r = w_join_with(ssid, ssid_len, bssid, pass_len != 0 ? pmk : NULL);
++	bzero(pmk, sizeof(pmk));
++	return r;
+ }
+ 
+-static bool
+-w_send_auth(void)
++/* the same with the PMK already made of the passphrase (what wifid hands over) */
++int
++topaz_wlan_join_pmk(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t pmk[32])
+ {
+-	uint8_t f[30], *b = w_mgmt_hdr(f, FC_AUTH);
+-	bzero(b, 6);
+-	b[2] = 1;                                   /* open system, transaction 1 */
+-	return w_mgmt_tx(f, sizeof(f));
++	if (!api_ready || ssid_len == 0 || ssid_len > 32) {
++		return api_ready ? EINVAL : ENXIO;
++	}
++	return w_join_with(ssid, ssid_len, bssid, pmk);
+ }
+ 
+-static void
+-w_build_assoc_req(void)
++static int
++w_join_with(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pmk)
+ {
+-	uint8_t *f = s_assoc_req, *p = w_mgmt_hdr(f, FC_ASSOC_REQ), rates[16];
+-	uint32_t n = w_ap_rates(rates), cap = 0x0001 | 0x0020 | 0x0400;   /* ESS, short preamble, short slot */
+-	if (s_rsn) {
+-		cap |= 0x0010;
++	while (s_state != S_IDLE && s_state != S_UP && s_join_asked) {
++		IOSleep(50);
+ 	}
+-	*p++ = (uint8_t)cap;
+-	*p++ = (uint8_t)(cap >> 8);
+-	*p++ = 10;
+-	*p++ = 0;
+-	*p++ = 0;
+-	*p++ = s_ssid_len;
+-	memcpy(p, s_ssid, s_ssid_len);
+-	p += s_ssid_len;
+-	*p++ = 1;
+-	*p++ = (uint8_t)MIN(n, 8u);
+-	for (uint32_t k = 0; k < n && k < 8; k++) {
+-		*p++ = rates[k];
++	memcpy(s_ssid, ssid, ssid_len);
++	s_ssid_len = (uint8_t)ssid_len;
++	if (bssid != NULL) {
++		memcpy(s_bssid, bssid, 6);
++	} else {
++		bzero(s_bssid, 6);
+ 	}
+-	if (n > 8) {
+-		*p++ = 50;
+-		*p++ = (uint8_t)(n - 8);
+-		for (uint32_t k = 8; k < n; k++) {
+-			*p++ = rates[k];
+-		}
++	if (pmk != NULL) {
++		memcpy(s_pmk, pmk, 32);
++	} else {
++		bzero(s_pmk, 32);
+ 	}
+-	if (s_rsn) {
+-		memcpy(p, s_rsn_ie, sizeof(s_rsn_ie));
+-		p += sizeof(s_rsn_ie);
++	uint32_t before = s_join_done;
++	s_join_asked = true;
++	for (int i = 0; i < 300 && s_join_done == before; i++) {   /* 30 s */
++		IOSleep(100);
+ 	}
+-	s_assoc_req_len = (uint32_t)(p - f);
++	return s_join_done != before ? s_result : ETIMEDOUT;
+ }
+ 
+-/* ---- Ethernet <-> native wifi */
+-static void
+-w_link(bool up)
++int
++topaz_wlan_leave(void)
+ {
+-	if (topaz_wlan_link_hook != NULL) {
+-		topaz_wlan_link_hook(up);
+-	}
++	s_leave_asked = true;
++	return 0;
+ }
+ 
+-/* an Ethernet frame (dst, src, type, payload) to the AP as a to-DS data frame */
+-static bool
+-w_tx_ether(const uint8_t *e, size_t len, bool clear)
++bool
++topaz_wlan_joined(void)
+ {
+-	uint8_t f[TX_SLOT_SIZE];
+-	if (len < 14 || len - 14 + 24 + 8 > sizeof(f)) {
++	return s_state == S_UP;
++}
++
++/* frames from the network stack wait here for the modem thread */
++#define ETXQ 32
++static struct { uint16_t len; uint8_t d[1514]; } etxq[ETXQ];
++static volatile uint32_t etxq_head, etxq_tail;
++static IOSimpleLock *etxq_lock;
++
++bool
++topaz_wlan_transmit(const uint8_t *frame, size_t length)
++{
++	if (s_state != S_UP || length < 14 || length > 1514 || etxq_lock == NULL) {
+ 		return false;
+ 	}
+-	bzero(f, 24);
+-	f[0] = 0x08;                                /* data */
+-	f[1] = (uint8_t)(0x01 | (s_ptk_set && !clear ? 0x40 : 0));   /* to DS (+ protected once keyed) */
+-	memcpy(f + 4, s_bssid, 6);                  /* addr1: the AP */
+-	memcpy(f + 10, our_mac, 6);                 /* addr2: us */
+-	memcpy(f + 16, e, 6);                       /* addr3: the destination */
+-	static const uint8_t snap[6] = { 0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00 };
+-	memcpy(f + 24, snap, 6);
+-	memcpy(f + 30, e + 12, 2);                  /* ethertype */
+-	memcpy(f + 32, e + 14, len - 14);
+-	return htt_tx_frame(f, (uint32_t)(len - 14 + 32), clear);
++	bool ok = false;
++	IOSimpleLockLock(etxq_lock);
++	if (etxq_tail - etxq_head < ETXQ) {
++		uint32_t i = etxq_tail % ETXQ;
++		etxq[i].len = (uint16_t)length;
++		memcpy(etxq[i].d, frame, length);
++		etxq_tail++;
++		ok = true;
++	}
++	IOSimpleLockUnlock(etxq_lock);
++	if (!ok) {
++		tx_drop++;
++	}
++	return ok;
+ }
+ 
+-/* ---- WPA2 4-way handshake (EAPOL-Key, descriptor version 2: HMAC-SHA1-128 MIC, AES key wrap) */
+-static void w_join_end(int result);
+-
+ static void
+-w_eapol_send(uint16_t info, const uint8_t *nonce, const uint8_t *data, uint16_t dlen)
++w_tx_pump(void)
+ {
+-	uint8_t e[14 + 4 + 95 + 64] = {}, *k = e + 14 + 4, mic[20];
+-	memcpy(e, s_bssid, 6);
+-	memcpy(e + 6, our_mac, 6);
+-	e[12] = 0x88;
+-	e[13] = 0x8E;
+-	uint16_t body = (uint16_t)(95 + dlen);
+-	e[14] = 1;                                  /* EAPOL version */
+-	e[15] = 3;                                  /* key */
+-	e[16] = (uint8_t)(body >> 8);
+-	e[17] = (uint8_t)body;
+-	k[0] = 2;                                   /* RSN key descriptor */
+-	k[1] = (uint8_t)(info >> 8);
+-	k[2] = (uint8_t)info;
+-	k[3] = 0;                                   /* key length 0 (from the STA) */
+-	k[4] = 0;
+-	for (int i = 0; i < 8; i++) {
+-		k[5 + i] = (uint8_t)(s_replay >> (56 - 8 * i));
+-	}
+-	if (nonce != NULL) {
+-		memcpy(k + 13, nonce, 32);
++	static uint8_t one[1514];
++	for (int n = 0; n < 16 && etxq_head != etxq_tail; n++) {
++		uint16_t len;
++		IOSimpleLockLock(etxq_lock);
++		uint32_t i = etxq_head % ETXQ;
++		len = etxq[i].len;
++		memcpy(one, etxq[i].d, len);
++		IOSimpleLockUnlock(etxq_lock);
++		if (s_state != S_UP || !w_tx_ether(one, len, false)) {
++			if (s_state != S_UP) {
++				IOSimpleLockLock(etxq_lock);
++				etxq_head = etxq_tail;          /* not joined: drop them */
++				IOSimpleLockUnlock(etxq_lock);
++			}
++			break;
++		}
++		IOSimpleLockLock(etxq_lock);
++		etxq_head++;
++		IOSimpleLockUnlock(etxq_lock);
+ 	}
+-	k[93] = (uint8_t)(dlen >> 8);
+-	k[94] = (uint8_t)dlen;
+-	if (dlen) {
+-		memcpy(k + 95, data, dlen);
++}
++
 +static uint32_t wev_id[32], wev_n[32], wev_cnt;
 +
 +static void
@@ -7310,12 +9372,20 @@ index 8aa0c2f..653173c 100644
 +			LOG("wmi ev: %x x%u, %x x%u, %x x%u, %x x%u", wev_id[i], wev_n[i], wev_id[i + 1], wev_n[i + 1],
 +			    wev_id[i + 2], wev_n[i + 2], wev_id[i + 3], wev_n[i + 3]);
 +		}
-+	}
-+}
-+
+ 	}
+-	w_hmac_sha1(s_ptk, 16, e + 14, 4 + body, NULL, 0, NULL, 0, mic);
+-	memcpy(k + 77, mic, 16);
+-	(void)w_tx_ether(e, 14 + 4 + body, true);
+ }
+ 
+-static bool
+-w_eapol_mic_ok(uint8_t *eapol, size_t len)
 +static void
 +wev_note(uint32_t id, const uint8_t *d, uint32_t len)
-+{
+ {
+-	uint8_t want[16], got[20];
+-	if (len < 4 + 95) {
+-		return false;
 +	for (uint32_t i = 0; i < wev_cnt; i++) {
 +		if (wev_id[i] == id) {
 +			wev_n[i]++;
@@ -7333,31 +9403,49 @@ index 8aa0c2f..653173c 100644
 +		LOG("t=%u ms: wmi new ev %x len %u: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
 +		    g_ms, id, len, b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
 +		    b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]);
-+	}
-+}
-+
+ 	}
+-	memcpy(want, eapol + 4 + 77, 16);
+-	bzero(eapol + 4 + 77, 16);
+-	w_hmac_sha1(s_ptk, 16, eapol, len, NULL, 0, NULL, 0, got);
+-	memcpy(eapol + 4 + 77, want, 16);
+-	return memcmp(want, got, 16) == 0;
+ }
+ 
 +/* fix103: WMI_REG_CHAN_LIST_CC_EVENTID (ath11k ath11k_pull_reg_chan_list_update_ev): the fw's country,
 + * DFS region and rules; a NO_IR rule on the join channel = the fw will not transmit there */
-+static void
+ static void
+-w_eapol_rx(const uint8_t *e, size_t elen)
 +w_reg_event(const uint8_t *t, uint32_t len)
-+{
+ {
+-	uint8_t frame[512];
+-	const uint8_t *src = e + 6;
+-	if (s_state != S_4WAY || elen < 14 + 4 + 95 || elen - 14 > sizeof(frame) || memcmp(src, s_bssid, 6) != 0) {
 +	uint16_t l = 0, tag = 0;
 +	uint32_t v[14];
 +	if (len < 4 + sizeof(v)) {
-+		return;
-+	}
+ 		return;
+ 	}
+-	size_t len = elen - 14;
+-	memcpy(frame, e + 14, len);
+-	uint8_t *k = frame + 4;
+-	if (frame[1] != 3 || k[0] != 2) {
 +	memcpy(&l, t, 2);
 +	memcpy(&tag, t + 2, 2);
 +	if (l < sizeof(v) || 4u + l > len) {
 +		LOG("t=%u ms: wmi reg: odd event tag %x len %u/%u", g_ms, tag, l, len);
-+		return;
-+	}
+ 		return;
+ 	}
+-	uint16_t info = (uint16_t)(k[1] << 8 | k[2]), dlen = (uint16_t)(k[93] << 8 | k[94]);
+-	uint64_t replay = 0;
+-	for (int i = 0; i < 8; i++) {
+-		replay = replay << 8 | k[5 + i];
 +	memcpy(v, t + 4, sizeof(v));
 +	char cc[3] = { (char)(v[2] & 0xFF), (char)((v[2] >> 8) & 0xFF), 0 };
 +	for (int k = 0; k < 3; k++) {
 +		LOG("t=%u ms: *** wmi reg: status %u phy %u cc '%s' id %u domain %x dfs %u phymap %x bw2g %u-%u bw5g %u-%u rules %u+%u ***",
 +			g_ms, v[0], v[1], cc, v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13]);
-+	}
+ 	}
+-	if (95 + (size_t)dlen > len - 4) {
 +	uint32_t o = 4 + l + 4;                     /* past the event struct and the rules' array TLV header */
 +	for (uint32_t i = 0; i < v[12] + v[13] && i < 16 && o + 16 <= len; i++, o += 16) {
 +		uint32_t r[4];
@@ -7371,27 +9459,70 @@ index 8aa0c2f..653173c 100644
 +	}
 +}
 +
- static void
- wmi_rx(const uint8_t *d, uint32_t len)
- {
-@@ -5857,6 +8854,9 @@ wmi_rx(const uint8_t *d, uint32_t len)
++static void
++wmi_rx(const uint8_t *d, uint32_t len)
++{
++	uint32_t id;
++	if (len < 4) {
+ 		return;
  	}
- 	memcpy(&id, d, 4);
- 	id &= 0xFFFFFF;
+-	bool pairwise = info & 0x0008, ack = info & 0x0080, has_mic = info & 0x0100, install = info & 0x0040;
+-	if (pairwise && ack && !has_mic) {
+-		/* message 1: ANonce -> PTK, answer with message 2 */
+-		if (++s_msg1s > 3) {
+-			LOG("t=%u ms: wpa: the AP keeps sending message 1: wrong passphrase", g_ms);
+-			w_join_end(EAUTH);
+-			return;
++	memcpy(&id, d, 4);
++	id &= 0xFFFFFF;
 +	if (volcano) {
 +		wev_note(id, d, len);
 +	}
- 	switch (id) {
- 	case WMI_EV_SERVICE_AVAILABLE: {
- 		uint16_t tag;
-@@ -5869,7 +8869,26 @@ wmi_rx(const uint8_t *d, uint32_t len)
- 	case WMI_EV_SERVICE_READY:
- 		LOG("t=%u ms: wmi: SERVICE_READY, %u bytes", g_ms, len);
- 		wmi_svc_ready(d + 4, len - 4);
--		if (!wmi_init_sent) {
++	switch (id) {
++	case WMI_EV_SERVICE_AVAILABLE: {
++		uint16_t tag;
++		memcpy(&tag, d + 6, 2);
++		if (len >= 12 + sizeof(wmi_svc_ext) && tag == TAG_SERVICE_AVAILABLE) {
++			memcpy(wmi_svc_ext, d + 12, sizeof(wmi_svc_ext));
+ 		}
+-		s_replay = replay;
+-		memcpy(s_anonce, k + 13, 32);
+-		read_random(s_snonce, 32);
+-		uint8_t data[76];
+-		const uint8_t *aa = s_bssid, *spa = our_mac;
+-		bool amin = memcmp(aa, spa, 6) < 0, nmin = memcmp(s_anonce, s_snonce, 32) < 0;
+-		memcpy(data, amin ? aa : spa, 6);
+-		memcpy(data + 6, amin ? spa : aa, 6);
+-		memcpy(data + 12, nmin ? s_anonce : s_snonce, 32);
+-		memcpy(data + 44, nmin ? s_snonce : s_anonce, 32);
+-		w_prf(s_pmk, 32, "Pairwise key expansion", data, sizeof(data), s_ptk, 48);
+-		w_eapol_send(0x010A, s_snonce, s_rsn_ie, sizeof(s_rsn_ie));
+-		LOG("t=%u ms: wpa: message 1 -> message 2 sent", g_ms);
+-		return;
++		break;
+ 	}
+-	if (pairwise && ack && has_mic && install) {
+-		/* message 3: check, unwrap the GTK, answer with message 4, install the keys */
+-		if (!w_eapol_mic_ok(frame, len)) {
+-			LOG("t=%u ms: wpa: message 3 MIC wrong: wrong passphrase", g_ms);
+-			w_join_end(EAUTH);
+-			return;
++	case WMI_EV_SERVICE_READY:
++		LOG("t=%u ms: wmi: SERVICE_READY, %u bytes", g_ms, len);
++		wmi_svc_ready(d + 4, len - 4);
 +		if (!wmi_init_sent && !(volcano && w_arg("wifiinitext", 0) != 0)) {
 +			wmi_send_init();
-+		}
+ 		}
+-		s_replay = replay;
+-		uint8_t plain[256];
+-		uint8_t gtk[32], gtk_len = 0, gtk_idx = 1;
+-		if ((info & 0x1000) && dlen >= 24 && dlen <= sizeof(plain) + 8 && aes_unwrap(s_ptk + 16, k + 95, dlen, plain)) {
+-			for (uint32_t o = 0; o + 2 <= (uint32_t)dlen - 8 && o + 2 + plain[o + 1] <= (uint32_t)dlen - 8; o += 2 + plain[o + 1]) {
+-				if (plain[o] == 0xDD && plain[o + 1] >= 6 && plain[o + 2] == 0x00 && plain[o + 3] == 0x0F &&
+-				    plain[o + 4] == 0xAC && plain[o + 5] == 0x01) {
+-					gtk_idx = plain[o + 6] & 3;
+-					gtk_len = (uint8_t)MIN((uint32_t)plain[o + 1] - 6, 32u);
+-					memcpy(gtk, plain + o + 8, gtk_len);
 +		break;
 +	case 0x4009:                                /* fix123: SERVICE_READY_EXT: log the fw's hw modes */
 +		for (uint32_t o = 4; o + 16 <= len; o += 4) {
@@ -7400,22 +9531,46 @@ index 8aa0c2f..653173c 100644
 +			if (w[0] == ((0x211u << 16) | 12u)) {
 +				for (int k = 0; k < 2; k++) {
 +					LOG("t=%u ms: fix123 fw hw mode id %u phy map %x config type %u", g_ms, w[1], w[2], w[3]);
-+				}
-+			}
-+		}
+ 				}
+ 			}
+ 		}
+-		w_eapol_send(0x030A, NULL, NULL, 0);
+-		IOSleep(5);                             /* message 4 out in the clear before the keys go in */
+-		w_install_key(false, 0, WMI_CIPHER_CCMP, s_ptk + 32, 16);
+-		if (gtk_len != 0) {
+-			w_install_key(true, gtk_idx, s_group_cipher == 2 ? WMI_CIPHER_TKIP : WMI_CIPHER_CCMP, gtk, gtk_len);
 +		break;
 +	case 0x4022:                                /* fix123: SERVICE_READY_EXT2: ath11k sends INIT after this */
 +		if (!wmi_init_sent && volcano && w_arg("wifiinitext", 0) != 0) {
 +			for (int k = 0; k < 2; k++) {
 +				LOG("t=%u ms: fix123 INIT deferred to SERVICE_READY_EXT2", g_ms);
 +			}
- 			wmi_send_init();
++			wmi_send_init();
  		}
- 		break;
-@@ -5890,6 +8909,13 @@ wmi_rx(const uint8_t *d, uint32_t len)
- 		LOG("t=%u ms: *** WMI READY (fw MAC %02x:%02x:%02x:%02x:%02x:%02x) ***", g_ms, wmi_mac[0], wmi_mac[1],
- 		    wmi_mac[2], wmi_mac[3], wmi_mac[4], wmi_mac[5]);
- 		if (wmi_ready) {
+-		w_peer_param(PEER_PARAM_AUTHORIZE, 1);
+-		s_ptk_set = true;
+-		bzero(gtk, sizeof(gtk));
+-		LOG("t=%u ms: *** WPA2 keys installed (group key %s, idx %u) ***", g_ms, gtk_len ? "yes" : "NO", gtk_idx);
+-		w_join_end(0);
+-		return;
++		break;
++	case WMI_EV_READY:
++		for (uint32_t o = 4; o + 4 <= len;) {
++			uint16_t l, tag;
++			memcpy(&l, d + o, 2);
++			memcpy(&tag, d + o + 2, 2);
++			if (o + 4 + l > len) {
++				break;
++			}
++			if (tag == TAG_READY_EVENT && l >= 24 + 8 + 4) {
++				memcpy(wmi_mac, d + o + 4 + 24, 6);
++				wmi_ready = true;
++			}
++			o += 4 + l;
++		}
++		LOG("t=%u ms: *** WMI READY (fw MAC %02x:%02x:%02x:%02x:%02x:%02x) ***", g_ms, wmi_mac[0], wmi_mac[1],
++		    wmi_mac[2], wmi_mac[3], wmi_mac[4], wmi_mac[5]);
++		if (wmi_ready) {
 +			w_socwake_req(2, "at WMI READY");   /* fix106: the WAL (CSS_SM) exists now */
 +			if (volcano && w_arg("wifihwm", 0xff) != 0xff) {
 +				bool hm = w_set_hw_mode(w_arg("wifihwm", 0xff));
@@ -7423,13 +9578,15 @@ index 8aa0c2f..653173c 100644
 +					LOG("t=%u ms: fix122 set hw mode %u %s", g_ms, w_arg("wifihwm", 0xff), hm ? "sent" : "FAIL");
 +				}
 +			}
- 			htt_start();                        /* the host rx ring first, then the scan */
- 		}
- 		break;
-@@ -5899,6 +8925,23 @@ wmi_rx(const uint8_t *d, uint32_t len)
- 	case WMI_EV_MGMT_RX:
- 		scan_mgmt_rx(d + 4, len - 4);
- 		break;
++			htt_start();                        /* the host rx ring first, then the scan */
++		}
++		break;
++	case WMI_EV_SCAN:
++		scan_event(d + 4, len - 4);
++		break;
++	case WMI_EV_MGMT_RX:
++		scan_mgmt_rx(d + 4, len - 4);
++		break;
 +	case 0x4010:                                /* fix122: PDEV_SET_HW_MODE_RESP */
 +	case 0x4011: {                              /* fix122: PDEV_HW_MODE_TRANSITION */
 +		uint32_t w[6] = {};
@@ -7447,13 +9604,18 @@ index 8aa0c2f..653173c 100644
 +	case 0x4002:                                /* fix128: CHAN_INFO */
 +		p128_event(id, d + 4, len - 4);
 +		break;
- 	case 0x5001:                                /* VDEV_START_RESP */
- 	case 0x6001:                                /* PEER_STA_KICKOUT */
- 		w_join_event(id, d + 4, len - 4);
-@@ -5908,6 +8951,164 @@ wmi_rx(const uint8_t *d, uint32_t len)
++	case 0x5001:                                /* VDEV_START_RESP */
++	case 0x6001:                                /* PEER_STA_KICKOUT */
++		w_join_event(id, d + 4, len - 4);
++		break;
++	default:
++		break;
  	}
  }
  
+-/* ---- the join, step by step from the modem thread */
+-static void
+-w_teardown(void)
 +/* fix68: local-only autojoin. ADT /chosen "wifi-auto" = ssid prefix NUL passphrase NUL (mkpayload --wifi,
 + * never in git). Case-insensitive prefix match, strongest first, another AP after a failure. */
 +static char w_auto_pre[33];
@@ -7463,7 +9625,15 @@ index 8aa0c2f..653173c 100644
 +
 +static uint8_t
 +w_lc(uint8_t c)
-+{
+ {
+-	if (s_state >= S_START) {
+-		if (s_state >= S_4WAY) {
+-			w_vdev_simple(CMD_VDEV_DOWN, TAG_VDEV_DOWN);
+-		}
+-		if (s_state >= S_AUTH) {
+-			w_peer(CMD_PEER_DELETE, TAG_PEER_DELETE, false);
+-		}
+-		w_vdev_simple(CMD_VDEV_STOP, TAG_VDEV_STOP);
 +	return (c >= 'A' && c <= 'Z') ? (uint8_t)(c + 32) : c;
 +}
 +
@@ -7477,7 +9647,9 @@ index 8aa0c2f..653173c 100644
 +	    SecureDTGetProperty(chosen, "wifi-auto", &val, &size) != kSuccess || val == NULL || size < 4) {
 +		LOG("wifi-auto: none");
 +		return;
-+	}
+ 	}
+-	if (s_state == S_UP) {
+-		w_link(false);
 +	const uint8_t *d = (const uint8_t *)val;
 +	uint32_t i = 0;
 +	while (i < size && d[i] != 0) {
@@ -7503,31 +9675,47 @@ index 8aa0c2f..653173c 100644
 +	w_auto_loaded = true;
 +	for (int r = 0; r < 2; r++) {
 +		LOG("wifi-auto: network prefix '%s', passphrase of %u chars", w_auto_pre, k);
-+	}
-+}
-+
+ 	}
+-	s_state = S_IDLE;
+-	s_ptk_set = false;
+ }
+ 
 +/* fix96: PMK derivation off the poll thread */
 +static volatile uint32_t w_pmk_state;           /* 0 none, 1 running, 2 done */
 +static volatile bool w_pmk_crypto_ok;
 +static uint8_t w_pmk_ssid[32], w_pmk_ssid_len, w_pmk_out[32];
 +
-+static void
+ static void
+-w_join_end(int result)
 +w_pmk_thread(void *arg __unused, wait_result_t wr __unused)
-+{
+ {
+-	if (result != 0) {
+-		LOG("t=%u ms: join: failed (%d) in state %u", g_ms, result, s_state);
+-		w_teardown();
+-	} else {
+-		s_state = S_UP;
+-		LOG("t=%u ms: *** joined %.*s ***", g_ms, (int)s_ssid_len, s_ssid);
+-		w_link(true);
 +	static bool tested;
 +	if (!tested) {
 +		tested = true;
 +		w_pmk_crypto_ok = w_crypto_selftest();
-+	}
+ 	}
+-	bzero(s_pmk, sizeof(s_pmk));
+-	s_result = result;
+-	s_join_done++;
 +	w_pbkdf2_pmk(w_auto_psk, w_auto_psk_len, w_pmk_ssid, w_pmk_ssid_len, w_pmk_out);
 +	mb();
 +	w_pmk_state = 2;
 +	mb();
-+}
-+
-+static void
+ }
+ 
+ static void
+-w_join_begin(void)
 +w_auto_poll(void)
-+{
+ {
+-	/* the AP: the strongest one heard with that name (or the BSSID asked for) */
+-	int best = -1;
 +	if (!w_auto_loaded || scans < 1 || scanning || s_state != S_IDLE || s_join_asked || g_ms < w_auto_next_ms) {
 +		return;
 +	}
@@ -7535,7 +9723,9 @@ index 8aa0c2f..653173c 100644
 +		return;
 +	}
 +	int best = -1, best_last = -1;
-+	for (uint32_t i = 0; i < nbss; i++) {
+ 	for (uint32_t i = 0; i < nbss; i++) {
+-		if (bss[i].raw_ssid_len == s_ssid_len && memcmp(bss[i].raw_ssid, s_ssid, s_ssid_len) == 0 &&
+-		    (best < 0 || bss[i].rssi > bss[best].rssi)) {
 +		if (bss[i].raw_ssid_len < w_auto_pre_len) {
 +			continue;
 +		}
@@ -7551,28 +9741,57 @@ index 8aa0c2f..653173c 100644
 +			continue;
 +		}
 +		if (best < 0 || bss[i].rssi > bss[best].rssi) {
-+			best = (int)i;
-+		}
-+	}
+ 			best = (int)i;
+ 		}
+ 	}
+-	bool want_bssid = false;
+-	for (int i = 0; i < 6; i++) {
+-		want_bssid |= s_bssid[i] != 0;
 +	if (best < 0) {
 +		best = best_last;
-+	}
+ 	}
+-	if (want_bssid) {
+-		for (uint32_t i = 0; i < nbss; i++) {
+-			if (memcmp(bss[i].bssid, s_bssid, 6) == 0) {
+-				best = (int)i;
+-			}
 +	if (best < 0) {
 +		w_auto_miss++;
 +		w_auto_next_ms = g_ms + 12000;
 +		if (next_scan_ms == 0) {
 +			next_scan_ms = g_ms + 500;
-+		}
+ 		}
 +		LOG("t=%u ms: wifi-auto: '%s' not heard (%u nets, miss %u)", g_ms, w_auto_pre, nbss, w_auto_miss);
 +		return;
-+	}
+ 	}
+-	if (best < 0) {
+-		LOG("join: no such network heard");
+-		w_join_end(ENOENT);
 +	/* fix96: selftest + PBKDF2 (2 x 4096 HMAC-SHA1) took ~2 s on the poll thread; rings went
 +	 * unserviced and the fw asserted (DmaLeak / monitor policy) or the SoC reset. Run it on its
 +	 * own kernel thread and keep polling meanwhile. */
 +	uint8_t blen = (uint8_t)bss[best].raw_ssid_len;
 +	if (w_pmk_state == 1) {
-+		return;
-+	}
+ 		return;
+ 	}
+-	memcpy(s_bssid, bss[best].bssid, 6);
+-	s_freq = bss[best].freq;
+-	s_body_len = bss[best].ie_len;
+-	memcpy(s_body, bss[best].ie, s_body_len);
+-	const uint8_t *rsn = w_find_ie(s_body, s_body_len, 48);
+-	s_rsn = rsn != NULL;
+-	s_group_cipher = (rsn != NULL && rsn[1] >= 8) ? rsn[2 + 2 + 3] : 4;
+-	static const uint8_t hdr[4] = { 48, 20, 1, 0 };
+-	memcpy(s_rsn_ie, hdr, 4);
+-	uint8_t *q = s_rsn_ie + 4;
+-	*q++ = 0x00; *q++ = 0x0F; *q++ = 0xAC; *q++ = s_group_cipher;
+-	*q++ = 1; *q++ = 0; *q++ = 0x00; *q++ = 0x0F; *q++ = 0xAC; *q++ = 4;   /* pairwise CCMP */
+-	*q++ = 1; *q++ = 0; *q++ = 0x00; *q++ = 0x0F; *q++ = 0xAC; *q++ = 2;   /* AKM PSK */
+-	*q++ = 0; *q++ = 0;
+-	uint32_t bcn = bss[best].bintval ? bss[best].bintval : 100, dtim = 1;
+-	const uint8_t *tim = w_find_ie(s_body, s_body_len, 5);
+-	if (tim != NULL && tim[1] >= 2 && tim[3] != 0) {
+-		dtim = tim[3];
 +	if (w_pmk_state == 0 || w_pmk_ssid_len != blen || memcmp(w_pmk_ssid, bss[best].raw_ssid, blen) != 0) {
 +		w_pmk_ssid_len = blen;
 +		memcpy(w_pmk_ssid, bss[best].raw_ssid, blen);
@@ -7586,7 +9805,14 @@ index 8aa0c2f..653173c 100644
 +			w_pmk_thread(NULL, 0);
 +		}
 +		return;
-+	}
+ 	}
+-	s_msg1s = 0;
+-	s_start_resp = false;
+-	LOG("t=%u ms: join: %.*s %02x:%02x:%02x:**:**:** %u MHz %s", g_ms, (int)s_ssid_len, s_ssid, s_bssid[0], s_bssid[1],
+-	    s_bssid[2], s_freq, s_rsn ? "WPA2" : "open");
+-	w_ps_off();
+-	if (!w_vdev_start(s_freq, bcn, dtim)) {
+-		w_join_end(EIO);
 +	static bool told;
 +	if (!told) {
 +		told = true;
@@ -7596,8 +9822,10 @@ index 8aa0c2f..653173c 100644
 +	}
 +	if (!w_pmk_crypto_ok) {
 +		w_auto_tries = 4;
-+		return;
-+	}
+ 		return;
+ 	}
+-	s_state = S_START;
+-	s_deadline = g_ms + 1500;
 +	w_auto_tries++;
 +	memcpy(w_auto_last, bss[best].bssid, 6);
 +	s_ssid_len = blen;
@@ -7610,15 +9838,19 @@ index 8aa0c2f..653173c 100644
 +	}
 +	s_join_asked = true;
 +	w_auto_next_ms = g_ms + 30000;
-+}
-+
- /* from the watch loop */
+ }
+ 
++/* from the watch loop */
  static void
- radio_poll(unsigned ms)
-@@ -5917,6 +9118,17 @@ radio_poll(unsigned ms)
- 		w_cap_retry_ms = 0;
- 		w_simple(WLFW_CAP, "cap sent again");
- 	}
+-w_assoc_mgmt_rx(const uint8_t *f, uint32_t len)
++radio_poll(unsigned ms)
+ {
+-	if (len < 26 || s_state == S_IDLE || memcmp(f + 10, s_bssid, 6) != 0) {
++	(void)ms;
++	if (w_cap_retry_ms != 0 && g_ms >= w_cap_retry_ms) {
++		w_cap_retry_ms = 0;
++		w_simple(WLFW_CAP, "cap sent again");
++	}
 +	if (w_mac_wait_ms != 0 && g_ms >= w_mac_wait_ms) {
 +		w_mac_wait_ms = 0;
 +		LOG("t=%u ms: wlfw: no mac_addr response, wlan_cfg anyway", g_ms);
@@ -7630,41 +9862,185 @@ index 8aa0c2f..653173c 100644
 +		LOG("t=%u ms: wlfw: no FW_READY 40 s after calibration (%s), wlan_cfg anyway", g_ms, w_cal_done ? "CAL_DONE seen" : "no CAL_DONE");
 +		w_v_cfg();
 +	}
- 	if (!ce_up) {
++	if (!ce_up) {
  		return;
  	}
-@@ -5934,6 +9146,7 @@ radio_poll(unsigned ms)
- 	}
- 	if (api_ready) {
- 		w_join_poll();
+-	uint8_t fc = f[0];
+-	uint16_t v = (uint16_t)(f[24] | f[25] << 8);
+-	if (fc == FC_AUTH && s_state == S_AUTH && len >= 30 && f[26] == 2) {
+-		v = (uint16_t)(f[28] | f[29] << 8);
+-		LOG("t=%u ms: join: auth reply status %u", g_ms, v);
+-		if (v != 0) {
+-			w_join_end(ECONNREFUSED);
+-			return;
+-		}
+-		s_state = S_ASSOC;
+-		s_tries = 1;
+-		w_build_assoc_req();
+-		w_mgmt_tx(s_assoc_req, s_assoc_req_len);
+-		s_deadline = g_ms + 400;
+-	} else if (fc == FC_ASSOC_RESP && s_state == S_ASSOC && len >= 30) {
+-		v = (uint16_t)(f[26] | f[27] << 8);
+-		s_aid = (uint32_t)(f[28] | f[29] << 8) & 0x3FFF;
+-		LOG("t=%u ms: join: assoc reply status %u aid %u", g_ms, v, s_aid);
+-		if (v != 0) {
+-			w_join_end(ECONNREFUSED);
+-			return;
++	(void)ce_poll();
++	htt_poll();
++	if (scan_started && !api_ready) {
++		if (etxq_lock == NULL) {
++			etxq_lock = IOSimpleLockAlloc();
+ 		}
+-		w_peer_assoc((uint32_t)(f[24] | f[25] << 8));
+-		uint8_t m[20], *p = wmi_put_tlv(m, TAG_VDEV_UP, 16);
+-		p = w_p32(p, 0);
+-		p = w_p32(p, s_aid);
+-		w_pmac(p, s_bssid);
+-		wmi_send(CMD_VDEV_UP, m, sizeof(m));
+-		if (!s_rsn) {
+-			w_peer_param(PEER_PARAM_AUTHORIZE, 1);
+-			s_state = S_4WAY;                   /* (teardown order) */
+-			w_join_end(0);
+-		} else {
+-			s_state = S_4WAY;
+-			s_deadline = g_ms + 8000;
+-			LOG("t=%u ms: join: associated, waiting for the 4-way handshake", g_ms);
++		api_ready = true;
++		LOG("t=%u ms: wlan: radio ready for the rest of the kernel", g_ms);
++		if (topaz_wlan_ready_hook != NULL) {
++			topaz_wlan_ready_hook();
+ 		}
+-	} else if (fc == FC_DEAUTH || fc == FC_DISASSOC) {
+-		LOG("t=%u ms: join: the AP ended the link, reason %u (state %u)", g_ms, v, s_state);
+-		if (s_state == S_UP) {
+-			w_teardown();
+-		} else {
+-			w_join_end(s_state == S_4WAY ? EAUTH : ECONNREFUSED);
++	}
++	if (api_ready) {
++		w_join_poll();
 +		w_auto_poll();
- 		w_tx_pump();
- 	}
- 	if (scan_started && !scanning && api_scan_asked && (s_state == S_IDLE || s_state == S_UP)) {
-@@ -5944,7 +9157,7 @@ radio_poll(unsigned ms)
- 			api_scans_done++;
++		w_tx_pump();
++	}
++	if (scan_started && !scanning && api_scan_asked && (s_state == S_IDLE || s_state == S_UP)) {
++		api_scan_asked = false;
++		next_scan_ms = 0;
++		scanning = scan_send_start();
++		if (!scanning) {
++			api_scans_done++;
  		}
  	}
--	if (scan_started && !scanning && next_scan_ms != 0 && g_ms >= next_scan_ms) {
 +	if (scan_started && !scanning && next_scan_ms != 0 && g_ms >= next_scan_ms && s_state == S_IDLE && !s_join_asked) {
- 		next_scan_ms = 0;
- 		scanning = scan_send_start();
- 		LOG("t=%u ms: scan: passive scan %u %s", g_ms, scans + 1, scanning ? "requested" : "FAILED");
-@@ -6003,6 +9216,9 @@ static void
- svc_summary(void)
++		next_scan_ms = 0;
++		scanning = scan_send_start();
++		LOG("t=%u ms: scan: passive scan %u %s", g_ms, scans + 1, scanning ? "requested" : "FAILED");
++	}
+ }
+ 
+ static void
+-w_join_event(uint32_t id, const uint8_t *t, uint32_t len)
++svc_announce(void)
  {
- 	LOG("WLFW: %s%s", w_step, w_fw_ready ? " (firmware ready)" : "");
+-	uint16_t l = 0;
+-	uint32_t v[4] = {};
+-	if (len >= 4) {
+-		memcpy(&l, t, 2);
++	static const uint32_t svc[][3] = {
++		{ 0x40, 0x101, PORT_PDM },              /* servreg-locator, version 0x101 instance 0 */
++		{ 4096, 1,     PORT_TFTP },             /* tftp */
++		{ 14,   1,     PORT_RMTFS },            /* rmtfs */
++	};
++	for (unsigned i = 0; i < 3; i++) {
++		struct qrtr_ctrl c = { QRTR_TYPE_NEW_SERVER, svc[i][0], svc[i][1], QRTR_NODE_APPS, svc[i][2] };
++		qrtr_send(QRTR_TYPE_NEW_SERVER, QRTR_PORT_CTRL, q_modem_node, QRTR_PORT_CTRL, &c, sizeof(c));
+ 	}
+-	if (len < 4u + l) {
+-		return;
++	LOG("t=%u ms: announced pd-mapper 0x40, tftp 0x1000, rmtfs 0x0e", g_ms);
++}
++
++static bool
++svc_rx(uint32_t src_node, uint32_t src_port, uint32_t dst_port, const uint8_t *data, uint32_t len)
++{
++	if (dst_port == PORT_TFTP) {
++		if (len >= 2 && (data[1] == OP_RRQ || data[1] == OP_WRQ)) {
++			tftp_request(src_node, src_port, data, len);
++		}
++		return true;
+ 	}
+-	memcpy(v, t + 4, MIN((uint32_t)l, (uint32_t)sizeof(v)));
+-	if (id == 0x5001 && l >= 16) {             /* VDEV_START_RESP {vdev, req, type, status} */
+-		s_start_status = (int32_t)v[3];
+-		s_start_resp = true;
+-	} else if (id == 0x6001 && s_state == S_UP) {   /* PEER_STA_KICKOUT */
+-		LOG("t=%u ms: join: peer kickout", g_ms);
+-		w_teardown();
++	if (dst_port == PORT_WLFWC) {
++		wlfw_rx(data, len);
++		return true;
++	}
++	if (dst_port >= PORT_SESS && dst_port < PORT_SESS + 0x10000) {
++		return tftp_session(dst_port, data, len);
++	}
++	if (len < 7 || data[0] != QMI_REQ) {
++		return false;
++	}
++	uint16_t txn, msg;
++	memcpy(&txn, data + 1, 2);
++	memcpy(&msg, data + 3, 2);
++	if (dst_port == PORT_PDM) {
++		pdm_rx(src_node, src_port, txn, msg, data, len);
++		return true;
++	}
++	if (dst_port == PORT_RMTFS) {
++		rmtfs_rx(src_node, src_port, txn, msg, data, len);
++		return true;
+ 	}
++	return false;
+ }
+ 
+-/* every pass of the modem loop */
+ static void
+-w_join_poll(void)
++svc_summary(void)
+ {
+-	if (s_leave_asked) {
+-		s_leave_asked = false;
+-		w_teardown();
++	LOG("WLFW: %s%s", w_step, w_fw_ready ? " (firmware ready)" : "");
 +	if (volcano && ce_up) {
 +		vce_status();
-+	}
- 	LOG("services: pd-mapper %u reqs; tftp %u reqs (%u missing, %u writes); rmtfs reads %u writes %u (not kept) errors %u",
- 	    pd_reqs, tftp_reqs, tftp_missing, tftp_writes, rmtfs_reads, rmtfs_writes, rmtfs_err);
- }
-@@ -6024,11 +9240,23 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
- 		LOG("cannot create SMP2P item %u", ITEM_SMP2P_OUT);
+ 	}
+-	if (s_join_asked && !scanning) {
+-		s_join_asked = false;
+-		w_teardown();
+-		w_join_begin();
++	LOG("services: pd-mapper %u reqs; tftp %u reqs (%u missing, %u writes); rmtfs reads %u writes %u (not kept) errors %u",
++	    pd_reqs, tftp_reqs, tftp_missing, tftp_writes, rmtfs_reads, rmtfs_writes, rmtfs_err);
++}
++
++/*
++ * After auth_and_reset: watch the modem's "slave-kernel" entry (bit0 fatal, bit1 ready,
++ * bit2 handover) and answer its IPA power query ("valid, AP IPA power off"): unanswered,
++ * modem_cfg starves and the modem watchdog fires once data services come up.
++ */
++static void
++modem_watch(struct smem_part_hdr *part, unsigned seconds)
++{
++	struct smp2p_hdr *in = NULL, *out = smp2p_create_out(part);
++	volatile uint32_t *sk = NULL, *ipa_in = NULL, *ipa_out = NULL;
++	uint32_t sk_last = ~0u, ipa_last = ~0u;
++	bool ready = false;
++
++	if (out == NULL) {
++		LOG("cannot create SMP2P item %u", ITEM_SMP2P_OUT);
  		return;
  	}
--	ipa_out = smp2p_add_out(out, "ipa", 0);
+-	if (s_state == S_START) {
+-		if (s_start_resp) {
+-			if (s_start_status != 0) {
+-				w_join_end(EIO);
 +	if (volcano) {
 +		(void)smp2p_add_out(out, "master-kernel", 0);   /* q6v5 "stop" state */
 +		/* fix90: icnss2 entries; a held soc-wake vote keeps the WLAN SoC out of light sleep */
@@ -7677,18 +10053,38 @@ index 8aa0c2f..653173c 100644
 +	} else {
 +		ipa_out = smp2p_add_out(out, "ipa", 0);
 +	}
- 	bool glink = false;
- 	for (unsigned ms = 0; seconds == 0 || ms < seconds * 1000; ms++) {
- 		if (ready && !glink) {
- 			glink = glink_start(part);
++	bool glink = false;
++	for (unsigned ms = 0; seconds == 0 || ms < seconds * 1000; ms++) {
++		if (ready && !glink) {
++			glink = glink_start(part);
 +
- 			if (!glink) {
- 				ready = false;  /* no retry */
- 			}
-@@ -6056,6 +9284,24 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
- 		if (in != NULL && ipa_in == NULL) {
- 			ipa_in = smp2p_find(in, "ipa");
- 		}
++			if (!glink) {
++				ready = false;  /* no retry */
++			}
++		}
++		if (glink) {
++			glink_poll(part, ms);
++			radio_poll(ms);
++		}
++		if (glink && (ms == 3000 || ms == 20000)) {
++			glink_summary();                /* early, before the iOS UI covers the console */
++		}
++		if (in == NULL) {
++			uint32_t sz = 0;
++			in = (struct smp2p_hdr *)smem_get(part, ITEM_SMP2P_IN, &sz);
++			if (in != NULL && in->magic != SMP2P_MAGIC) {
++				in = NULL;
++			}
++			if (in != NULL) {
++				LOG("t=%u ms: modem SMP2P item %u up (v%u, %u entries)", ms, ITEM_SMP2P_IN, in->version, in->valid);
++			}
++		}
++		if (in != NULL && sk == NULL) {
++			sk = smp2p_find(in, "slave-kernel");
++		}
++		if (in != NULL && ipa_in == NULL) {
++			ipa_in = smp2p_find(in, "ipa");
++		}
 +		{
 +			static volatile uint32_t *sw_in, *wl_in;
 +			static uint32_t sw_last = ~0u, wl_last = ~0u;
@@ -7707,25 +10103,25 @@ index 8aa0c2f..653173c 100644
 +				LOG("t=%u ms: smp2p in wlan = %08x", ms, wl_last);
 +			}
 +		}
- 		if (sk != NULL && *sk != sk_last) {
- 			sk_last = *sk;
- 			LOG("t=%u ms: slave-kernel %08x%s%s%s", ms, sk_last, (sk_last & 1) ? " FATAL" : "",
-@@ -6064,17 +9310,52 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
- 				ready = true;
- 				LOG("modem is up (MODEM READY)");
- 			}
--			if (sk_last & 1) {
++		if (sk != NULL && *sk != sk_last) {
++			sk_last = *sk;
++			LOG("t=%u ms: slave-kernel %08x%s%s%s", ms, sk_last, (sk_last & 1) ? " FATAL" : "",
++			    (sk_last & 2) ? " READY" : "", (sk_last & 4) ? " HANDOVER" : "");
++			if ((sk_last & 2) && !ready) {
++				ready = true;
++				LOG("modem is up (MODEM READY)");
++			}
 +			if ((sk_last & 1) || (ready && (sk_last & ~6u))) { /* fix78: also bit8 (wdog?) */
- 				uint32_t sz = 0;
- 				const char *why = (const char *)smem_get(smem_partition(SMEM_GLOBAL_HOST, SMEM_GLOBAL_HOST), ITEM_MSS_CRASH, &sz);
- 				char buf[128] = {};
- 				if (why != NULL) {
- 					memcpy(buf, why, MIN(sz, (uint32_t)sizeof(buf) - 1));
- 				}
++				uint32_t sz = 0;
++				const char *why = (const char *)smem_get(smem_partition(SMEM_GLOBAL_HOST, SMEM_GLOBAL_HOST), ITEM_MSS_CRASH, &sz);
++				char buf[128] = {};
++				if (why != NULL) {
++					memcpy(buf, why, MIN(sz, (uint32_t)sizeof(buf) - 1));
++				}
 +				for (int k = 0; k < 24; k++) {  /* fix109: ramoops decays 1->0, the PC ORs the copies */
 +					LOG("@@R@@%-120.120s@@E@@", why != NULL ? buf : "(none)");
 +				}
- 				LOG("modem crash reason: %s", why != NULL ? buf : "(none)");
++				LOG("modem crash reason: %s", why != NULL ? buf : "(none)");
 +				if (g_smmu_s != NULL) {         /* fix110: did the WLAN stream fault? */
 +					for (int k = 0; k < 24; k++) {
 +						LOG("@@S@@ gfsr %08x gfar %08x%08x syn %08x %08x | fsr %08x far %08x%08x fsyn %08x %08x@@E@@",
@@ -7748,9 +10144,9 @@ index 8aa0c2f..653173c 100644
 +					m131_log();
 +				}
 +				es_dump(16);
- 				if (glink) {
- 					glink_summary();
- 				}
++				if (glink) {
++					glink_summary();
++				}
 +				{
 +					/* fix77: fast test cycle - warm reset (keeps ramoops) right after a fw crash */
 +					uint32_t fr = 1;
@@ -7763,22 +10159,92 @@ index 8aa0c2f..653173c 100644
 +				}
  				return;
  			}
+-			s_state = S_AUTH;
+-			s_tries = 1;
+-			w_peer(CMD_PEER_CREATE, TAG_PEER_CREATE, true);
+-			w_send_auth();
+-			s_deadline = g_ms + 400;
+-		} else if (g_ms > s_deadline) {
+-			w_join_end(ETIMEDOUT);
  		}
-@@ -6093,6 +9374,103 @@ modem_watch(struct smem_part_hdr *part, unsigned seconds)
- 	if (glink) {
- 		glink_summary();
+-	} else if ((s_state == S_AUTH || s_state == S_ASSOC) && g_ms > s_deadline) {
+-		if (s_tries >= 4) {
+-			w_join_end(ETIMEDOUT);
+-		} else {
+-			s_tries++;
+-			if (s_state == S_AUTH) {
+-				w_send_auth();
+-			} else {
+-				w_mgmt_tx(s_assoc_req, s_assoc_req_len);
++		if (ipa_in != NULL && ipa_out != NULL && *ipa_in != ipa_last) {
++			uint32_t v = *ipa_in;
++			if ((v & 1) && !(ipa_last != ~0u && (ipa_last & 1))) {
++				*ipa_out = 1;                   /* answer valid, AP IPA power off */
++				smp2p_kick();
++				LOG("t=%u ms: answered IPA power query (%08x)", ms, v);
+ 			}
+-			s_deadline = g_ms + 400;
++			ipa_last = v;
+ 		}
+-	} else if (s_state == S_4WAY && g_ms > s_deadline) {
+-		LOG("t=%u ms: join: no 4-way handshake (%u message 1s)", g_ms, s_msg1s);
+-		w_join_end(s_msg1s != 0 ? EAUTH : ETIMEDOUT);
+-	}
+-}
+-
+-/* a received data frame (native wifi, from the HTT rx ring) */
+-static void
+-w_rx_native(const uint8_t *f, uint32_t len)
+-{
+-	uint8_t e[14 + 1600];
+-	if (len < 24 + 8 || (f[0] & 0x0C) != 0x08) {
+-		return;                                 /* data frames only */
+-	}
+-	uint32_t hl = ((f[1] & 3) == 3) ? 30 : 24;
+-	const uint8_t *da = f + 4, *sa = (f[1] & 2) ? f + 16 : f + 10;   /* from DS: addr3 is the source */
+-	const uint8_t *llc = f + hl;
+-	if (len < hl + 8 || llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03) {
+-		return;
+-	}
+-	uint32_t plen = len - hl - 8;
+-	if (plen > 1600 - 0) {
+-		return;
++		IOSleep(1);
  	}
+-	memcpy(e, da, 6);
+-	memcpy(e + 6, sa, 6);
+-	memcpy(e + 12, llc + 6, 2);
+-	memcpy(e + 14, llc + 8, plen);
+-	if (e[12] == 0x88 && e[13] == 0x8E) {
+-		w_eapol_rx(e, 14 + plen);
+-		return;
++	LOG("watch done: slave-kernel %08x, %s", sk_last, ready ? "READY" : "NOT ready");
++	if (glink) {
++		glink_summary();
+ 	}
+-	if (s_state == S_UP && topaz_wlan_rx_hook != NULL) {
+-		rx_up++;
+-		topaz_wlan_rx_hook(e, 14 + plen);
 +	uint32_t wr = 0;                            /* fix82: watchreset=1 ends a timed test run */
 +	PE_parse_boot_argn("watchreset", &wr, sizeof(wr));
 +	if (wr && seconds) {
 +		LOG("watch over, warm reset");
 +		IOSleep(1000);
 +		volcano_psci_reset(1);
-+	}
-+}
-+
+ 	}
+ }
+ 
+-/* ---- the C API */
+-extern "C" {
+-int topaz_wlan_join(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pass, unsigned pass_len);
+-int topaz_wlan_join_pmk(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t pmk[32]);
+-int topaz_wlan_leave(void);
+-bool topaz_wlan_joined(void);
+-bool topaz_wlan_transmit(const uint8_t *frame, size_t length);
+-}
 +/* ---------------------------------------------------------------- AOP QMP (volcano) */
-+
+ 
+-static int w_join_with(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pmk);
 +#define QMP_MAGIC           0x4d41494cu
 +#define QMP_UP              0x0000ffffu
 +#define QMP_UCORE_LINK      0x0c
@@ -7791,7 +10257,10 @@ index 8aa0c2f..653173c 100644
 +#define QMP_MCORE_CH_ACK    0x30
 +#define QMP_MCORE_SIZE      0x34
 +#define QMP_MCORE_OFF       0x38
-+
+ 
+-/* Blocks until joined or failed (EAUTH: wrong passphrase; ENOENT: not heard; ETIMEDOUT). */
+-int
+-topaz_wlan_join(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pass, unsigned pass_len)
 +static volatile uint8_t *qmp;
 +
 +static inline uint32_t qr(uint32_t o) { return *(volatile uint32_t *)(qmp + o); }
@@ -7799,23 +10268,46 @@ index 8aa0c2f..653173c 100644
 +
 +static bool
 +qmp_wait(uint32_t o, uint32_t want)
-+{
+ {
+-	static bool tested, crypto_ok;
+-	if (!api_ready || ssid_len == 0 || ssid_len > 32) {
+-		return api_ready ? EINVAL : ENXIO;
+-	}
+-	if (!tested) {
+-		tested = true;
+-		crypto_ok = w_crypto_selftest();
+-	}
+-	if (pass_len != 0 && (!crypto_ok || pass_len < 8 || pass_len > 63)) {
+-		return crypto_ok ? EINVAL : EIO;
+-	}
+-	uint8_t pmk[32] = {};
+-	if (pass_len != 0) {
+-		w_pbkdf2_pmk(pass, pass_len, ssid, ssid_len, pmk);
 +	for (int i = 0; i < 1000; i++) {
 +		if (qr(o) == want) {
 +			return true;
 +		}
 +		IOSleep(1);
-+	}
+ 	}
+-	int r = w_join_with(ssid, ssid_len, bssid, pass_len != 0 ? pmk : NULL);
+-	bzero(pmk, sizeof(pmk));
+-	return r;
 +	return false;
-+}
-+
+ }
+ 
+-/* the same with the PMK already made of the passphrase (what wifid hands over) */
+-int
+-topaz_wlan_join_pmk(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t pmk[32])
 +static bool
 +qmp_open(void)
-+{
+ {
+-	if (!api_ready || ssid_len == 0 || ssid_len > 32) {
+-		return api_ready ? EINVAL : ENXIO;
 +	static bool open;
 +	if (open) {
 +		return true;
-+	}
+ 	}
+-	return w_join_with(ssid, ssid_len, bssid, pmk);
 +	if (qmp == NULL) {
 +		qmp = (volatile uint8_t *)ml_io_map(QMP_PA, 0x1000);
 +	}
@@ -7838,40 +10330,68 @@ index 8aa0c2f..653173c 100644
 +	LOG("qmp: link ack %u, ucore channel %u, channel ack %u", a, b, c);
 +	open = a && b && c;
 +	return open;
-+}
-+
+ }
+ 
+-static int
+-w_join_with(const uint8_t *ssid, unsigned ssid_len, const uint8_t *bssid, const uint8_t *pmk)
 +static bool
 +qmp_send(const char *msg)
-+{
+ {
+-	while (s_state != S_IDLE && s_state != S_UP && s_join_asked) {
+-		IOSleep(50);
 +	if (!qmp_open()) {
 +		return false;
-+	}
+ 	}
+-	memcpy(s_ssid, ssid, ssid_len);
+-	s_ssid_len = (uint8_t)ssid_len;
+-	if (bssid != NULL) {
+-		memcpy(s_bssid, bssid, 6);
+-	} else {
+-		bzero(s_bssid, 6);
 +	uint32_t off = qr(QMP_MCORE_OFF), size = qr(QMP_MCORE_SIZE), len = (uint32_t)strlen(msg) + 1;
 +	uint32_t padded = (len + 3) & ~3u;
 +	if (size < 8 || padded > size - 4 || off + size > 0x1000) {
 +		LOG("qmp: message too long (%u, mbox %u)", len, size);
 +		return false;
-+	}
+ 	}
+-	if (pmk != NULL) {
+-		memcpy(s_pmk, pmk, 32);
+-	} else {
+-		bzero(s_pmk, 32);
 +	for (uint32_t i = 0; i < padded; i += 4) {
 +		uint32_t w = 0;
 +		memcpy(&w, msg + i, MIN(4u, len > i ? len - i : 0));
 +		qw(off + 4 + i, w);
-+	}
+ 	}
+-	uint32_t before = s_join_done;
+-	s_join_asked = true;
+-	for (int i = 0; i < 300 && s_join_done == before; i++) {   /* 30 s */
+-		IOSleep(100);
 +	qw(off, padded);
 +	doorbell(QMP_IRQ_BIT);
 +	bool done = qmp_wait(off, 0);
 +	LOG("qmp: \"%s\": %s", msg, done ? "taken" : "TIMEOUT");
 +	if (!done) {
 +		qw(off, 0);
-+	}
+ 	}
+-	return s_join_done != before ? s_result : ETIMEDOUT;
 +	return done;
  }
  
- /* ---------------------------------------------------------------- PAS boot */
-@@ -6103,6 +9481,711 @@ loadable(const struct elf32_phdr *p)
- 	return p->p_type == PT_LOAD && p->p_memsz != 0 && (p->p_flags & MDT_TYPE_MASK) != MDT_TYPE_HASH;
+-int
+-topaz_wlan_leave(void)
++/* ---------------------------------------------------------------- PAS boot */
++
++static bool
++loadable(const struct elf32_phdr *p)
+ {
+-	s_leave_asked = true;
+-	return 0;
++	return p->p_type == PT_LOAD && p->p_memsz != 0 && (p->p_flags & MDT_TYPE_MASK) != MDT_TYPE_HASH;
  }
  
+-bool
+-topaz_wlan_joined(void)
 +#define SPMI_CORE_PA        0x0c400000u
 +#define SPMI_CNFG_PA        0x0c42d000u
 +#define SPMI_OBS_PA         0x0c440000u
@@ -7883,22 +10403,41 @@ index 8aa0c2f..653173c 100644
 +
 +static uint32_t
 +sp_r32(volatile uint8_t *b, uint32_t o)
-+{
+ {
+-	return s_state == S_UP;
 +	uint32_t v = *(volatile uint32_t *)(b + o);
 +	__asm__ volatile ("dmb oshld" ::: "memory");
 +	return v;
-+}
-+
+ }
+ 
+-/* frames from the network stack wait here for the modem thread */
+-#define ETXQ 32
+-static struct { uint16_t len; uint8_t d[1514]; } etxq[ETXQ];
+-static volatile uint32_t etxq_head, etxq_tail;
+-static IOSimpleLock *etxq_lock;
+-
+-bool
+-topaz_wlan_transmit(const uint8_t *frame, size_t length)
 +static bool
 +sp_wait(volatile uint8_t *b, uint32_t o, uint32_t *st)
-+{
+ {
+-	if (s_state != S_UP || length < 14 || length > 1514 || etxq_lock == NULL) {
+-		return false;
 +	for (int i = 0; i < 1000; i++) {
 +		*st = sp_r32(b, o + 0x08);
 +		if (*st & 1) {
 +			return (*st & 0x0e) == 0;
 +		}
 +		IODelay(1);
-+	}
+ 	}
+-	bool ok = false;
+-	IOSimpleLockLock(etxq_lock);
+-	if (etxq_tail - etxq_head < ETXQ) {
+-		uint32_t i = etxq_tail % ETXQ;
+-		etxq[i].len = (uint16_t)length;
+-		memcpy(etxq[i].d, frame, length);
+-		etxq_tail++;
+-		ok = true;
 +	return false;
 +}
 +
@@ -7913,7 +10452,8 @@ index 8aa0c2f..653173c 100644
 +	if (!sp_wait(sp_obs_page, sp_obs_off, &st)) {
 +		LOG("spmi: read %02x failed, status %x", a, st);
 +		return -1;
-+	}
+ 	}
+-	IOSimpleLockUnlock(etxq_lock);
 +	return (int)(sp_r32(sp_obs_page, sp_obs_off + 0x18) & 0xFF);
 +}
 +
@@ -7927,12 +10467,13 @@ index 8aa0c2f..653173c 100644
 +	*(volatile uint32_t *)(sp_chnl + 0x00) = (0u << 27) | ((uint32_t)a << 4);
 +	__asm__ volatile ("dsb osh" ::: "memory");
 +	bool ok = sp_wait(sp_chnl, 0, &st);
-+	if (!ok) {
+ 	if (!ok) {
+-		tx_drop++;
 +		LOG("spmi: write %02x=%02x failed, status %x", a, v, st);
-+	}
-+	return ok;
-+}
-+
+ 	}
+ 	return ok;
+ }
+ 
 +/* fix140: Android (Wi-Fi on) PMIC snapshot, regmap debugfs bus 0: regs 0x08, 0x40..0x4f of LDO/SMPS/CLK/GPIO */
 +static const struct { uint16_t ppid; uint8_t ty, st; uint32_t mask; uint8_t v[17]; } pm_andr[] = {
 +	{ 0x50, 0x06, 0x04, 0x1ffff, { 0xeb, 0x00, 0x06, 0x01, 0x01, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x30, 0x01, 0x00, 0x01 } },
@@ -8077,9 +10618,23 @@ index 8aa0c2f..653173c 100644
 +/* fix140: full PMIC diff against the Android (Wi-Fi on) snapshot pm_andr: every LDO/SMPS/CLK/GPIO peripheral on
 + * SPMI bus 0, regs 0x08 + 0x40..0x4f read through the observer channel of its APID. Logs only the differences:
 + * "fix140 pmd <when> <ppid> t<type>/<sub>: <reg>=<ios>/<android> ...". Boot-arg wifipmd=0 turns it off. */
-+static void
+ static void
+-w_tx_pump(void)
 +w_pmdiff(const char *when)
-+{
+ {
+-	static uint8_t one[1514];
+-	for (int n = 0; n < 16 && etxq_head != etxq_tail; n++) {
+-		uint16_t len;
+-		IOSimpleLockLock(etxq_lock);
+-		uint32_t i = etxq_head % ETXQ;
+-		len = etxq[i].len;
+-		memcpy(one, etxq[i].d, len);
+-		IOSimpleLockUnlock(etxq_lock);
+-		if (s_state != S_UP || !w_tx_ether(one, len, false)) {
+-			if (s_state != S_UP) {
+-				IOSimpleLockLock(etxq_lock);
+-				etxq_head = etxq_tail;          /* not joined: drop them */
+-				IOSimpleLockUnlock(etxq_lock);
 +	static volatile uint8_t *core, *obs;
 +	static uint16_t apid_of[0x800];
 +	static bool inited;
@@ -8105,9 +10660,13 @@ index 8aa0c2f..653173c 100644
 +			uint32_t ppid = (m >> 8) & 0xFFF;
 +			if (m != 0 && ppid < 0x800 && apid_of[ppid] == 0xFFFF) {
 +				apid_of[ppid] = (uint16_t)i;
-+			}
-+		}
-+	}
+ 			}
+-			break;
+ 		}
+-		IOSimpleLockLock(etxq_lock);
+-		etxq_head++;
+-		IOSimpleLockUnlock(etxq_lock);
+ 	}
 +	if (core == NULL) {
 +		return;
 +	}
@@ -8156,22 +10715,172 @@ index 8aa0c2f..653173c 100644
 +	}
 +}
 +
++
++/* fix143: PMIC GPIOs that differ from Android (fix140 pmd), set before the WPSS boot:
++ *  - PMK8550 GPIO5 (ppid 0x0bc): Android DT hog "function func1" = the 32 kHz SLEEP_CLK output to the WCN6750
++ *    (regs 40=01 out, 41=00 vin0, 42=05, 44=02 func1, 45=01, 46=80). Under iOS it is a disabled input -> the WCN
++ *    runs with no sleep clock. wifipmg bit2.
++ *  - PMXR2230 (SID 1) GPIO1/GPIO2 (ppid 0x188/0x189): digital outputs on both OSes, Android drives them HIGH
++ *    (44=80), iOS LOW. wifipmg bit0/bit1.
++ * Default wifipmg=7. Only written when the APPS own the APID. */
++static bool
++w_pm_chan(volatile uint8_t *core, volatile uint8_t *cnfg, uint32_t count, uint16_t ppid, uint32_t *apid_out, uint32_t *owner_out)
++{
++	uint32_t apid = 0xFFFF, owner = 7;
++	for (uint32_t i = 0; i < count; i++) {
++		uint32_t e = sp_r32(core, 0x2000 + 4 * i);
++		if (e != 0 && ((e >> 8) & 0xFFF) == ppid) {
++			uint32_t o = sp_r32(cnfg, 4 * i) & 7;
++			if (apid == 0xFFFF || o == 0) {
++				apid = i;
++				owner = o;
++			}
++		}
++	}
++	*apid_out = apid;
++	*owner_out = owner;
++	if (apid == 0xFFFF) {
++		return false;
++	}
++	sp_obs_off = (0x20 * apid) & 0xFFF;
++	sp_obs_page = (volatile uint8_t *)ml_io_map(SPMI_OBS_PA + ((0x20 * apid) & ~0xFFFu), 0x1000);
++	sp_chnl = (volatile uint8_t *)ml_io_map(SPMI_CHNLS_PA + 0x1000 * apid, 0x1000);
++	return sp_obs_page != NULL && sp_chnl != NULL;
+ }
+ 
+ static void
+-wmi_rx(const uint8_t *d, uint32_t len)
++w_pmgpio(const char *when)
+ {
+-	uint32_t id;
+-	if (len < 4) {
++	uint32_t m = w_arg("wifipmg", 7);
++	if (m == 0) {
+ 		return;
+ 	}
+-	memcpy(&id, d, 4);
+-	id &= 0xFFFFFF;
+-	switch (id) {
+-	case WMI_EV_SERVICE_AVAILABLE: {
+-		uint16_t tag;
+-		memcpy(&tag, d + 6, 2);
+-		if (len >= 12 + sizeof(wmi_svc_ext) && tag == TAG_SERVICE_AVAILABLE) {
+-			memcpy(wmi_svc_ext, d + 12, sizeof(wmi_svc_ext));
+-		}
+-		break;
++	volatile uint8_t *core = (volatile uint8_t *)ml_io_map(SPMI_CORE_PA, 0x3000);
++	volatile uint8_t *cnfg = (volatile uint8_t *)ml_io_map(SPMI_CNFG_PA, 0x1000);
++	if (core == NULL || cnfg == NULL) {
++		LOG("fix143 pmg: map failed");
++		return;
+ 	}
+-	case WMI_EV_SERVICE_READY:
+-		LOG("t=%u ms: wmi: SERVICE_READY, %u bytes", g_ms, len);
+-		wmi_svc_ready(d + 4, len - 4);
+-		if (!wmi_init_sent) {
+-			wmi_send_init();
++	volatile uint8_t *save_page = sp_obs_page, *save_chnl = sp_chnl;
++	uint32_t save_off = sp_obs_off;
++	uint32_t count = sp_r32(core, 4) & 0x7FF;
++	if (count > 1024) {
++		count = 1024;
++	}
++	static const uint16_t ppids[3] = { 0x188, 0x189, 0x0bc };
++	static const char *names[3] = { "pmxr gpio1", "pmxr gpio2", "pmk gpio5 sleep_clk" };
++	for (int g = 0; g < 3; g++) {
++		if (!(m & (1u << g))) {
++			continue;
+ 		}
+-		break;
+-	case WMI_EV_READY:
+-		for (uint32_t o = 4; o + 4 <= len;) {
+-			uint16_t l, tag;
+-			memcpy(&l, d + o, 2);
+-			memcpy(&tag, d + o + 2, 2);
+-			if (o + 4 + l > len) {
+-				break;
+-			}
+-			if (tag == TAG_READY_EVENT && l >= 24 + 8 + 4) {
+-				memcpy(wmi_mac, d + o + 4 + 24, 6);
+-				wmi_ready = true;
++		uint32_t apid, owner;
++		if (!w_pm_chan(core, cnfg, count, ppids[g], &apid, &owner)) {
++			LOG("fix143 pmg %s %s: no apid / map failed", when, names[g]);
++			continue;
++		}
++		int ty = sp_read(0x04), md = sp_read(0x40), src = sp_read(0x44), en = sp_read(0x46), pl = sp_read(0x42);
++		bool ok = false, wrote = false;
++		if (ty == 0x10 && owner == 0) {
++			if (g < 2) {
++				if (md == 1 && (en & 0x80) && !(src & 0x80)) {
++					ok = sp_write(0x44, (uint8_t)(src | 0x80));
++					wrote = true;
++				}
++			} else if (!(md == 1 && (src & 0x0f) == 2 && (en & 0x80))) {
++				/* pinctrl-spmi-gpio pmic_gpio_config_set order, values from the Android dump */
++				ok = sp_write(0x41, 0x00) && sp_write(0x42, 0x05) && sp_write(0x45, 0x01) &&
++				    sp_write(0x40, 0x01) && sp_write(0x44, 0x02) && sp_write(0x46, 0x80);
++				wrote = true;
+ 			}
+-			o += 4 + l;
+ 		}
+-		LOG("t=%u ms: *** WMI READY (fw MAC %02x:%02x:%02x:%02x:%02x:%02x) ***", g_ms, wmi_mac[0], wmi_mac[1],
+-		    wmi_mac[2], wmi_mac[3], wmi_mac[4], wmi_mac[5]);
+-		if (wmi_ready) {
+-			htt_start();                        /* the host rx ring first, then the scan */
++		int md2 = sp_read(0x40), src2 = sp_read(0x44), en2 = sp_read(0x46), st = sp_read(0x08);
++		for (int k = 0; k < 3; k++) {
++			LOG("fix143 pmg %s %s apid %u owner %u: type %x mode %x->%x pull %x src %x->%x en %x->%x st %x %s", when,
++			    names[g], apid, owner, ty & 0xff, md & 0xff, md2 & 0xff, pl & 0xff, src & 0xff, src2 & 0xff,
++			    en & 0xff, en2 & 0xff, st & 0xff, wrote ? (ok ? "WRITTEN" : "WRITE FAILED") : "untouched");
+ 		}
+-		break;
+-	case WMI_EV_SCAN:
+-		scan_event(d + 4, len - 4);
+-		break;
+-	case WMI_EV_MGMT_RX:
+-		scan_mgmt_rx(d + 4, len - 4);
+-		break;
+-	case 0x5001:                                /* VDEV_START_RESP */
+-	case 0x6001:                                /* PEER_STA_KICKOUT */
+-		w_join_event(id, d + 4, len - 4);
+-		break;
+-	default:
+-		break;
+ 	}
++	sp_obs_page = save_page;
++	sp_obs_off = save_off;
++	sp_chnl = save_chnl;
+ }
+ 
+-/* from the watch loop */
 +static volatile uint8_t *sp131_page[3];
 +static int g_m131[3][3][6];
 +static bool g_m131v[3];
 +static uint32_t sp131_off[3];
 +static const uint16_t sp131_ppid[3] = { 0x19b, 0x19e, 0x1a1 };
 +
-+static void
+ static void
+-radio_poll(unsigned ms)
 +w_smps_dump(const char *why)
-+{
+ {
+-	(void)ms;
+-	if (w_cap_retry_ms != 0 && g_ms >= w_cap_retry_ms) {
+-		w_cap_retry_ms = 0;
+-		w_simple(WLFW_CAP, "cap sent again");
 +	if (w_arg("wifismps", 1) == 0) {
 +		return;
-+	}
+ 	}
+-	if (!ce_up) {
 +	volatile uint8_t *core = (volatile uint8_t *)ml_io_map(SPMI_CORE_PA, 0x3000);
 +	if (core == NULL) {
-+		return;
-+	}
+ 		return;
+ 	}
+-	(void)ce_poll();
+-	htt_poll();
+-	if (scan_started && !api_ready) {
+-		if (etxq_lock == NULL) {
+-			etxq_lock = IOSimpleLockAlloc();
 +	uint32_t count = sp_r32(core, 4) & 0x7FF;
 +	if (count == 0 || count > 1024) {
 +		return;
@@ -8192,44 +10901,92 @@ index 8aa0c2f..653173c 100644
 +					break;
 +				}
 +			}
-+		}
+ 		}
+-		api_ready = true;
+-		LOG("t=%u ms: wlan: radio ready for the rest of the kernel", g_ms);
+-		if (topaz_wlan_ready_hook != NULL) {
+-			topaz_wlan_ready_hook();
 +		if (sp131_page[j] == NULL) {
 +			continue;
-+		}
+ 		}
+-	}
+-	if (api_ready) {
+-		w_join_poll();
+-		w_tx_pump();
+-	}
+-	if (scan_started && !scanning && api_scan_asked && (s_state == S_IDLE || s_state == S_UP)) {
+-		api_scan_asked = false;
+-		next_scan_ms = 0;
+-		scanning = scan_send_start();
+-		if (!scanning) {
+-			api_scans_done++;
 +		sp_obs_page = sp131_page[j];
 +		sp_obs_off = sp131_off[j];
 +		static const uint8_t regs[6] = { 0x04, 0x08, 0x40, 0x41, 0x45, 0x46 };
 +		for (int q = 0; q < 6; q++) {
 +			r[j][q] = sp_read(regs[q]);
-+		}
-+	}
+ 		}
+ 	}
+-	if (scan_started && !scanning && next_scan_ms != 0 && g_ms >= next_scan_ms) {
+-		next_scan_ms = 0;
+-		scanning = scan_send_start();
+-		LOG("t=%u ms: scan: passive scan %u %s", g_ms, scans + 1, scanning ? "requested" : "FAILED");
 +	sp_obs_page = sp;
 +	sp_obs_off = so;
 +	{
 +		int w = why[0] == 'b' && why[1] == 'o' ? 0 : (why[0] == 'a' ? 1 : 2);
 +		memcpy(g_m131[w], r, sizeof(r));
 +		g_m131v[w] = true;
-+	}
+ 	}
+-}
+-
+-static void
+-svc_announce(void)
+-{
+-	static const uint32_t svc[][3] = {
+-		{ 0x40, 0x101, PORT_PDM },              /* servreg-locator, version 0x101 instance 0 */
+-		{ 4096, 1,     PORT_TFTP },             /* tftp */
+-		{ 14,   1,     PORT_RMTFS },            /* rmtfs */
+-	};
+-	for (unsigned i = 0; i < 3; i++) {
+-		struct qrtr_ctrl c = { QRTR_TYPE_NEW_SERVER, svc[i][0], svc[i][1], QRTR_NODE_APPS, svc[i][2] };
+-		qrtr_send(QRTR_TYPE_NEW_SERVER, QRTR_PORT_CTRL, q_modem_node, QRTR_PORT_CTRL, &c, sizeof(c));
 +	for (int k = 0; k < 2; k++) {
 +		LOG("t=%u ms: fix131 smps (%s): S1 ty %x st %x %u mV mode %x en %x | S2 ty %x st %x %u mV mode %x en %x | S3 ty %x st %x %u mV mode %x en %x",
 +		    g_ms, why, r[0][0], r[0][1], (r[0][3] << 8) | r[0][2], r[0][4], r[0][5], r[1][0], r[1][1], (r[1][3] << 8) | r[1][2],
 +		    r[1][4], r[1][5], r[2][0], r[2][1], (r[2][3] << 8) | r[2][2], r[2][4], r[2][5]);
-+	}
-+}
-+
+ 	}
+-	LOG("t=%u ms: announced pd-mapper 0x40, tftp 0x1000, rmtfs 0x0e", g_ms);
+ }
+ 
+-static bool
+-svc_rx(uint32_t src_node, uint32_t src_port, uint32_t dst_port, const uint8_t *data, uint32_t len)
 +static void
 +w_rpmh_vote(void)
-+{
+ {
+-	if (dst_port == PORT_TFTP) {
+-		if (len >= 2 && (data[1] == OP_RRQ || data[1] == OP_WRQ)) {
+-			tftp_request(src_node, src_port, data, len);
+-		}
+-		return true;
+-	}
+-	if (dst_port == PORT_WLFWC) {
+-		wlfw_rx(data, len);
+-		return true;
 +	uint32_t mode = w_arg("wifirpmh", 1);
 +	if (mode == 0) {
 +		LOG("fix132 rpmh: off");
 +		return;
-+	}
+ 	}
+-	if (dst_port >= PORT_SESS && dst_port < PORT_SESS + 0x10000) {
+-		return tftp_session(dst_port, data, len);
 +	volatile uint8_t *drv = (volatile uint8_t *)ml_io_map(0x17a20000u, 0x10000);
 +	if (drv == NULL) {
 +		LOG("fix132 rpmh: map failed");
 +		return;
-+	}
+ 	}
+-	if (len < 7 || data[0] != QMI_REQ) {
+-		return false;
 +	uint32_t id = *(volatile uint32_t *)drv;
 +	uint32_t maj = (id >> 16) & 0xff;
 +	bool v3 = maj >= 3;
@@ -8268,7 +11025,13 @@ index 8aa0c2f..653173c 100644
 +			a[n] = res[j] + 8; d[n++] = 7;
 +		}
 +		a[n] = res[j] + 4; d[n++] = 1;
-+	}
+ 	}
+-	uint16_t txn, msg;
+-	memcpy(&txn, data + 1, 2);
+-	memcpy(&msg, data + 3, 2);
+-	if (dst_port == PORT_PDM) {
+-		pdm_rx(src_node, src_port, txn, msg, data, len);
+-		return true;
 +	bool ok = false;
 +	uint32_t cst[14] = {}, waited = 0;
 +	if (st0 != 0) {                             /* nonzero = idle */
@@ -8317,19 +11080,27 @@ index 8aa0c2f..653173c 100644
 +		R32(t0, r_en) = 0;
 +		R32(tb, 8) = 1;
 +		__asm__ volatile ("dsb sy" ::: "memory");
-+	}
+ 	}
+-	if (dst_port == PORT_RMTFS) {
+-		rmtfs_rx(src_node, src_port, txn, msg, data, len);
+-		return true;
 +#undef R32
 +	for (int k = 0; k < 2; k++) {
 +		LOG("t=%u ms: fix132 rpmh id %x tcs0 st %x en %x ctl %x irqen %x: %u cmds %s after %u polls, cst %x %x %x %x %x %x %x %x %x",
 +		    g_ms, id, st0, en0, ctl0, irqen, n, st0 == 0 ? "TCS BUSY, skipped" : (ok ? "done" : "TIMEOUT"), waited,
 +		    cst[0], cst[1], cst[2], cst[3], cst[4], cst[5], cst[6], cst[7], cst[8]);
-+	}
+ 	}
+-	return false;
 +	IODelay(1000);
-+}
-+
-+static void
+ }
+ 
+ static void
+-svc_summary(void)
 +m131_log(void)
-+{
+ {
+-	LOG("WLFW: %s%s", w_step, w_fw_ready ? " (firmware ready)" : "");
+-	LOG("services: pd-mapper %u reqs; tftp %u reqs (%u missing, %u writes); rmtfs reads %u writes %u (not kept) errors %u",
+-	    pd_reqs, tftp_reqs, tftp_missing, tftp_writes, rmtfs_reads, rmtfs_writes, rmtfs_err);
 +	for (int w = 0; w < 3; w++) {
 +		if (!g_m131v[w]) {
 +			continue;
@@ -8339,8 +11110,13 @@ index 8aa0c2f..653173c 100644
 +		    r[0][0], r[0][1], r[0][2], r[0][3], r[0][4], r[0][5], r[1][0], r[1][1], r[1][2], r[1][3], r[1][4], r[1][5],
 +		    r[2][0], r[2][1], r[2][2], r[2][3], r[2][4], r[2][5]);
 +	}
-+}
-+
+ }
+ 
+-/*
+- * After auth_and_reset: watch the modem's "slave-kernel" entry (bit0 fatal, bit1 ready,
+- * bit2 handover) and answer its IPA power query ("valid, AP IPA power off"): unanswered,
+- * modem_cfg starves and the modem watchdog fires once data services come up.
+- */
 +/* fix139: TLMM eGPIO ownership of pins 130..166 (CFG bit 11 EGPIO_PRESENT, bit 12 EGPIO_ENABLE = APPS owns).
 + * Android (Wi-Fi working) shows 132-137, 139, 144-161, 163-166 as "egpio" = bit 12 clear (owned by a
 + * subsystem, so the WPSS fw can drive the RF front-end lines itself). No Android DT node sets this.
@@ -8348,20 +11124,53 @@ index 8aa0c2f..653173c 100644
 + * Android list before the WPSS boot; wifiegpio=0 only logs. */
 +static volatile uint32_t *s_egp;
 +
-+static void
+ static void
+-modem_watch(struct smem_part_hdr *part, unsigned seconds)
 +w_egpio(const char *when, unsigned give)
-+{
+ {
+-	struct smp2p_hdr *in = NULL, *out = smp2p_create_out(part);
+-	volatile uint32_t *sk = NULL, *ipa_in = NULL, *ipa_out = NULL;
+-	uint32_t sk_last = ~0u, ipa_last = ~0u;
+-	bool ready = false;
+-
+-	if (out == NULL) {
+-		LOG("cannot create SMP2P item %u", ITEM_SMP2P_OUT);
+-		return;
+-	}
+-	ipa_out = smp2p_add_out(out, "ipa", 0);
+-	bool glink = false;
+-	for (unsigned ms = 0; seconds == 0 || ms < seconds * 1000; ms++) {
+-		if (ready && !glink) {
+-			glink = glink_start(part);
+-			if (!glink) {
+-				ready = false;  /* no retry */
+-			}
+-		}
+-		if (glink) {
+-			glink_poll(part, ms);
+-			radio_poll(ms);
 +	static const uint8_t andr[] = { 132, 133, 134, 135, 136, 137, 139, 144, 145, 146, 147, 148, 149, 150, 151, 152,
 +		                        153, 154, 155, 156, 157, 158, 159, 160, 161, 163, 164, 165, 166 };
 +	if (s_egp == NULL) {
 +		if (give == 0xffffffffu) {
 +			return;
-+		}
+ 		}
+-		if (glink && (ms == 3000 || ms == 20000)) {
+-			glink_summary();                /* early, before the iOS UI covers the console */
 +		s_egp = (volatile uint32_t *)ml_io_map(0x0f100000ull + 0x1000ull * 130, 0x1000ull * 37);
 +		if (s_egp == NULL) {
 +			LOG("fix139 egpio map failed");
 +			return;
-+		}
+ 		}
+-		if (in == NULL) {
+-			uint32_t sz = 0;
+-			in = (struct smp2p_hdr *)smem_get(part, ITEM_SMP2P_IN, &sz);
+-			if (in != NULL && in->magic != SMP2P_MAGIC) {
+-				in = NULL;
+-			}
+-			if (in != NULL) {
+-				LOG("t=%u ms: modem SMP2P item %u up (v%u, %u entries)", ms, ITEM_SMP2P_IN, in->version, in->valid);
+-			}
 +	}
 +	char s[40];
 +	unsigned changed = 0;
@@ -8369,12 +11178,16 @@ index 8aa0c2f..653173c 100644
 +		for (unsigned p = 130; p <= 166; p++) {
 +			uint32_t c = s_egp[(p - 130) * 0x400];
 +			s[p - 130] = (c & (1u << 11)) ? ((c & (1u << 12)) ? 'A' : 'E') : '-';
-+		}
+ 		}
+-		if (in != NULL && sk == NULL) {
+-			sk = smp2p_find(in, "slave-kernel");
 +		s[37] = 0;
 +		LOG("fix139 egpio %s%s: 130 %s", when, k ? " after" : "", s);
 +		if (k || give == 0xffffffffu || give == 0) {
 +			break;
-+		}
+ 		}
+-		if (in != NULL && ipa_in == NULL) {
+-			ipa_in = smp2p_find(in, "ipa");
 +		for (unsigned i = 0; i < sizeof(andr); i++) {
 +			volatile uint32_t *g = &s_egp[(andr[i] - 130) * 0x400];
 +			uint32_t c = *g;
@@ -8382,7 +11195,14 @@ index 8aa0c2f..653173c 100644
 +				*g = c & ~(1u << 12);
 +				changed++;
 +			}
-+		}
+ 		}
+-		if (sk != NULL && *sk != sk_last) {
+-			sk_last = *sk;
+-			LOG("t=%u ms: slave-kernel %08x%s%s%s", ms, sk_last, (sk_last & 1) ? " FATAL" : "",
+-			    (sk_last & 2) ? " READY" : "", (sk_last & 4) ? " HANDOVER" : "");
+-			if ((sk_last & 2) && !ready) {
+-				ready = true;
+-				LOG("modem is up (MODEM READY)");
 +		__asm__ volatile ("dsb sy" ::: "memory");
 +		LOG("fix139 egpio %s: handed %u pins to the subsystem", when, changed);
 +	}
@@ -8403,12 +11223,29 @@ index 8aa0c2f..653173c 100644
 +		if (s_tlmm[i] == NULL) {
 +			if (drive >= 0xfffffffeu) {
 +				return;                     /* read-only call before the boot mapped them */
-+			}
+ 			}
+-			if (sk_last & 1) {
+-				uint32_t sz = 0;
+-				const char *why = (const char *)smem_get(smem_partition(SMEM_GLOBAL_HOST, SMEM_GLOBAL_HOST), ITEM_MSS_CRASH, &sz);
+-				char buf[128] = {};
+-				if (why != NULL) {
+-					memcpy(buf, why, MIN(sz, (uint32_t)sizeof(buf) - 1));
+-				}
+-				LOG("modem crash reason: %s", why != NULL ? buf : "(none)");
+-				if (glink) {
+-					glink_summary();
+-				}
 +			s_tlmm[i] = (volatile uint32_t *)ml_io_map(0x0f100000ull + 0x1000ull * pins[i], 0x1000);
 +			if (s_tlmm[i] == NULL) {
-+				return;
-+			}
-+		}
+ 				return;
+ 			}
+ 		}
+-		if (ipa_in != NULL && ipa_out != NULL && *ipa_in != ipa_last) {
+-			uint32_t v = *ipa_in;
+-			if ((v & 1) && !(ipa_last != ~0u && (ipa_last & 1))) {
+-				*ipa_out = 1;                   /* answer valid, AP IPA power off */
+-				smp2p_kick();
+-				LOG("t=%u ms: answered IPA power query (%08x)", ms, v);
 +		volatile uint32_t *g = s_tlmm[i];
 +		if (drive == 0xfffffffeu) {
 +			/* fix139b: the WPSS fw itself sets WL_EN to out 10 mA (Android cfg) but LOW by FW_READY;
@@ -8420,28 +11257,35 @@ index 8aa0c2f..653173c 100644
 +				__asm__ volatile ("dsb sy" ::: "memory");
 +				IODelay(10000);
 +				LOG("fix139b gpio %s: wl_en44 was cfg %x io %x, forced high", when, v[i][0], v[i][1]);
-+			}
+ 			}
+-			ipa_last = v;
 +		} else if (drive != 0xffffffffu && (((drive & 1) && pins[i] == 53) || ((drive & 2) && pins[i] == 44))) {
 +			g[1] = 2;                           /* out high first, then OE (func 0, 2 mA, no pull) */
 +			__asm__ volatile ("dsb sy" ::: "memory");
 +			g[0] = (1u << 9);
 +			__asm__ volatile ("dsb sy" ::: "memory");
 +			IODelay(pins[i] == 44 ? 10000 : 1000);
-+		}
+ 		}
+-		IOSleep(1);
 +		v[i][0] = g[0];
 +		v[i][1] = g[1];
-+	}
+ 	}
+-	LOG("watch done: slave-kernel %08x, %s", sk_last, ready ? "READY" : "NOT ready");
+-	if (glink) {
+-		glink_summary();
 +	for (int k = 0; k < 2; k++) {
 +		LOG("fix138 gpio %s: wl_en44 cfg %x io %x | sw_ctrl45 cfg %x io %x | bt_en53 cfg %x io %x", when,
 +		    v[0][0], v[0][1], v[1][0], v[1][1], v[2][0], v[2][1]);
-+	}
-+}
-+
+ 	}
+ }
+ 
+-/* ---------------------------------------------------------------- PAS boot */
 +static void
 +w_ipa_rail(void)
 +{
 +	w_smps_dump("boot");
 +	w_rpmh_vote();
++	w_pmgpio("boot");                         /* fix143 */
 +	w_smps_dump("after rpmh");
 +	unsigned mode = w_arg("wifiipa", 1);
 +	if (mode == 0) {
@@ -8512,13 +11356,16 @@ index 8aa0c2f..653173c 100644
 +			ok ? "written" : "FAILED", md, src, oc, en);
 +	}
 +}
-+
+ 
+-static bool
+-loadable(const struct elf32_phdr *p)
 +/* fix109: PMK8550 PON PS_HOLD reset type = WARM_RESET, so the DDR stays in self-refresh and ramoops survives */
 +#define PON_PPID            0x013u              /* PMK8550 SID 0, PON_HLOS 0x13xx */
 +
 +static void
 +w_pon_warm(const char *why)
-+{
+ {
+-	return p->p_type == PT_LOAD && p->p_memsz != 0 && (p->p_flags & MDT_TYPE_MASK) != MDT_TYPE_HASH;
 +	unsigned mode = w_arg("warmrst", 1);
 +	if (mode == 0) {
 +		return;
@@ -8575,12 +11422,10 @@ index 8aa0c2f..653173c 100644
 +	sp_obs_page = so;
 +	sp_chnl = sc;
 +	sp_obs_off = soff;
-+}
-+
+ }
+ 
  static bool
- modem_boot(void)
- {
-@@ -6112,8 +10195,8 @@ modem_boot(void)
+@@ -6112,8 +10286,8 @@ modem_boot(void)
  	uint32_t min_a = ~0u, max_a = 0, hash = ~0u;
  	bool relocate = false, ok = false;
  
@@ -8591,7 +11436,7 @@ index 8aa0c2f..653173c 100644
  	if (part == NULL) {
  		return false;
  	}
-@@ -6121,24 +10204,35 @@ modem_boot(void)
+@@ -6121,24 +10295,35 @@ modem_boot(void)
  		LOG("modem SMP2P item %u already exists: modem is not cold, not touching it", ITEM_SMP2P_IN);
  		return false;
  	}
@@ -8631,7 +11476,7 @@ index 8aa0c2f..653173c 100644
  			goto out;
  		}
  		struct elf32_phdr *ph = (struct elf32_phdr *)(mdt + eh->e_phoff);
-@@ -6156,8 +10250,8 @@ modem_boot(void)
+@@ -6156,8 +10341,8 @@ modem_boot(void)
  			max_a = MAX(max_a, ph[i].p_paddr + ph[i].p_memsz);
  		}
  		LOG("phdrs=%u hash=%u region %08x..%08x relocate=%u", eh->e_phnum, hash, min_a, max_a, relocate);
@@ -8642,7 +11487,7 @@ index 8aa0c2f..653173c 100644
  			goto out;
  		}
  
-@@ -6175,7 +10269,7 @@ modem_boot(void)
+@@ -6175,7 +10360,7 @@ modem_boot(void)
  		} else {
  			/* split firmware: the hash segment is its own .bNN file (qcom_mdt_read_metadata) */
  			char hname[16];
@@ -8651,7 +11496,7 @@ index 8aa0c2f..653173c 100644
  			int64_t got = fw_read(hname, meta + hdr, ph[hash].p_filesz);
  			LOG("hash from %s: %lld of %u bytes", hname, got, ph[hash].p_filesz);
  			if (got != (int64_t)ph[hash].p_filesz) {
-@@ -6214,7 +10308,7 @@ modem_boot(void)
+@@ -6214,7 +10399,7 @@ modem_boot(void)
  			uint8_t *dst = (uint8_t *)m->getVirtualAddress() + off;
  			int64_t got = 0;
  			if (ph[i].p_filesz != 0) {
@@ -8660,7 +11505,7 @@ index 8aa0c2f..653173c 100644
  				got = fw_read(name, dst, ph[i].p_filesz);
  				if (got != (int64_t)ph[i].p_filesz) {
  					LOG("%s: %lld of %u bytes", name, got, ph[i].p_filesz);
-@@ -6277,14 +10371,19 @@ topaz_soc_map(void)
+@@ -6277,14 +10462,19 @@ topaz_soc_map(void)
  	uint8_t probe[16];
  	int err = EAGAIN;
  	for (int i = 0; i < 120 && err == EAGAIN; i++) {
@@ -8682,7 +11527,7 @@ index 8aa0c2f..653173c 100644
  	tcsr_mutex = (volatile uint8_t *)ml_io_map(TCSR_MUTEX_PA, 0x4000);
  	if (err != 0) {
  		LOG("partition %s: %d", fw_part, err);
-@@ -6374,12 +10473,19 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -6374,12 +10564,19 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
  		return;
  	}
  	LOG("SMEM version %u", *(volatile uint32_t *)(smem + 64 + 7 * 4) >> 16);
@@ -8704,7 +11549,7 @@ index 8aa0c2f..653173c 100644
  	}
  	/* keep the mappings: the modem uses SMEM from now on */
  	thread_terminate(current_thread());
-@@ -6387,6 +10493,69 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -6387,6 +10584,69 @@ topaz_modem_thread(void *arg __unused, wait_result_t wr __unused)
  
  extern "C" void topaz_sta_init(void);
  
@@ -8774,7 +11619,7 @@ index 8aa0c2f..653173c 100644
  extern "C" void
  topaz_modem_init(void)
  {
-@@ -6394,11 +10563,33 @@ topaz_modem_init(void)
+@@ -6394,11 +10654,33 @@ topaz_modem_init(void)
  	uint32_t on = 0;
  	thread_t thread;
  
@@ -8810,7 +11655,7 @@ index 8aa0c2f..653173c 100644
  	if (kernel_thread_start(topaz_modem_thread, NULL, &thread) == KERN_SUCCESS) {
  		thread_deallocate(thread);
  	}
-@@ -6406,4 +10597,5 @@ topaz_modem_init(void)
+@@ -6406,4 +10688,5 @@ topaz_modem_init(void)
  
  #else
  extern "C" void topaz_modem_init(void) {}
