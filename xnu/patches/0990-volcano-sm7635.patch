@@ -3341,7 +3341,7 @@ index 1d3ee17..190991c 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
-index 8aa0c2f..2a69848 100644
+index 8aa0c2f..06823e4 100644
 --- a/iokit/Kernel/arm/TopazModem.cpp
 +++ b/iokit/Kernel/arm/TopazModem.cpp
 @@ -20,15 +20,17 @@
@@ -8110,7 +8110,7 @@ index 8aa0c2f..2a69848 100644
 +	}
 +}
 +
-+/* fix137: TLMM (volcano base 0x500000, 0x1000 per pin: +0 CFG, +4 IN_OUT). Android: gpio44 WL_EN out high,
++/* fix137b: TLMM (volcano base 0x0f100000 as in sweet_keys gpio71, 0x1000 per pin: +0 CFG, +4 IN_OUT). Android: gpio44 WL_EN out high,
 + * gpio53 BT_EN out high, gpio45 SW_CTRL in. iOS never drives BT_EN, so the BT half of the WCN6750 may sit in
 + * reset and the coex arbiter may never grant WLAN tx (every tx hangs -> 1862). wifibten: 0 log only,
 + * 1 (default) drive BT_EN high before the WPSS boots. */
@@ -8120,7 +8120,7 @@ index 8aa0c2f..2a69848 100644
 +	static const uint32_t pins[3] = { 44, 45, 53 };
 +	uint32_t v[3][2];
 +	for (int i = 0; i < 3; i++) {
-+		volatile uint32_t *g = (volatile uint32_t *)ml_io_map(0x500000ull + 0x1000ull * pins[i], 0x1000);
++		volatile uint32_t *g = (volatile uint32_t *)ml_io_map(0x0f100000ull + 0x1000ull * pins[i], 0x1000);
 +		if (g == NULL) {
 +			return;
 +		}
@@ -8135,7 +8135,7 @@ index 8aa0c2f..2a69848 100644
 +		v[i][1] = g[1];
 +	}
 +	for (int k = 0; k < 2; k++) {
-+		LOG("fix137 gpio %s: wl_en44 cfg %x io %x | sw_ctrl45 cfg %x io %x | bt_en53 cfg %x io %x", when,
++		LOG("fix137b gpio %s: wl_en44 cfg %x io %x | sw_ctrl45 cfg %x io %x | bt_en53 cfg %x io %x", when,
 +		    v[0][0], v[0][1], v[1][0], v[1][1], v[2][0], v[2][1]);
 +	}
 +}
