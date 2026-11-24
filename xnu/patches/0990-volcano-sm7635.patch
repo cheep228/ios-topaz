@@ -3666,7 +3666,7 @@ index 1d3ee17..cdfd674 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazAudio.cpp b/iokit/Kernel/arm/TopazAudio.cpp
-index 6bfe1a2..6f52386 100644
+index 6bfe1a2..cea3ddc 100644
 --- a/iokit/Kernel/arm/TopazAudio.cpp
 +++ b/iokit/Kernel/arm/TopazAudio.cpp
 @@ -33,11 +33,29 @@ extern "C" uint64_t topaz_scm(uint32_t fn, uint64_t arginfo, uint64_t a, uint64_
@@ -3972,29 +3972,26 @@ index 6bfe1a2..6f52386 100644
  	if ((st & 3) != 2) {
  		LOG("ADSP did not report READY (slave-kernel %08x)", st);
  		crash_reason();
-@@ -1916,13 +2006,17 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -1916,13 +2006,15 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
  		goto out;
  	}
  	glink_register(QCHAN, qrtr_rx);
 -	glink_register(GCHAN, gpr_rx);
-+	if (!volc) {
-+		glink_register(GCHAN, gpr_rx);
-+	}
++	glink_register(GCHAN, gpr_rx);	/* fix149c: volcano too (APM/SPF state) */
  	for (;;) {
  		bool busy = glink_poll();
  		qrtr_poll();
--		gpr_poll();
+ 		gpr_poll();
 -		stream_poll();
 -		if (spf_state == 1 && !codec_tried) {
 +		if (!volc) {
-+			gpr_poll();
 +			stream_poll();
 +		}
 +		if (!volc && spf_state == 1 && !codec_tried) {
  			uint32_t tone = 0;
  			codec_tried = true;
  			(void)PE_parse_boot_argn("adsp_vol", &vol_db, sizeof(vol_db));
-@@ -1940,7 +2034,7 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -1940,7 +2032,7 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
  			crash_reason();
  			break;
  		}
@@ -4003,7 +4000,7 @@ index 6bfe1a2..6f52386 100644
  			last_status = ms();
  			LOG("t=%u.%03u status: slave-kernel %08x, qrtr node %x hello %u, %u services, %u lookups, pd-mapper %u, "
  			    "SPF %d", T, *adsp_state, q_node, q_hello_rx, q_services, q_lookups, q_pdreqs, (int)spf_state);
-@@ -1970,6 +2064,11 @@ topaz_audio_init(void)
+@@ -1970,6 +2062,11 @@ topaz_audio_init(void)
  		return;
  	}
  	started = true;
