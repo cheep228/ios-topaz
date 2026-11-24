@@ -3118,7 +3118,7 @@ index 96c557b..208c1f2 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1d3ee17..b91ad1e 100644
+index 1d3ee17..cdfd674 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -40,6 +40,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -3476,7 +3476,7 @@ index 1d3ee17..b91ad1e 100644
  	IOLockUnlock(fBlLock);
  	static uint32_t logs;
  	if (logs++ < 8 || !done) {
-@@ -1093,13 +1314,15 @@ AppleCLCD::setProperties(OSObject *properties)
+@@ -1093,13 +1314,22 @@ AppleCLCD::setProperties(OSObject *properties)
  	}
  	uint64_t v = n->unsigned64BitValue();
  	setProperty("IOMFBBrightnessLevel", v, 32);
@@ -3486,19 +3486,26 @@ index 1d3ee17..b91ad1e 100644
 -		level = 0x7ff;
 +	sweet_bls.props++;
 +	sweet_bls.nits = (uint32_t)(v >> 16);
++	if (v == 0) {
++		/* CF float truncated to 0 (or the off ramp): keep the level; panel off is setPanelOn */
++		return kIOReturnSuccess;
++	}
++	if (v < 0x10000) {
++		v <<= 16;               /* plain nits */
+ 	}
+-	if (level < 1) {
+-		level = 1;
 +	/* 0..SWEET_FB_MAX_NITS nits -> DBV SWEET_FB_DBV_MIN..SWEET_FB_DBV_MAX */
 +	uint64_t level = (v * SWEET_FB_DBV_MAX) / ((uint64_t)SWEET_FB_MAX_NITS << 16);
 +	if (level > SWEET_FB_DBV_MAX) {
 +		level = SWEET_FB_DBV_MAX;
- 	}
--	if (level < 1) {
--		level = 1;
++	}
 +	if (level < SWEET_FB_DBV_MIN) {
 +		level = SWEET_FB_DBV_MIN;
  	}
  	IOLockLock(fLock);
  	fBlLevel = (uint32_t)level;
-@@ -1154,7 +1377,50 @@ AppleARMBacklight::setProperties(OSObject *properties)
+@@ -1154,7 +1384,64 @@ AppleARMBacklight::setProperties(OSObject *properties)
  {
  	OSDictionary *d = OSDynamicCast(OSDictionary, properties);
  	sweet_bl_log("backlight", d);
@@ -3538,7 +3545,21 @@ index 1d3ee17..b91ad1e 100644
 +		uint64_t x;
 +		if (sweet_bl_mnits(src->getObject("BrightnessMilliNits"), &x)) {
 +			made = OSNumber::withNumber((x << 16) / 1000, 64);
-+		} else if (sweet_bl_mnits(src->getObject("DisplayBrightness"), &x) || sweet_bl_mnits(src->getObject("brightness"), &x)) {
++		} else if (OSDynamicCast(OSDictionary, src->getObject("DisplayBrightness")) != NULL) {
++			/*
++			 * BrightnessControl: DisplayBrightness = { Nits, NitsPhysical, Brightness },
++			 * CF floats that reach the kernel truncated to integers: use Nits, skip 0
++			 * (sub-nit values and the 0..1 Brightness truncate to 0).
++			 */
++			OSDictionary *db = OSDynamicCast(OSDictionary, src->getObject("DisplayBrightness"));
++			OSNumber *ni = OSDynamicCast(OSNumber, db->getObject("Nits"));
++			if (ni == NULL || ni->unsigned64BitValue() == 0) {
++				ni = OSDynamicCast(OSNumber, db->getObject("NitsPhysical"));
++			}
++			if (ni != NULL && ni->unsigned64BitValue() != 0) {
++				made = OSNumber::withNumber(ni->unsigned64BitValue() << 16, 64);
++			}
++		} else if (sweet_bl_mnits(src->getObject("brightness"), &x)) {
 +			made = OSNumber::withNumber((x * SWEET_FB_MAX_NITS) & ~0ull, 64);   /* 0..0x10000 -> 16.16 nits */
 +		}
 +		if (made != NULL) {
@@ -3549,7 +3570,7 @@ index 1d3ee17..b91ad1e 100644
  	if (n != NULL && fFB != NULL) {
  		OSDictionary *m = OSDictionary::withCapacity(1);
  		/* same 16.16 nits scale as IOMFBBrightnessLevel */
-@@ -1169,6 +1435,7 @@ AppleARMBacklight::setProperties(OSObject *properties)
+@@ -1169,6 +1456,7 @@ AppleARMBacklight::setProperties(OSObject *properties)
  		m->release();
  		setProperty("brightness-nits", n);
  	}
@@ -3557,7 +3578,7 @@ index 1d3ee17..b91ad1e 100644
  	return kIOReturnSuccess;
  }
  
-@@ -1433,6 +1700,8 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -1433,6 +1721,8 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  	if (fFlip[0] != NULL) {
  		flipBack();
@@ -3566,7 +3587,7 @@ index 1d3ee17..b91ad1e 100644
  	}
  }
  
-@@ -1590,9 +1859,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1590,9 +1880,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			 */
  			int stayon = 0;
  			if (off && PE_parse_boot_argn("sweetfb_stayon", &stayon, sizeof(stayon)) && stayon) {
@@ -3580,7 +3601,7 @@ index 1d3ee17..b91ad1e 100644
  			IOLockLock(fFB->fLock);
  			bool changed = off != fFB->fPowerOff;
  			if (changed) {
-@@ -1638,3 +1911,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1638,3 +1932,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  	return ret;
  }
  #endif /* SWEET */
