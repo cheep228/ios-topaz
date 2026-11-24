@@ -3118,7 +3118,7 @@ index 96c557b..208c1f2 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1d3ee17..d0018d9 100644
+index 1d3ee17..b91ad1e 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -40,6 +40,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -3155,7 +3155,7 @@ index 1d3ee17..d0018d9 100644
 +/* brightness status, printed every 20 s (ramoops copies get voted on) */
 +static struct { uint32_t self, sent, ok, fail, last, props, nits, bprops, bnits; } sweet_bls;
 +static thread_call_t sweet_bls_call;
-+static char sweet_bls_keys[96];          /* backlight setProperties: key=value of the last call */
++static char sweet_bls_keys[200];          /* backlight setProperties: key=value of the last call */
 +static OSDictionary *
 +sweet_bl_param(uint32_t mn, uint32_t mx, uint32_t v)
 +{
@@ -3498,19 +3498,21 @@ index 1d3ee17..d0018d9 100644
  	}
  	IOLockLock(fLock);
  	fBlLevel = (uint32_t)level;
-@@ -1154,7 +1377,48 @@ AppleARMBacklight::setProperties(OSObject *properties)
+@@ -1154,7 +1377,50 @@ AppleARMBacklight::setProperties(OSObject *properties)
  {
  	OSDictionary *d = OSDynamicCast(OSDictionary, properties);
  	sweet_bl_log("backlight", d);
 +	sweet_bls.bprops++;
 +	if (d != NULL) {
-+		OSCollectionIterator *it = OSCollectionIterator::withCollection(d);
++		OSDictionary *db = OSDynamicCast(OSDictionary, d->getObject("DisplayBrightness"));
++		OSCollectionIterator *it = OSCollectionIterator::withCollection(db != NULL ? db : d);
++		OSDictionary *dsrc = db != NULL ? db : d;
 +		OSSymbol *k;
 +		char *o = sweet_bls_keys;
 +		size_t left = sizeof(sweet_bls_keys);
 +		sweet_bls_keys[0] = 0;
 +		while (it != NULL && left > 8 && (k = OSDynamicCast(OSSymbol, it->getNextObject())) != NULL) {
-+			OSObject *v = d->getObject(k);
++			OSObject *v = dsrc->getObject(k);
 +			OSNumber *nv = OSDynamicCast(OSNumber, v);
 +			int w = snprintf(o, left, "%s=%s%llx ", k->getCStringNoCopy(),
 +			    nv ? "" : (v ? v->getMetaClass()->getClassName() : "null"), nv ? nv->unsigned64BitValue() : 0ull);
@@ -3536,7 +3538,7 @@ index 1d3ee17..d0018d9 100644
 +		uint64_t x;
 +		if (sweet_bl_mnits(src->getObject("BrightnessMilliNits"), &x)) {
 +			made = OSNumber::withNumber((x << 16) / 1000, 64);
-+		} else if (sweet_bl_mnits(src->getObject("brightness"), &x)) {
++		} else if (sweet_bl_mnits(src->getObject("DisplayBrightness"), &x) || sweet_bl_mnits(src->getObject("brightness"), &x)) {
 +			made = OSNumber::withNumber((x * SWEET_FB_MAX_NITS) & ~0ull, 64);   /* 0..0x10000 -> 16.16 nits */
 +		}
 +		if (made != NULL) {
@@ -3547,7 +3549,7 @@ index 1d3ee17..d0018d9 100644
  	if (n != NULL && fFB != NULL) {
  		OSDictionary *m = OSDictionary::withCapacity(1);
  		/* same 16.16 nits scale as IOMFBBrightnessLevel */
-@@ -1169,6 +1433,7 @@ AppleARMBacklight::setProperties(OSObject *properties)
+@@ -1169,6 +1435,7 @@ AppleARMBacklight::setProperties(OSObject *properties)
  		m->release();
  		setProperty("brightness-nits", n);
  	}
@@ -3555,7 +3557,7 @@ index 1d3ee17..d0018d9 100644
  	return kIOReturnSuccess;
  }
  
-@@ -1433,6 +1698,8 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -1433,6 +1700,8 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  	if (fFlip[0] != NULL) {
  		flipBack();
@@ -3564,7 +3566,7 @@ index 1d3ee17..d0018d9 100644
  	}
  }
  
-@@ -1590,9 +1857,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1590,9 +1859,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			 */
  			int stayon = 0;
  			if (off && PE_parse_boot_argn("sweetfb_stayon", &stayon, sizeof(stayon)) && stayon) {
@@ -3578,7 +3580,7 @@ index 1d3ee17..d0018d9 100644
  			IOLockLock(fFB->fLock);
  			bool changed = off != fFB->fPowerOff;
  			if (changed) {
-@@ -1638,3 +1909,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1638,3 +1911,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  	return ret;
  }
  #endif /* SWEET */
