@@ -142,7 +142,7 @@ index 7fd9be1..f61e54a 100644
  
  #if CONFIG_MACF
 diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
-index 94c7552..dcebee6 100644
+index 94c7552..23413c6 100644
 --- a/bsd/dev/sweet_cpufreq.c
 +++ b/bsd/dev/sweet_cpufreq.c
 @@ -8,6 +8,8 @@
@@ -154,7 +154,7 @@ index 94c7552..dcebee6 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  int sweet_cpufreq_max(void);
-@@ -18,10 +20,209 @@ int sweet_cpufreq_max(void);
+@@ -18,10 +20,233 @@ int sweet_cpufreq_max(void);
  #define CPUFREQ_PERF_STATE      0x920u
  #define CPUFREQ_LUT_MAX         12
  
@@ -181,6 +181,9 @@ index 94c7552..dcebee6 100644
 +static uint32_t th_n[3], th_khz[3][40], th_cur[3] = { 99, 99, 99 }, th_pc[3];
 +static const uint32_t th_cores[3] = { 4, 3, 1 };
 +static vm_offset_t th_tsens;
++static uint32_t th_en[3];
++static int8_t th_trT[64], th_trL[64];
++
 +static int th_lvl = 8, th_max = TH_LVLS, th_tgt = 500, th_crit = 800, th_test = 0;
 +
 +static void
@@ -280,7 +283,27 @@ index 94c7552..dcebee6 100644
 +				    th_n[2] ? th_khz[2][th_cur[2]] / 1000 : 0);
 +			}
 +		}
++		if (sec % 5 == 0 && sec / 5 < 64) {
++			th_trT[sec / 5] = (int8_t)(t / 10);
++			th_trL[sec / 5] = (int8_t)th_lvl;
++		}
 +		if (th_test > 0 && sec >= (uint32_t)th_test) {
++			for (int k = 0; k < 8; k++) {
++				for (int d = 0; d < 3; d++) {
++					printf("@@E@@ d%d en %x st %x pf %x n %u pc %u\n", d, th_en[d],
++					    th_epss[d] ? *(volatile uint32_t *)(th_epss[d] + 0x20u) : 0,
++					    th_epss[d] ? *(volatile uint32_t *)(th_epss[d] + 0x320u) : 0, th_n[d], th_pc[d]);
++				}
++			}
++			for (int r = 0; r < 8; r++) {
++				for (int k = 0; k < 8; k++) {
++					printf("@@Q%d@@ T %d %d %d %d %d %d %d %d L %d %d %d %d %d %d %d %d\n", r,
++					    th_trT[r * 8], th_trT[r * 8 + 1], th_trT[r * 8 + 2], th_trT[r * 8 + 3],
++					    th_trT[r * 8 + 4], th_trT[r * 8 + 5], th_trT[r * 8 + 6], th_trT[r * 8 + 7],
++					    th_trL[r * 8], th_trL[r * 8 + 1], th_trL[r * 8 + 2], th_trL[r * 8 + 3],
++					    th_trL[r * 8 + 4], th_trL[r * 8 + 5], th_trL[r * 8 + 6], th_trL[r * 8 + 7]);
++				}
++			}
 +			printf("@@T@@ thermtest done at %us -> reset to Android\n", sec);
 +			volcano_psci_reset(1);
 +		}
@@ -334,7 +357,8 @@ index 94c7552..dcebee6 100644
 +		printf("SWEET CPUFREQ: epss%d en=%#x state=%#x lut=%u perf %u percore %u top %u MHz\n", d, en,
 +		    *(volatile uint32_t *)(b + 0x20u), n, *(volatile uint32_t *)(b + 0x320u), th_pc[d],
 +		    n ? th_khz[d][n - 1] / 1000 : 0);
-+		if ((en & 1u) && n > 1) {
++		th_en[d] = en;
++		if ((en & 3u) && n > 1) {
 +			th_epss[d] = b;
 +			th_n[d] = n;
 +		}
