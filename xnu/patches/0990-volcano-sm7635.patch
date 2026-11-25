@@ -142,7 +142,7 @@ index 7fd9be1..f61e54a 100644
  
  #if CONFIG_MACF
 diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
-index 94c7552..1bb8a49 100644
+index 94c7552..c732809 100644
 --- a/bsd/dev/sweet_cpufreq.c
 +++ b/bsd/dev/sweet_cpufreq.c
 @@ -8,6 +8,8 @@
@@ -154,7 +154,7 @@ index 94c7552..1bb8a49 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  int sweet_cpufreq_max(void);
-@@ -18,10 +20,275 @@ int sweet_cpufreq_max(void);
+@@ -18,10 +20,329 @@ int sweet_cpufreq_max(void);
  #define CPUFREQ_PERF_STATE      0x920u
  #define CPUFREQ_LUT_MAX         12
  
@@ -262,6 +262,59 @@ index 94c7552..1bb8a49 100644
 +	}
 +}
 +
++#include <sys/proc.h>
++#include <mach/task_info.h>
++extern kern_return_t task_info(task_t, task_flavor_t, task_info_t, mach_msg_type_number_t *);
++extern task_t proc_task(proc_t);
++
++/* fix153d: top CPU users (total user+sys since spawn) and the highest pid seen */
++static void
++th_top(void)
++{
++	int tp[10] = { 0 }, maxpid = 0, nproc = 0;
++	uint32_t tms[10] = { 0 };
++	char tn[10][20];
++	for (int pid = 0; pid < 20000; pid++) {
++		proc_t p = proc_find(pid);
++		if (p == PROC_NULL) {
++			continue;
++		}
++		nproc++;
++		maxpid = pid;
++		task_t t = proc_task(p);
++		struct task_absolutetime_info ai;
++		mach_msg_type_number_t cnt = TASK_ABSOLUTETIME_INFO_COUNT;
++		uint32_t ms = 0;
++		if (t != NULL && task_info(t, TASK_ABSOLUTETIME_INFO, (task_info_t)&ai, &cnt) == KERN_SUCCESS) {
++			ms = (uint32_t)((ai.total_user + ai.total_system) / 19200u);
++		}
++		int slot = -1;
++		for (int i = 0; i < 10; i++) {
++			if (ms > tms[i]) {
++				slot = i;
++				break;
++			}
++		}
++		if (slot >= 0) {
++			for (int i = 9; i > slot; i--) {
++				tms[i] = tms[i - 1];
++				tp[i] = tp[i - 1];
++				bcopy(tn[i - 1], tn[i], 20);
++			}
++			tms[slot] = ms;
++			tp[slot] = pid;
++			proc_name(pid, tn[slot], 20);
++		}
++		proc_rele(p);
++	}
++	for (int k = 0; k < 6; k++) {
++		printf("@@P@@ nproc %d maxpid %d\n", nproc, maxpid);
++		for (int i = 0; i < 10; i++) {
++			printf("@@P%d@@ %d %s %u ms\n", i, tp[i], tms[i] ? tn[i] : "-", tms[i]);
++		}
++	}
++}
++
 +static void
 +th_thread(void *arg __unused, wait_result_t wr __unused)
 +{
@@ -314,6 +367,7 @@ index 94c7552..1bb8a49 100644
 +		}
 +		if (th_test > 0 && sec >= (uint32_t)th_test) {
 +			th_load(th_ld1);
++			th_top();
 +			for (int k = 0; k < 8; k++) {
 +				for (int c = 0; c < 8; c++) {
 +					printf("@@U@@ c%d u %u s %u i %u\n", c, th_ld1[c][0] - th_ld0[c][0],
