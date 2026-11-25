@@ -1,12 +1,13 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index c2864ab..0256f9e 100644
+index c2864ab..1750e53 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -113,6 +113,7 @@ bsd/dev/sweet_sample.c			standard
+@@ -113,6 +113,8 @@ bsd/dev/sweet_sample.c			standard
  bsd/dev/sweet_keys.c			standard
  bsd/dev/sweet_touch.c			standard
  bsd/dev/sweet_i2c1.c			standard
 +bsd/dev/sweet_i2c13.c			standard
++bsd/dev/sweet_i2c7.c		standard
  bsd/dev/sweet_cpufreq.c			standard
  bsd/dev/topaz_fw.c			standard
  bsd/dev/topaz_redwood_audio.c		standard
@@ -472,6 +473,263 @@ index 0000000..a418268
 +	wr(i2c13_se, SE_IRQ_EN, SE_DONE | SE_ERRORS | (3u << 26) | SE_TX_WM_IRQ);
 +	i2c13_ready = true;
 +	printf("SWEET I2C13: SE1 ready (fw %#x vote %#x)\n", fw, rd(i2c13_gcc, I2C13_GCC_VOTE));
++	return 0;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
+new file mode 100644
+index 0000000..93bb2de
+--- /dev/null
++++ b/bsd/dev/sweet_i2c7.c
+@@ -0,0 +1,251 @@
++/*
++ * topaz: polled FIFO I2C on QUP0 SE1 (battery bus: SM5602 fuel gauge 0x71,
++ * bq2589x-class charger 0x6a). Values from MakrSas/topaz-woa TopazBattery
++ * (hw.h, hwio.c) and Linux i2c-qcom-geni.c. Read-only use by SweetBattery.
++ * The SE1 RCG is not touched: DFS level 0 already runs from XO (TopazBattery).
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++int sweet_i2c7_init(void);
++int sweet_i2c7_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned len);
++int sweet_i2c7_write(uint8_t addr, uint8_t reg, uint8_t val);
++
++#define I2C7_SE_PA      0x00880000u
++#define I2C7_GCC_PA     0x00100000u
++#define I2C7_WEST_PA    0x0f120000u     /* TLMM WEST tile: GPIO 4/5 */
++#define I2C7_GCC_VOTE   0x52010u        /* QUP0 wrapper + SE1 vote, bits 0xbc0 */
++#define I2C7_CBCR       0x1e004u
++#define I2C7_RCG        0x1e010u        /* qupv3_wrap0_s1 branch */
++
++#define SE_STATUS       0x040u
++#define SE_MCLK         0x048u
++#define SE_FW           0x068u
++#define SE_CLK_SEL      0x07cu
++#define SE_DMA          0x258u
++#define SE_TX_LEN       0x26cu
++#define SE_RX_LEN       0x270u
++#define SE_SCL          0x278u
++#define SE_CMD          0x600u
++#define SE_CTRL         0x604u
++#define SE_IRQ          0x610u
++#define SE_IRQ_EN       0x614u
++#define SE_IRQ_CLR      0x618u
++#define SE_TX           0x700u
++#define SE_RX           0x780u
++#define SE_TX_COUNT     0x800u
++#define SE_RX_COUNT     0x804u
++#define SE_TX_WM        0x80cu
++#define SE_HW_RX        0xe28u
++#define SE_DONE         (1u << 0)
++#define SE_NACK         (1u << 10)
++#define SE_TX_WM_IRQ    (1u << 30)
++#define SE_ERRORS       (0x3eu | (1u << 9) | (1u << 10) | (1u << 12) | (1u << 13))
++#define SE_PACK0        0x0007f8feu
++#define SE_PACK1        0x000ffefeu
++
++static vm_offset_t i2c7_se, i2c7_gcc, i2c7_west;
++static bool i2c7_ready;
++static LCK_GRP_DECLARE(sweet_i2c7_grp, "sweet_i2c7");
++static LCK_MTX_DECLARE(sweet_i2c7_lock, &sweet_i2c7_grp);
++
++static uint32_t
++rd(vm_offset_t b, uint32_t o)
++{
++	uint32_t v = *(volatile uint32_t *)(b + o);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++wr(vm_offset_t b, uint32_t o, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(b + o) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static bool
++wait_clear(vm_offset_t b, uint32_t o, uint32_t m)
++{
++	for (unsigned i = 0; i < 5000; ++i) {
++		if (!(rd(b, o) & m)) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static void
++i2c7_abort(void)
++{
++	wr(i2c7_se, SE_CTRL, 4);                /* cancel */
++	for (unsigned i = 0; i < 1000 && !(rd(i2c7_se, SE_IRQ) & (1u << 4)); ++i) {
++		delay(1);
++	}
++	if (!(rd(i2c7_se, SE_IRQ) & (1u << 4))) {
++		wr(i2c7_se, SE_CTRL, 2);        /* abort */
++		for (unsigned i = 0; i < 1000 && !(rd(i2c7_se, SE_IRQ) & (1u << 5)); ++i) {
++			delay(1);
++		}
++	}
++	for (unsigned i = 0; i < 64 && (rd(i2c7_se, SE_RX_COUNT) & 0x1ffffffu); ++i) {
++		(void)rd(i2c7_se, SE_RX);
++	}
++	wr(i2c7_se, SE_IRQ_CLR, 0xffffffffu);
++}
++
++/* One message: write nt (<= 3) bytes or read nr (<= 64) bytes. */
++static int
++i2c7_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr, bool stretch)
++{
++	unsigned sent = 0, got = 0;
++	if (!wait_clear(i2c7_se, SE_STATUS, 1u)) {
++		return EBUSY;
++	}
++	wr(i2c7_se, SE_IRQ_CLR, 0xffffffffu);
++	wr(i2c7_se, SE_TX_WM, nt ? 1u : 0u);
++	wr(i2c7_se, nr ? SE_RX_LEN : SE_TX_LEN, nr ? nr : nt);
++	wr(i2c7_se, SE_CMD, ((nr ? 2u : 1u) << 27) | ((uint32_t)addr << 9) | (stretch ? 4u : 0u));
++	for (unsigned i = 0; i < 20000; ++i) {
++		uint32_t irq = rd(i2c7_se, SE_IRQ);
++		if (irq & SE_ERRORS) {
++			int err = (irq & SE_NACK) ? ENXIO : EIO;
++			for (unsigned j = 0; j < 2000 && !(irq & SE_DONE); ++j) {
++				delay(1);
++				irq = rd(i2c7_se, SE_IRQ);
++			}
++			if (!(irq & SE_DONE) || (rd(i2c7_se, SE_STATUS) & 1u)) {
++				i2c7_abort();
++			}
++			wr(i2c7_se, SE_IRQ_CLR, 0xffffffffu);
++			return err;
++		}
++		if (nt && !sent && (irq & SE_TX_WM_IRQ)) {
++			uint32_t word = 0;
++			for (unsigned j = 0; j < nt; ++j) {
++				word |= (uint32_t)tx[j] << (8u * j);
++			}
++			wr(i2c7_se, SE_TX, word);
++			sent = nt;
++			wr(i2c7_se, SE_TX_WM, 0);
++		}
++		uint32_t count = rd(i2c7_se, SE_RX_COUNT) & 0x1ffffffu;
++		if (count > 16) {
++			break;
++		}
++		while (count--) {
++			uint32_t word = rd(i2c7_se, SE_RX);
++			for (unsigned j = 0; j < 4 && got < nr; ++j) {
++				rx[got++] = (uint8_t)(word >> (8u * j));
++			}
++		}
++		if (irq & SE_DONE) {
++			wr(i2c7_se, SE_IRQ_CLR, 0xffffffffu);
++			return (got == nr && sent == nt) ? 0 : EIO;
++		}
++		wr(i2c7_se, SE_IRQ_CLR, irq & ~SE_DONE);
++		delay(1);
++	}
++	i2c7_abort();
++	return ETIMEDOUT;
++}
++
++int
++sweet_i2c7_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned len)
++{
++	if (!i2c7_ready || len == 0 || len > 64) {
++		return ENXIO;
++	}
++	lck_mtx_lock(&sweet_i2c7_lock);
++	int err = i2c7_msg(addr, &reg, 1, NULL, 0, true);
++	if (!err) {
++		err = i2c7_msg(addr, NULL, 0, buf, len, false);
++	}
++	lck_mtx_unlock(&sweet_i2c7_lock);
++	return err;
++}
++
++/* One register write (TopazAudio: the sia8159 speaker amp at 0x2b). */
++int
++sweet_i2c7_write(uint8_t addr, uint8_t reg, uint8_t val)
++{
++	uint8_t tx[2] = { reg, val };
++
++	if (!i2c7_ready) {
++		return ENXIO;
++	}
++	lck_mtx_lock(&sweet_i2c7_lock);
++	int err = i2c7_msg(addr, tx, 2, NULL, 0, false);
++	lck_mtx_unlock(&sweet_i2c7_lock);
++	return err;
++}
++
++int
++sweet_i2c7_init(void)
++{
++	if (i2c7_ready) {
++		return 0;
++	}
++	i2c7_gcc = ml_io_map(I2C7_GCC_PA, 0x80000);
++	i2c7_west = ml_io_map(I2C7_WEST_PA, 0x2000);
++	i2c7_se = ml_io_map(I2C7_SE_PA, 0x4000);
++	if (!i2c7_gcc || !i2c7_west || !i2c7_se) {
++		return ENOMEM;
++	}
++	/* OR our votes in: other bits of the shared register belong to others */
++	/* volcano QUP1: core 0x1, s_ahb 0x2, m_ahb 0x4, core2x 0x8, SE6 0x400 (gcc-volcano.ko) */
++	wr(i2c7_gcc, I2C7_GCC_VOTE, rd(i2c7_gcc, I2C7_GCC_VOTE) | 0x1fu);
++	/* SE6 RCG: XO 19.2 MHz, no divider */
++	wr(i2c7_gcc, I2C7_RCG + 4, 0);
++	wr(i2c7_gcc, I2C7_RCG, rd(i2c7_gcc, I2C7_RCG) | 1u);
++	(void)wait_clear(i2c7_gcc, I2C7_RCG, 1u);
++	if (!wait_clear(i2c7_gcc, I2C7_CBCR, 1u << 31)) {
++		printf("SWEET I2C7: SE1 clock off (cbcr %#x)\n", rd(i2c7_gcc, I2C7_CBCR));
++		return EIO;
++	}
++	/* GPIO4/5: function 1 (qup1), 2 mA, no pull (TopazBattery CTL 0x4) */
++	/* GPIO59 SDA / GPIO60 SCL: function 1 (qup1_se6), 2 mA, pull-up */
++	wr(i2c7_west, 0x0000, (rd(i2c7_west, 0x0000) & ~0x3ffu) | 0x4u | 0x3u);
++	wr(i2c7_west, 0x1000, (rd(i2c7_west, 0x1000) & ~0x3ffu) | 0x4u | 0x3u);
++
++	uint32_t fw = rd(i2c7_se, SE_FW), rxp = rd(i2c7_se, SE_HW_RX);
++	if (((fw >> 8) & 0xffu) != 3u || (rd(i2c7_se, SE_STATUS) & 0x1001u)) {
++		printf("SWEET I2C7: SE1 not an idle I2C engine (fw %#x status %#x)\n",
++		    fw, rd(i2c7_se, SE_STATUS));
++		return EIO;
++	}
++	wr(i2c7_se, 0xe18, 0);
++	wr(i2c7_se, 0xe1c, 0);
++	wr(i2c7_se, 0x644, 0);
++	wr(i2c7_se, SE_IRQ_CLR, 0xffffffffu);
++	wr(i2c7_se, 0x648, 0xffffffffu);
++	wr(i2c7_se, SE_DMA, 0);
++	wr(i2c7_se, 0x28, rd(i2c7_se, 0x28) | 0x7fu);
++	wr(i2c7_se, 0xe30, rd(i2c7_se, 0xe30) | 0x0fu);
++	wr(i2c7_se, 0x24, 0x7f);
++	wr(i2c7_se, 0x20, 1);
++	wr(i2c7_se, SE_CLK_SEL, 0);
++	wr(i2c7_se, SE_MCLK, (2u << 4) | 1u);                  /* 400 kHz from 19.2 MHz */
++	wr(i2c7_se, SE_SCL, (5u << 20) | (11u << 10) | 22u);
++	wr(i2c7_se, 0x254, 0);
++	wr(i2c7_se, 0x260, SE_PACK0);
++	wr(i2c7_se, 0x264, SE_PACK1);
++	wr(i2c7_se, 0x284, SE_PACK0);
++	wr(i2c7_se, 0x288, SE_PACK1);
++	wr(i2c7_se, SE_TX_WM, 0);
++	wr(i2c7_se, 0x810, 0);
++	wr(i2c7_se, 0x814, ((rxp >> 16) & 0x3fu) - 1u);
++	wr(i2c7_se, SE_IRQ_EN, SE_DONE | SE_ERRORS | (3u << 26) | SE_TX_WM_IRQ);
++	i2c7_ready = true;
++	printf("SWEET I2C7: SE1 ready (fw %#x vote %#x)\n", fw, rd(i2c7_gcc, I2C7_GCC_VOTE));
 +	return 0;
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
@@ -3935,7 +4193,7 @@ index 1d3ee17..cdfd674 100644
 +}
 +#endif /* VOLCANO */
 diff --git a/iokit/Kernel/arm/TopazAudio.cpp b/iokit/Kernel/arm/TopazAudio.cpp
-index 6bfe1a2..d2b2168 100644
+index 6bfe1a2..c5dc46f 100644
 --- a/iokit/Kernel/arm/TopazAudio.cpp
 +++ b/iokit/Kernel/arm/TopazAudio.cpp
 @@ -33,11 +33,29 @@ extern "C" uint64_t topaz_scm(uint32_t fn, uint64_t arginfo, uint64_t a, uint64_
@@ -4215,16 +4473,18 @@ index 6bfe1a2..d2b2168 100644
  			if (strcmp(pd_map[i].svc, name) != 0) {
  				continue;
  			}
-@@ -1213,6 +1299,8 @@ gpr_poll(void)
+@@ -1213,6 +1299,10 @@ gpr_poll(void)
  extern "C" bool topaz_rpm_write(uint32_t set, uint32_t type, uint32_t id, uint32_t key, uint32_t value);
  extern "C" bool topaz_smmu_identity(uint32_t sid, uint32_t mask, const char *name);
  extern "C" int  sweet_i2c1_init(void);
 +extern "C" int  sweet_i2c13_init(void);
++extern "C" int  sweet_i2c7_init(void);
++extern "C" int  sweet_i2c7_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned len);
 +extern "C" int  sweet_i2c13_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned len);
  extern "C" int  sweet_i2c1_write(uint8_t addr, uint8_t reg, uint8_t val);
  extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
  
-@@ -1884,6 +1972,17 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -1884,6 +1974,25 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
  		LOG("no SoC mappings (see TopazModem)");
  		goto out;
  	}
@@ -4238,11 +4498,19 @@ index 6bfe1a2..d2b2168 100644
 +		for (int i = 0; i < 6; i++) {
 +			LOG("@@T@@ i2c13 %d tfa34 %d %02x%02x tfa35 %d %02x%02x", e13, e34, r34[0], r34[1], e35, r35[0], r35[1]);
 +		}
++		/* fix151: camera LDO PMICs WL28681 on QUP1 SE0 (i2c7) 0x35/0x61, regs 0..3 (read only) */
++		int e7 = sweet_i2c7_init();
++		uint8_t w35[4] = { 0 }, w61[4] = { 0 };
++		int f35 = e7 ? -1 : sweet_i2c7_read(0x35, 0x00, w35, 4);
++		int f61 = e7 ? -1 : sweet_i2c7_read(0x61, 0x00, w61, 4);
++		for (int i = 0; i < 6; i++) {
++			LOG("@@C@@ i2c7 %d wl35 %d %02x%02x%02x%02x wl61 %d %02x%02x%02x%02x", e7, f35, w35[0], w35[1], w35[2], w35[3], f61, w61[0], w61[1], w61[2], w61[3]);
++		}
 +	}
  	part = topaz_smem_partition(0, ADSP_PID);
  	LOG("apps<->adsp SMEM partition %p", part);
  	if (part == NULL) {
-@@ -1900,13 +1999,16 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -1900,13 +2009,16 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
  		goto out;
  	}
  	*stop_entry = 0;
@@ -4260,7 +4528,7 @@ index 6bfe1a2..d2b2168 100644
  	if ((st & 3) != 2) {
  		LOG("ADSP did not report READY (slave-kernel %08x)", st);
  		crash_reason();
-@@ -1916,13 +2018,15 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -1916,13 +2028,15 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
  		goto out;
  	}
  	glink_register(QCHAN, qrtr_rx);
@@ -4279,7 +4547,7 @@ index 6bfe1a2..d2b2168 100644
  			uint32_t tone = 0;
  			codec_tried = true;
  			(void)PE_parse_boot_argn("adsp_vol", &vol_db, sizeof(vol_db));
-@@ -1940,7 +2044,7 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -1940,7 +2054,7 @@ topaz_audio_thread(void *arg __unused, wait_result_t wr __unused)
  			crash_reason();
  			break;
  		}
@@ -4288,7 +4556,7 @@ index 6bfe1a2..d2b2168 100644
  			last_status = ms();
  			LOG("t=%u.%03u status: slave-kernel %08x, qrtr node %x hello %u, %u services, %u lookups, pd-mapper %u, "
  			    "SPF %d", T, *adsp_state, q_node, q_hello_rx, q_services, q_lookups, q_pdreqs, (int)spf_state);
-@@ -1970,6 +2074,11 @@ topaz_audio_init(void)
+@@ -1970,6 +2084,11 @@ topaz_audio_init(void)
  		return;
  	}
  	started = true;
