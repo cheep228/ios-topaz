@@ -142,7 +142,7 @@ index 7fd9be1..f61e54a 100644
  
  #if CONFIG_MACF
 diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
-index 94c7552..c732809 100644
+index 94c7552..c765313 100644
 --- a/bsd/dev/sweet_cpufreq.c
 +++ b/bsd/dev/sweet_cpufreq.c
 @@ -8,6 +8,8 @@
@@ -276,7 +276,7 @@ index 94c7552..c732809 100644
 +	char tn[10][20];
 +	for (int pid = 0; pid < 20000; pid++) {
 +		proc_t p = proc_find(pid);
-+		if (p == PROC_NULL) {
++		if (p == NULL) {
 +			continue;
 +		}
 +		nproc++;
