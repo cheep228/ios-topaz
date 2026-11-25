@@ -142,7 +142,7 @@ index 7fd9be1..f61e54a 100644
  
  #if CONFIG_MACF
 diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
-index 94c7552..c765313 100644
+index 94c7552..1a5a91a 100644
 --- a/bsd/dev/sweet_cpufreq.c
 +++ b/bsd/dev/sweet_cpufreq.c
 @@ -8,6 +8,8 @@
@@ -154,7 +154,7 @@ index 94c7552..c765313 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  int sweet_cpufreq_max(void);
-@@ -18,10 +20,329 @@ int sweet_cpufreq_max(void);
+@@ -18,10 +20,336 @@ int sweet_cpufreq_max(void);
  #define CPUFREQ_PERF_STATE      0x920u
  #define CPUFREQ_LUT_MAX         12
  
@@ -184,7 +184,7 @@ index 94c7552..c765313 100644
 +static uint32_t th_en[3];
 +static int8_t th_trT[64], th_trL[64];
 +
-+static int th_lvl = 8, th_max = TH_LVLS, th_tgt = 500, th_crit = 800, th_test = 0;
++static int th_lvl = 8, th_max = TH_LVLS, th_tgt = 500, th_crit = 850, th_test = 0, th_gov = 0;
 +
 +static void
 +th_apply(void)
@@ -334,7 +334,9 @@ index 94c7552..c765313 100644
 +			} else {
 +				hot = 0;
 +			}
-+			if (t > th_tgt + 30) {
++			if (!th_gov) {
++				/* default: old behaviour, every domain at its top entry */
++			} else if (t > th_tgt + 30) {
 +				th_lvl -= 3;
 +			} else if (t > th_tgt) {
 +				th_lvl -= 1;
@@ -342,7 +344,9 @@ index 94c7552..c765313 100644
 +				th_lvl += 1;
 +			}
 +		} else {
-+			th_lvl = 4;     /* no sensor: stay low */
++			if (th_gov) {
++				th_lvl = 4;     /* no sensor: stay low */
++			}
 +		}
 +		if (th_lvl < 0) {
 +			th_lvl = 0;
@@ -367,7 +371,6 @@ index 94c7552..c765313 100644
 +		}
 +		if (th_test > 0 && sec >= (uint32_t)th_test) {
 +			th_load(th_ld1);
-+			th_top();
 +			for (int k = 0; k < 8; k++) {
 +				for (int c = 0; c < 8; c++) {
 +					printf("@@U@@ c%d u %u s %u i %u\n", c, th_ld1[c][0] - th_ld0[c][0],
@@ -428,6 +431,10 @@ index 94c7552..c765313 100644
 +		th_crit = v * 10;
 +	}
 +	(void)PE_parse_boot_argn("thermtest", &th_test, sizeof(th_test));
++	(void)PE_parse_boot_argn("thermgov", &th_gov, sizeof(th_gov));
++	if (!th_gov) {
++		th_lvl = th_max = TH_LVLS;
++	}
 +	if (th_lvl > th_max) {
 +		th_lvl = th_max;
 +	}
@@ -465,7 +472,7 @@ index 94c7552..c765313 100644
 +	if (kernel_thread_start(th_thread, NULL, &th) == KERN_SUCCESS) {
 +		thread_deallocate(th);
 +	}
-+	printf("SWEET THERM: governor on, lvl %d/%d tgt %d crit %d test %d\n", th_lvl, th_max, th_tgt, th_crit, th_test);
++	printf("SWEET THERM: gov %d, lvl %d/%d tgt %d crit %d test %d\n", th_gov, th_lvl, th_max, th_tgt, th_crit, th_test);
 +	return 0;
 +}
 +#endif
