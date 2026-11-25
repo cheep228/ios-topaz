@@ -142,7 +142,7 @@ index 7fd9be1..f61e54a 100644
  
  #if CONFIG_MACF
 diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
-index 94c7552..23413c6 100644
+index 94c7552..1bb8a49 100644
 --- a/bsd/dev/sweet_cpufreq.c
 +++ b/bsd/dev/sweet_cpufreq.c
 @@ -8,6 +8,8 @@
@@ -154,7 +154,7 @@ index 94c7552..23413c6 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  int sweet_cpufreq_max(void);
-@@ -18,10 +20,233 @@ int sweet_cpufreq_max(void);
+@@ -18,10 +20,275 @@ int sweet_cpufreq_max(void);
  #define CPUFREQ_PERF_STATE      0x920u
  #define CPUFREQ_LUT_MAX         12
  
@@ -240,6 +240,28 @@ index 94c7552..23413c6 100644
 +	return best;
 +}
 +
++#include <mach/processor_info.h>
++extern processor_t cpu_to_processor(int cpu);
++extern kern_return_t processor_info(processor_t, processor_flavor_t, host_t *, processor_info_t,
++    mach_msg_type_number_t *);
++static uint32_t th_ld0[8][4], th_ld1[8][4];
++
++static void
++th_load(uint32_t out[8][4])
++{
++	for (int c = 0; c < 8; c++) {
++		processor_t p = cpu_to_processor(c);
++		struct processor_cpu_load_info li = { { 0 } };
++		mach_msg_type_number_t cnt = PROCESSOR_CPU_LOAD_INFO_COUNT;
++		host_t h;
++		if (p != NULL && processor_info(p, PROCESSOR_CPU_LOAD_INFO, &h, (processor_info_t)&li, &cnt) == KERN_SUCCESS) {
++			for (int k = 0; k < 4; k++) {
++				out[c][k] = li.cpu_ticks[k];
++			}
++		}
++	}
++}
++
 +static void
 +th_thread(void *arg __unused, wait_result_t wr __unused)
 +{
@@ -287,7 +309,27 @@ index 94c7552..23413c6 100644
 +			th_trT[sec / 5] = (int8_t)(t / 10);
 +			th_trL[sec / 5] = (int8_t)th_lvl;
 +		}
++		if (sec == 10) {
++			th_load(th_ld0);
++		}
 +		if (th_test > 0 && sec >= (uint32_t)th_test) {
++			th_load(th_ld1);
++			for (int k = 0; k < 8; k++) {
++				for (int c = 0; c < 8; c++) {
++					printf("@@U@@ c%d u %u s %u i %u\n", c, th_ld1[c][0] - th_ld0[c][0],
++					    th_ld1[c][1] - th_ld0[c][1], th_ld1[c][2] - th_ld0[c][2]);
++				}
++				for (int blk = 0; blk < 2; blk++) {
++					int tv[15] = { 0 };
++					for (int s2 = 0; s2 < (blk ? 14 : 15); s2++) {
++						uint32_t rv = *(volatile uint32_t *)(th_tsens + 0x1000u * blk + 0xa0u + 4u * s2);
++						int x = (int)(rv & 0xfffu);
++						tv[s2] = ((x & 0x800) ? x - 0x1000 : x) / 10;
++					}
++					printf("@@S%d@@ %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", blk, tv[0], tv[1], tv[2],
++					    tv[3], tv[4], tv[5], tv[6], tv[7], tv[8], tv[9], tv[10], tv[11], tv[12], tv[13], tv[14]);
++				}
++			}
 +			for (int k = 0; k < 8; k++) {
 +				for (int d = 0; d < 3; d++) {
 +					printf("@@E@@ d%d en %x st %x pf %x n %u pc %u\n", d, th_en[d],
