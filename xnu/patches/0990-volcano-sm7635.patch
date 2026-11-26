@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..f5a12d7
+index 0000000..75efe0e
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,568 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -13341,6 +13341,9 @@ index 0000000..f5a12d7
 +int topaz_fw_read(const char *path, void **data, size_t *size);
 +void topaz_fw_free(void *data, size_t size);
 +int topaz_root_mounted(void);
++vm_offset_t ml_vtophys(vm_offset_t vaddr);
++void sweet_dcache_clean(vm_offset_t addr, unsigned length);
++void sweet_dcache_flush(vm_offset_t addr, unsigned length);
 +}
 +
 +/* not in the (public) source tree: the boot payload blob writes it at every boot (Qualcomm firmware) */
@@ -13572,14 +13575,14 @@ index 0000000..f5a12d7
 +	 * kernel's bank (0x900000000 + 4 GB here), which phystokv cannot map (panic).
 +	 * The SMMU maps each 4 KB on its own; 36-bit OAS covers the kernel's bank.
 +	 */
-+	b->md = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
-+	    kIODirectionInOut | kIOMapWriteCombineCache, size, 0x4000);
-+	if (b->md == NULL) {
++	/* IOBufferMemoryDescriptor with a cache mode also took low RAM (phystokv panic): plain kernel memory, cacheable, cleaned by hand */
++	b->md = NULL;
++	b->va = (uint8_t *)IOMallocAligned(size, 0x4000);
++	if (b->va == NULL) {
 +		IOLog("VGPU: alloc %s (%#llx) failed\n", name, size);
 +		return false;
 +	}
-+	b->va = (uint8_t *)b->md->getBytesNoCopy();
-+	b->pa = b->md->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
++	b->pa = ml_vtophys((vm_offset_t)b->va);
 +	b->size = size;
 +	b->iova = iova;
 +	b->name = name;
@@ -13595,7 +13598,7 @@ index 0000000..f5a12d7
 +	if ((tables_used + 1) * 4096 > tables.size) {
 +		return NULL;
 +	}
-+	*pa = tables.md->getPhysicalSegment(4096 * tables_used, NULL, kIOMemoryMapperNone);
++	*pa = ml_vtophys((vm_offset_t)(tables.va + 4096 * tables_used));
 +	return (uint64_t *)(tables.va + 4096 * tables_used++);
 +}
 +
@@ -13631,7 +13634,7 @@ index 0000000..f5a12d7
 +{
 +	for (uint64_t o = 0; o < b->size; o += 4096) {
 +		/* contiguous, so pa + o; checked once per 16 KB page anyway */
-+		uint64_t pa = b->md->getPhysicalSegment(o, NULL, kIOMemoryMapperNone);
++		uint64_t pa = ml_vtophys((vm_offset_t)(b->va + o));
 +		if (pa == 0 || !map_page(b->iova + o, pa)) {
 +			IOLog("VGPU: map %s +%#llx failed\n", b->name, o);
 +			return false;
@@ -13667,7 +13670,7 @@ index 0000000..f5a12d7
 +	if (!gbuf_map(&icache) || !gbuf_map(&dummy) || !gbuf_map(&debugb) || !gbuf_map(&logb) || !gbuf_map(&hfib)) {
 +		return false;
 +	}
-+	__asm__ volatile ("dsb sy" ::: "memory");
++	sweet_dcache_clean((vm_offset_t)tables.va, (unsigned)tables.size);
 +
 +	volatile uint8_t *cb = gmu_cb();
 +	wr(cb, 0x000, 0);                               /* SCTLR off while programming */
@@ -13730,7 +13733,10 @@ index 0000000..f5a12d7
 +		}
 +		p += sizeof(struct blk) + b->size;
 +	}
-+	__asm__ volatile ("dsb sy" ::: "memory");
++	struct gbuf *all[] = { &icache, &dummy, &debugb, &logb, &hfib };
++	for (unsigned i = 0; i < 5; i++) {
++		sweet_dcache_clean((vm_offset_t)all[i]->va, (unsigned)all[i]->size);
++	}
 +	IOLog("VGPU: GMU fw loaded: %u TCM blocks, %u memory blocks; fw_version %08x DTCM[0xff8] %08x\n", tcm, mem,
 +	    gmu_rd(GMU_CORE_FW_VERSION), gmu_rd(GMU_CM3_DTCM_START + 0xff8));
 +}
@@ -13783,6 +13789,9 @@ index 0000000..f5a12d7
 +	    ok ? "OK" : "TIMEOUT", gmu_rd(GMU_CM3_FW_INIT_RESULT), want, mask, gmu_rd(GMU_CORE_FW_VERSION),
 +	    gmu_rd(GMU_HFI_CTRL_STATUS), gmu_rd(GMU_CM3_SYSRESET));
 +	cb_fault("after start");
++	sweet_dcache_flush((vm_offset_t)logb.va, (unsigned)logb.size);
++	sweet_dcache_flush((vm_offset_t)dummy.va, (unsigned)dummy.size);
++	sweet_dcache_flush((vm_offset_t)debugb.va, (unsigned)debugb.size);
 +	const uint32_t *lg = (const uint32_t *)logb.va;
 +	IOLog("VGPU: GMU log %08x %08x %08x %08x %08x %08x %08x %08x; dummy %08x debug %08x\n", lg[0], lg[1], lg[2],
 +	    lg[3], lg[4], lg[5], lg[6], lg[7], *(const uint32_t *)dummy.va, *(const uint32_t *)debugb.va);
