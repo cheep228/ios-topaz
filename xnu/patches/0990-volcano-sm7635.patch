@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..938494e
+index 0000000..3ebd10a
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,554 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -13329,6 +13329,7 @@ index 0000000..938494e
 + * vgpu=2: also lists the firmware blocks that need GMU memory (through the SMMU, SID 5).
 + */
 +#include <IOKit/IOLib.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
 +#include <pexpert/pexpert.h>
 +#include <kern/thread.h>
 +
@@ -13527,6 +13528,282 @@ index 0000000..938494e
 +	    n, words, bad, gmu_rd(GMU_CM3_ITCM_START), gmu_rd(GMU_CM3_DTCM_START + 0xff8));
 +}
 +
++/* ---------------------------------------------------------------- phase 2: GMU memory through the SMMU, GMU start */
++
++#define GMU_SID                 5               /* DT qcom,gmu iommus = <&kgsl_smmu 5 0> */
++#define GMU_CB                  2               /* a context bank nobody uses (all were unconfigured) */
++#define SMMU_CB_BASE            0x20000         /* IDR1: 32 pages of 4 KB before the context banks */
++#define GMU_FALNEXT_INTF        0x1f7ed
++#define GMU_FAL_INTF            0x1f7ec
++#define GMU_ICACHE_CONFIG       0x1f400
++#define GMU_DCACHE_CONFIG       0x1f401
++#define GMU_SYS_BUS_CONFIG      0x1f40f
++#define GMU_MRC_GBIF_QOS_CTRL   0x1f50b
++#define GMU_HFI_QTBL_INFO       0x1f984
++#define GMU_HFI_QTBL_ADDR       0x1f985
++#define GMU_GENERAL_8           0x1f9c8
++#define GMU_GENERAL_9           0x1f9c9
++#define GMU_GENERAL_10          0x1f9ca
++#define GMU_RSCC_CONTROL_REQ    0x23b07
++#define GMU_RSCC_CONTROL_ACK    0x23b08
++#define RSCC_SEQ_BUSY_DRV0      0x101           /* RSCC at GPU base + 0x50000 */
++#define GBIF_CX_CONFIG          0x3c00
++#define GBIF_QSB_SIDE0          0x3c03
++#define GMU_CHIPID              0x8030000       /* gen8_3_0 */
++
++#define PTE_PAGE        ((1ull << 0) | (1ull << 1) | (1ull << 6) | (2ull << 8) | (1ull << 10))
++#define PTE_TABLE       ((1ull << 0) | (1ull << 1))
++
++struct gbuf {
++	IOBufferMemoryDescriptor *md;
++	uint8_t *va;
++	uint64_t pa, iova, size;
++	const char *name;
++};
++static struct gbuf tables, icache, dummy, debugb, logb, hfib;
++static uint32_t tables_used;
++
++static bool
++gbuf_alloc(struct gbuf *b, uint64_t size, uint64_t iova, const char *name)
++{
++	size = (size + 0x3fff) & ~0x3fffull;
++	b->md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
++	    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache, size, 0x0000000ffffff000ull);
++	if (b->md == NULL) {
++		IOLog("VGPU: alloc %s (%#llx) failed\n", name, size);
++		return false;
++	}
++	b->va = (uint8_t *)b->md->getBytesNoCopy();
++	b->pa = b->md->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
++	b->size = size;
++	b->iova = iova;
++	b->name = name;
++	bzero(b->va, size);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	return b->va != NULL && b->pa != 0;
++}
++
++/* a 4 KB table from the table buffer: index, or -1 */
++static uint64_t *
++table_new(uint64_t *pa)
++{
++	if ((tables_used + 1) * 4096 > tables.size) {
++		return NULL;
++	}
++	*pa = tables.pa + 4096 * tables_used;
++	return (uint64_t *)(tables.va + 4096 * tables_used++);
++}
++
++static uint64_t *l1;
++static uint64_t *l2v[4], *l3v[4][512];
++
++static bool
++map_page(uint64_t iova, uint64_t pa)
++{
++	uint32_t i1 = (uint32_t)(iova >> 30), i2 = (uint32_t)((iova >> 21) & 511), i3 = (uint32_t)((iova >> 12) & 511);
++	uint64_t tpa;
++	if (i1 >= 4) {
++		return false;
++	}
++	if (l2v[i1] == NULL) {
++		if ((l2v[i1] = table_new(&tpa)) == NULL) {
++			return false;
++		}
++		l1[i1] = tpa | PTE_TABLE;
++	}
++	if (l3v[i1][i2] == NULL) {
++		if ((l3v[i1][i2] = table_new(&tpa)) == NULL) {
++			return false;
++		}
++		l2v[i1][i2] = tpa | PTE_TABLE;
++	}
++	l3v[i1][i2][i3] = pa | PTE_PAGE;
++	return true;
++}
++
++static bool
++gbuf_map(struct gbuf *b)
++{
++	for (uint64_t o = 0; o < b->size; o += 4096) {
++		/* contiguous, so pa + o; checked once per 16 KB page anyway */
++		uint64_t pa = b->md->getPhysicalSegment(o, NULL, kIOMemoryMapperNone);
++		if (pa == 0 || !map_page(b->iova + o, pa)) {
++			IOLog("VGPU: map %s +%#llx failed\n", b->name, o);
++			return false;
++		}
++	}
++	IOLog("VGPU: %-6s iova %#llx size %#llx pa %#llx\n", b->name, b->iova, b->size, b->pa);
++	return true;
++}
++
++static inline volatile uint8_t *gmu_cb(void) { return smmu + SMMU_CB_BASE + GMU_CB * 0x1000; }
++
++static void
++cb_fault(const char *tag)
++{
++	volatile uint8_t *cb = gmu_cb();
++	IOLog("VGPU: [%s] sGFSR %08x sGFSYNR0 %08x CB%u FSR %08x FAR %08x%08x FSYNR0 %08x SCTLR %08x\n", tag,
++	    rd(smmu, 0x48), rd(smmu, 0x50), GMU_CB, rd(cb, 0x58), rd(cb, 0x64), rd(cb, 0x60), rd(cb, 0x68), rd(cb, 0));
++}
++
++static bool
++smmu_gmu_setup(void)
++{
++	if (!gbuf_alloc(&tables, 0x10000, 0, "tables")) {
++		return false;
++	}
++	uint64_t l1pa;
++	l1 = table_new(&l1pa);
++	if (!gbuf_alloc(&icache, 0x100000, 0x4000, "icache") || !gbuf_alloc(&dummy, 0x4000, 0x60000000, "dummy") ||
++	    !gbuf_alloc(&debugb, 0x8000, 0x60400000, "debug") || !gbuf_alloc(&logb, 0x4000, 0x60004000, "log") ||
++	    !gbuf_alloc(&hfib, 0x4000, 0x60008000, "hfi")) {
++		return false;
++	}
++	if (!gbuf_map(&icache) || !gbuf_map(&dummy) || !gbuf_map(&debugb) || !gbuf_map(&logb) || !gbuf_map(&hfib)) {
++		return false;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++
++	volatile uint8_t *cb = gmu_cb();
++	wr(cb, 0x000, 0);                               /* SCTLR off while programming */
++	wr(cb, 0x058, 0xffffffff);                      /* FSR clear */
++	wr(smmu, 0x1800 + 4 * GMU_CB, 1);               /* CBA2R: AArch64 */
++	wr(smmu, 0x1000 + 4 * GMU_CB, 0x0001f000);      /* CBAR: S1 translate, S2 bypass */
++	wr(cb, 0x020, (uint32_t)l1pa);
++	wr(cb, 0x024, (uint32_t)(l1pa >> 32));
++	wr(cb, 0x028, 0);
++	wr(cb, 0x02c, 0);
++	wr(cb, 0x030, 32 | (1u << 23));                 /* TCR: T0SZ 32 (4 GB, level 1), 4 KB, NC walks, EPD1 */
++	wr(cb, 0x010, 1);                               /* TCR2: 36-bit PA */
++	wr(cb, 0x038, 0x44);                            /* MAIR0 attr0: Normal non-cacheable */
++	wr(cb, 0x03c, 0);
++	wr(cb, 0x618, 0);                               /* TLBIALL */
++	wr(cb, 0x7f0, 0);                               /* TLBSYNC */
++	poll(cb, 0x7f4, 1, 0, 1000);
++	wr(cb, 0x000, 0x67);                            /* SCTLR: CFIE CFRE AFE TRE M */
++	wr(smmu, 0xc00 + 4 * GMU_CB, GMU_CB);           /* S2CR: translate in CB */
++	wr(smmu, 0x800 + 4 * GMU_CB, (1u << 31) | GMU_SID); /* SMR: SID 5, mask 0 */
++	IOLog("VGPU: SMMU CB%u for SID %u: TTBR0 %08x%08x TCR %08x SCTLR %08x SMR %08x S2CR %08x sCR0 %08x\n", GMU_CB,
++	    GMU_SID, rd(cb, 0x24), rd(cb, 0x20), rd(cb, 0x30), rd(cb, 0), rd(smmu, 0x800 + 4 * GMU_CB),
++	    rd(smmu, 0xc00 + 4 * GMU_CB), rd(smmu, 0));
++	return true;
++}
++
++static bool
++fw_block_mem(struct gbuf *b, const struct blk *k)
++{
++	if (k->addr < b->iova || k->addr + k->size > b->iova + b->size) {
++		return false;
++	}
++	memcpy(b->va + (k->addr - b->iova), k->data, k->size);
++	return true;
++}
++
++static void
++gmu_load(void)
++{
++	const uint8_t *p = volcano_fw_gmu, *end = volcano_fw_gmu + volcano_fw_gmu_size;
++	uint32_t tcm = 0, mem = 0;
++	while (p + sizeof(struct blk) <= end) {
++		const struct blk *b = (const struct blk *)p;
++		if (b->size != 0) {
++			if (b->addr < 0x4000) {
++				for (uint32_t i = 0; i < b->size / 4; i++) {
++					gmu_wr(GMU_CM3_ITCM_START + b->addr / 4 + i, b->data[i]);
++				}
++				tcm++;
++			} else if (b->addr >= 0x10004000 && b->addr < 0x10008000) {
++				for (uint32_t i = 0; i < b->size / 4; i++) {
++					gmu_wr(GMU_CM3_DTCM_START + (b->addr - 0x10004000) / 4 + i, b->data[i]);
++				}
++				tcm++;
++			} else if (fw_block_mem(&icache, b) || fw_block_mem(&dummy, b) || fw_block_mem(&debugb, b)) {
++				mem++;
++			} else {
++				IOLog("VGPU: fw block %08x size %#x type %u: no home\n", b->addr, b->size, b->type);
++			}
++		}
++		p += sizeof(struct blk) + b->size;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	IOLog("VGPU: GMU fw loaded: %u TCM blocks, %u memory blocks; fw_version %08x DTCM[0xff8] %08x\n", tcm, mem,
++	    gmu_rd(GMU_CORE_FW_VERSION), gmu_rd(GMU_CM3_DTCM_START + 0xff8));
++}
++
++static void
++gmu_boot(void)
++{
++	if (!smmu_gmu_setup()) {
++		IOLog("VGPU: SMMU setup failed\n");
++		return;
++	}
++	gmu_wr(GMU_FALNEXT_INTF, 1);
++	gmu_wr(GMU_FAL_INTF, 1);
++
++	/* rpmh_start */
++	gmu_wr(GMU_RSCC_CONTROL_REQ, 1u << 1);
++	bool ack = poll(base, 4 * GMU_RSCC_CONTROL_ACK, 1u << 1, 1u << 1, 10000);
++	bool idle = poll(base, 0x50000 + 4 * RSCC_SEQ_BUSY_DRV0, 0xffffffff, 0, 10000);
++	gmu_wr(GMU_RSCC_CONTROL_REQ, 0);
++	IOLog("VGPU: RSCC wake: ack %s, seq %s (busy %08x)\n", ack ? "ok" : "TIMEOUT", idle ? "idle" : "BUSY",
++	    rd(base, 0x50000 + 4 * RSCC_SEQ_BUSY_DRV0));
++
++	gmu_load();
++	uint32_t v = gmu_rd(GMU_CM3_DTCM_START + 0xff8);
++	uint32_t mask = v <= 0x20010004 ? 0xffffffff : 0x1ff, want = v <= 0x20010004 ? 0xbabeface : 0x100;
++
++	gmu_wr(GMU_CM3_FW_INIT_RESULT, 0);
++	gmu_wr(GMU_CM3_BOOT_CONFIG, 2);
++	gmu_wr(GMU_HFI_QTBL_ADDR, (uint32_t)hfib.iova);
++	gmu_wr(GMU_HFI_QTBL_INFO, 1);
++	gmu_wr(GMU_AHB_FENCE_RANGE_0, (1u << 31) | (0x32u << 18) | 0x8c0);
++	gmu_wr(GMU_CM3_CFG, 0x4052);
++	gmu_wr(GMU_GENERAL_10, GMU_CHIPID);
++	gmu_wr(GMU_GENERAL_8, ((uint32_t)logb.iova & 0xfffff000) | ((uint32_t)(logb.size / 4096 - 1) & 0xff));
++	for (uint32_t i = 0; i < 4; i++) {
++		gmu_wr(GBIF_QSB_SIDE0 + i, 0x00071e20);
++	}
++	gmu_wr(GBIF_CX_CONFIG, 0x20023000);
++	gmu_wr(GMU_MRC_GBIF_QOS_CTRL, 0x33);
++	gmu_wr(GMU_SYS_BUS_CONFIG, 1);
++	gmu_wr(GMU_ICACHE_CONFIG, 1);
++	gmu_wr(GMU_DCACHE_CONFIG, 1);
++	cb_fault("before start");
++
++	gmu_wr(GMU_CM3_SYSRESET, 1);
++	gmu_wr(GMU_GENERAL_9, 0);
++	gmu_wr(GMU_CM3_SYSRESET, 0);
++	bool ok = poll(base, 4 * GMU_CM3_FW_INIT_RESULT, mask, want, 200000);
++	IOLog("VGPU: GMU START %s: init_result %08x (want %08x/%08x) fw_version %08x hfi_ctrl %08x sysreset %08x\n",
++	    ok ? "OK" : "TIMEOUT", gmu_rd(GMU_CM3_FW_INIT_RESULT), want, mask, gmu_rd(GMU_CORE_FW_VERSION),
++	    gmu_rd(GMU_HFI_CTRL_STATUS), gmu_rd(GMU_CM3_SYSRESET));
++	cb_fault("after start");
++	const uint32_t *lg = (const uint32_t *)logb.va;
++	IOLog("VGPU: GMU log %08x %08x %08x %08x %08x %08x %08x %08x; dummy %08x debug %08x\n", lg[0], lg[1], lg[2],
++	    lg[3], lg[4], lg[5], lg[6], lg[7], *(const uint32_t *)dummy.va, *(const uint32_t *)debugb.va);
++}
++
++static bool
++fw_load_file(void)
++{
++	for (int i = 0; i < 120 && !topaz_root_mounted(); i++) {
++		IOSleep(1000);
++	}
++	void *data = NULL;
++	size_t size = 0;
++	for (int i = 0; i < 30; i++) {
++		if (topaz_fw_read(GMU_FW_PATH, &data, &size) == 0 && data != NULL && size > 0) {
++			volcano_fw_gmu = (const uint8_t *)data;
++			volcano_fw_gmu_size = size;
++			IOLog("VGPU: GMU fw %s: %zu bytes\n", GMU_FW_PATH, size);
++			return true;
++		}
++		IOSleep(1000);
++	}
++	IOLog("VGPU: GMU fw %s not readable\n", GMU_FW_PATH);
++	return false;
++}
++
 +static void
 +probe(void *, wait_result_t)
 +{
@@ -13561,7 +13838,15 @@ index 0000000..938494e
 +	smmu_dump();
 +	IOLog("VGPU: RSCC(gpu+0x50000) %08x %08x cx_misc %08x %08x\n",
 +	    rd(base, 0x50000), rd(base, 0x50004), rd(base, 0x9e000), rd(base, 0x9e004));
-+	tcm_test(mode >= 2);
++	if (!fw_load_file()) {
++		IOLog("VGPU: probe done (no fw)\n");
++		return;
++	}
++	if (mode >= 3) {
++		gmu_boot();
++	} else {
++		tcm_test(mode >= 2);
++	}
 +	IOLog("VGPU: probe done\n");
 +}
 +
