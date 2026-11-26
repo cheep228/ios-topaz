@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..ae1320c
+index 0000000..bbf2750
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,722 @@
+@@ -0,0 +1,811 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -13934,6 +13934,82 @@ index 0000000..ae1320c
 +	return -1;
 +}
 +
++/*
++ * Tables for A810 speed bin 1 (kgsl DT on this phone + cmd-db dump), built like upstream
++ * a6xx_gmu_rpmh_votes_init(): gfx.lvl/mx.lvl, cx.lvl/mx.lvl, BCMs SH0/MC0/ACV + CN0.
++ */
++static const uint32_t gpu_khz[] = {0, 264000, 362000, 510000, 644000, 688000, 763000, 895000, 960000, 1050000};
++static const uint32_t gx_votes[] = {0x00000000, 0x00380201, 0x00400302, 0x00800403, 0x00c00504, 0x00e00605,
++	                            0x01000706, 0x01400907, 0x01800b08, 0x01a00d09};
++static const uint32_t dep_votes[] = {0xffffffff, 0x0fffc2ff, 0x0fffc3ff, 0x0fffc4ff, 0x0fffc5ff, 0x0fffc6ff,
++	                             0x0fffc7ff, 0x0fffc9ff, 0x0fffcbff, 0x0fffcdff};
++static const uint32_t gmu_khz[] = {0, 350000, 650000};
++static const uint32_t cx_votes[] = {0x00000000, 0x00400302, 0x00800403};
++/* qcom,bus-table-ddr8, KBps */
++static const uint32_t ddr_kbps[] = {0, 781250, 2136718, 3000000, 6074218, 6672899, 8171875, 10687500, 12484375, 18597656};
++
++#define BCM_CMD(commit, valid, x, y) \
++	(((uint32_t)(commit) << 30) | ((uint32_t)(valid) << 29) | (((x) & 0x3fffu) << 14) | ((y) & 0x3fffu))
++
++static int
++hfi_send_perf_table(void)
++{
++	uint32_t m[64] = {};
++	uint32_t n = 1;
++	m[n++] = 0;     /* version */
++	m[n++] = 1;     /* HFI_TABLE_GPU_PERF */
++	m[n++] = 10;
++	m[n++] = 3;
++	for (int i = 0; i < 10; i++) {
++		m[n++] = gx_votes[i];
++		m[n++] = dep_votes[i];
++		m[n++] = gpu_khz[i] / 1000;
++	}
++	m[n++] = 3;
++	m[n++] = 2;
++	for (int i = 0; i < 3; i++) {
++		m[n++] = cx_votes[i];
++		m[n++] = gmu_khz[i] / 1000;
++	}
++	return hfi_send(15, m, n, NULL, 0, "PERF_TABLE");
++}
++
++static int
++hfi_send_bw_table(void)
++{
++	static uint32_t m[160];
++	bzero(m, sizeof(m));
++	/* header, bw_level_num, cnoc_num, ddr_num, cnoc_wait, ddr_wait, cnoc_addrs[6], cnoc_data[2][6], ddr_addrs[8], ddr_data[16][8] */
++	m[1] = 10;
++	m[2] = 1;
++	m[3] = 3;
++	m[4] = 1;
++	m[5] = 7;
++	m[6] = 0x50030;                         /* CN0 */
++	m[12] = BCM_CMD(1, 0, 0, 0);
++	m[18] = BCM_CMD(1, 1, 0, 1);
++	m[24] = 0x50004;                        /* SH0: unit 4200000, width 32, buswidth 16 */
++	m[25] = 0x50000;                        /* MC0: unit 1600000, width 8, buswidth 4 */
++	m[26] = 0x50068;                        /* ACV: fixed, perfmode bit2 above 10687500 */
++	for (int i = 0; i < 10; i++) {
++		uint32_t *d = &m[32 + 8 * i];
++		uint64_t bw = ddr_kbps[i];
++		if (bw == 0) {
++			d[0] = d[1] = d[2] = BCM_CMD(1, 0, 0, 0);
++			continue;
++		}
++		uint64_t sh = (bw * 32 / 16) * 1000 / 4200000, mc = (bw * 8 / 4) * 1000 / 1600000;
++		sh = sh < 1 ? 1 : (sh > 0x3fff ? 0x3fff : sh);
++		mc = mc < 1 ? 1 : (mc > 0x3fff ? 0x3fff : mc);
++		d[0] = BCM_CMD(1, 1, (uint32_t)sh, (uint32_t)sh);
++		d[1] = BCM_CMD(1, 1, (uint32_t)mc, (uint32_t)mc);
++		d[2] = BCM_CMD(1, 1, 0, bw >= 10687500 ? 4u : 0u);
++	}
++	return hfi_send(3, m, 160, NULL, 0, "BW_TABLE");
++}
++
++#define GMU_PWR_CLK_STATUS 0x1f7e8
++
 +static void
 +hfi_start(void)
 +{
@@ -13944,11 +14020,24 @@ index 0000000..ae1320c
 +		return;
 +	}
 +	uint32_t m[8] = {};
-+	hfi_send(5, m, 1, NULL, 0, "TEST");
 +	uint32_t v = 0;
 +	m[1] = (1u << 28) | (1u << 19) | (1u << 17);
 +	hfi_send(1, m, 2, &v, 1, "FW_VERSION");
-+	IOLog("VGPU: HFI fw version reply %08x\n", v);
++	IOLog("VGPU: HFI fw version reply %08x; pwr_clk %08x\n", v, gmu_rd(GMU_PWR_CLK_STATUS));
++	if (hfi_send_perf_table() || hfi_send_bw_table()) {
++		return;
++	}
++	bzero(m, sizeof(m));
++	if (hfi_send(14, m, 2, NULL, 0, "CORE_FW_START")) {
++		return;
++	}
++	state("core fw start");
++	IOLog("VGPU: pwr_clk %08x\n", gmu_rd(GMU_PWR_CLK_STATUS));
++	bzero(m, sizeof(m));
++	int r = hfi_send(10, m, 1, NULL, 0, "START");
++	state("hfi start");
++	IOLog("VGPU: HFI START %s; pwr_clk %08x (bit0 GX off, bit1 GX clk off)\n", r ? "FAILED" : "OK",
++	    gmu_rd(GMU_PWR_CLK_STATUS));
 +}
 +
 +static bool
