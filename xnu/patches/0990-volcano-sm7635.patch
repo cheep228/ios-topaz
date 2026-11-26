@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..464fab1
+index 0000000..52d2ef5
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1226 @@
+@@ -0,0 +1,1248 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14299,6 +14299,27 @@ index 0000000..464fab1
 +	    g_rd(R_CP_RB_RPTR), rb_wptr, ((volatile uint32_t *)memb.va)[0], g_rd(R_RBBM_STATUS), g_rd(R_RBBM_INT_0_STATUS),
 +	    g_rd(R_CP_INT_STATUS_GLOBAL), sqe, hwf, ints, GPU_CB, rd(cb, 0x58), rd(cb, 0x64), rd(cb, 0x60), rd(cb, 0x68),
 +	    rd(smmu, 0x48), rd(smmu, 0x54));
++	if (!ok) {
++		/* where did the GX traffic go: any bank with a fault, any valid stream match, GBIF halt state */
++		for (uint32_t i = 0; i < 22; i++) {
++			volatile uint8_t *c = smmu + SMMU_CB_BASE + i * 0x1000;
++			uint32_t fsr = rd(c, 0x58);
++			if (fsr & ~0x600u) {
++				IOLog("VGPU: SUMMARY CB%u FSR %08x FAR %08x%08x FSYNR0 %08x SCTLR %08x\n", i, fsr, rd(c, 0x64),
++				    rd(c, 0x60), rd(c, 0x68), rd(c, 0));
++			}
++		}
++		for (uint32_t i = 0; i < 24; i++) {
++			uint32_t smr = rd(smmu, 0x800 + 4 * i);
++			if (smr & (1u << 31)) {
++				IOLog("VGPU: SMR%u %08x S2CR %08x\n", i, smr, rd(smmu, 0xc00 + 4 * i));
++			}
++		}
++		IOLog("VGPU: SUMMARY gbif halt %08x ack %08x rbbm_gbif halt %08x ack %08x gbif_cx_cfg %08x qsb0 %08x "
++		    "sGFSR %08x sGFAR %08x%08x sGFSYNR0 %08x\n", g_rd(R_GBIF_HALT), g_rd(R_GBIF_HALT + 1),
++		    g_rd(R_RBBM_GBIF_HALT), g_rd(R_RBBM_GBIF_HALT + 1), g_rd(0x3c00), g_rd(0x3c03), rd(smmu, 0x48),
++		    rd(smmu, 0x44), rd(smmu, 0x40), rd(smmu, 0x50));
++	}
 +	return ok;
 +}
 +
@@ -14397,7 +14418,8 @@ index 0000000..464fab1
 +	aperture(0);
 +	g_wr(R_CP_INT_MASK_GLOBAL, 0x007f007f);
 +
-+	g_wr64(R_CP_SQE_INSTR_BASE, sqeb.iova);
++	/* vgpu=7: SQE base unmapped on purpose, to see whether GX fetches reach CB3 at all (expect a CB3 fault) */
++	g_wr64(R_CP_SQE_INSTR_BASE, vgpu_mode == 7 ? 0x30000000ull : sqeb.iova);
 +	g_wr64(R_CP_RB_BASE, rbb.iova);
 +	g_wr(R_CP_RB_CNTL, 12 | (9u << 8));             /* BUFSZ log2(32K/8), BLKSZ log2(4K/8) */
 +	g_wr64(R_CP_RB_RPTR_ADDR, memb.iova);
