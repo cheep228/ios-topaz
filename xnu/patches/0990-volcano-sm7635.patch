@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..b401100
+index 0000000..464fab1
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1076 @@
+@@ -0,0 +1,1226 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14063,6 +14063,132 @@ index 0000000..b401100
 +	return oob && (p2 & 3) == 0;
 +}
 +
++/* ---------------------------------------------------------------- TrustZone: the zap shader (PAS 13) */
++
++#define ZAP_FW_PATH     "/private/var/tmp/volcano-gen80300_zap.mbn"
++#define ZAP_REGION      0x9ea9a000ull   /* DT gpu_microcode_region, 2 MB, not XNU RAM */
++#define ZAP_REGION_SIZE 0x200000u
++#define ZAP_META_OFF    0x100000u       /* metadata staged in the unused upper half */
++#define GPU_PAS_ID      13
++#define SCM_FN(svc, cmd)    (0x42000000u | ((uint32_t)(svc) << 8) | (uint32_t)(cmd))
++#define SCM_SVC_PIL         0x02
++#define PIL_INIT_IMAGE      0x01
++#define PIL_MEM_SETUP       0x02
++#define PIL_AUTH_RESET      0x05
++#define PIL_SHUTDOWN        0x06
++#define SCM_ARG_RW          2
++
++static uint64_t
++smc(uint64_t a[8])
++{
++	register uint64_t x0 __asm__("x0") = a[0], x1 __asm__("x1") = a[1], x2 __asm__("x2") = a[2],
++	    x3 __asm__("x3") = a[3], x4 __asm__("x4") = a[4], x5 __asm__("x5") = a[5], x6 __asm__("x6") = a[6],
++	    x7 __asm__("x7") = a[7];
++	__asm__ volatile ("smc #0"
++            : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
++            :
++            : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++	a[0] = x0; a[1] = x1; a[2] = x2; a[3] = x3; a[4] = x4; a[5] = x5; a[6] = x6; a[7] = x7;
++	return x0;
++}
++
++static uint64_t
++scm(uint32_t fn, uint64_t arginfo, uint64_t a, uint64_t b, uint64_t c, uint64_t *res1)
++{
++	uint64_t args[8] = { fn, arginfo, a, b, c, 0, 0, 0 };
++	smc(args);
++	for (int n = 0; args[0] == 1 && n < 100000; n++) {     /* interrupted: resume with the session in x6 */
++		uint64_t session = args[6];
++		uint64_t again[8] = { 1, arginfo, a, b, c, 0, session, 0 };
++		memcpy(args, again, sizeof(args));
++		smc(args);
++	}
++	if (res1 != NULL) {
++		*res1 = args[1];
++	}
++	return args[0];
++}
++
++/* one-file .mbn: metadata = ELF header + program headers, then the hash segment; load segments relocated to the region */
++static bool
++zap_load(void)
++{
++	void *data = NULL;
++	size_t size = 0;
++	if (topaz_fw_read(ZAP_FW_PATH, &data, &size) != 0 || data == NULL || size < 0x100) {
++		IOLog("VGPU: zap %s not readable\n", ZAP_FW_PATH);
++		return false;
++	}
++	const uint8_t *m = (const uint8_t *)data;
++	uint32_t phoff = *(const uint32_t *)(m + 28), phnum = *(const uint16_t *)(m + 44);
++	uint32_t hdr = phoff + 32 * phnum, hash_off = 0, hash_sz = 0, min_a = 0xffffffff, max_a = 0;
++	if (*(const uint32_t *)m != 0x464c457f || m[4] != 1 || hdr > size) {
++		IOLog("VGPU: zap not ELF32\n");
++		return false;
++	}
++	for (uint32_t i = 0; i < phnum; i++) {
++		const uint8_t *ph = m + phoff + 32 * i;
++		uint32_t type = *(const uint32_t *)ph, off = *(const uint32_t *)(ph + 4), paddr = *(const uint32_t *)(ph + 12);
++		uint32_t filesz = *(const uint32_t *)(ph + 16), memsz = *(const uint32_t *)(ph + 20);
++		uint32_t flags = *(const uint32_t *)(ph + 24);
++		if (((flags >> 24) & 7) == 2) {
++			hash_off = off;
++			hash_sz = filesz;
++		} else if (type == 1 && memsz != 0) {
++			min_a = paddr < min_a ? paddr : min_a;
++			uint32_t end = (paddr + memsz + 0xfff) & ~0xfffu;
++			max_a = end > max_a ? end : max_a;
++		}
++	}
++	if (hash_sz == 0 || hash_off + hash_sz > size || max_a <= min_a || max_a - min_a > ZAP_META_OFF ||
++	    hdr + hash_sz > 0x10000) {
++		IOLog("VGPU: zap layout unexpected (hash %#x+%#x, load %#x-%#x)\n", hash_off, hash_sz, min_a, max_a);
++		return false;
++	}
++	volatile uint8_t *reg = (volatile uint8_t *)ml_io_map(ZAP_REGION, ZAP_REGION_SIZE);
++	if (reg == NULL) {
++		return false;
++	}
++	volatile uint8_t *meta = reg + ZAP_META_OFF;
++	for (uint32_t i = 0; i < hdr; i++) {
++		meta[i] = m[i];
++	}
++	for (uint32_t i = 0; i < hash_sz; i++) {
++		meta[hdr + i] = m[hash_off + i];
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	uint64_t res = 0, st;
++	scm(SCM_FN(SCM_SVC_PIL, PIL_SHUTDOWN), 1, GPU_PAS_ID, 0, 0, &res);
++	st = scm(SCM_FN(SCM_SVC_PIL, PIL_INIT_IMAGE), 2 | (SCM_ARG_RW << 6), GPU_PAS_ID, ZAP_REGION + ZAP_META_OFF, 0, &res);
++	if (st != 0 || res != 0) {
++		IOLog("VGPU: SUMMARY zap init_image: %llx/%llx (meta %#x bytes)\n", st, res, hdr + hash_sz);
++		return false;
++	}
++	st = scm(SCM_FN(SCM_SVC_PIL, PIL_MEM_SETUP), 3, GPU_PAS_ID, ZAP_REGION, max_a - min_a, &res);
++	if (st != 0 || res != 0) {
++		IOLog("VGPU: SUMMARY zap mem_setup: %llx/%llx\n", st, res);
++		return false;
++	}
++	for (uint32_t i = 0; i < max_a - min_a; i += 4) {
++		*(volatile uint32_t *)(reg + i) = 0;
++	}
++	for (uint32_t i = 0; i < phnum; i++) {
++		const uint8_t *ph = m + phoff + 32 * i;
++		uint32_t type = *(const uint32_t *)ph, off = *(const uint32_t *)(ph + 4), paddr = *(const uint32_t *)(ph + 12);
++		uint32_t filesz = *(const uint32_t *)(ph + 16), flags = *(const uint32_t *)(ph + 24);
++		if (type != 1 || ((flags >> 24) & 7) == 2 || off + filesz > size) {
++			continue;
++		}
++		for (uint32_t j = 0; j < filesz; j++) {
++			reg[paddr - min_a + j] = m[off + j];
++		}
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	st = scm(SCM_FN(SCM_SVC_PIL, PIL_AUTH_RESET), 1, GPU_PAS_ID, 0, 0, &res);
++	IOLog("VGPU: SUMMARY zap auth_and_reset: %llx/%llx (meta %#x, load %#x bytes)\n", st, res, hdr + hash_sz, max_a - min_a);
++	return st == 0 && res == 0;
++}
++
 +/* ---------------------------------------------------------------- CP (upstream a8xx_gpu.c hw_init / cp_init) */
 +
 +#define SQE_FW_PATH     "/private/var/tmp/volcano-gen80300_sqe.fw"
@@ -14165,6 +14291,9 @@ index 0000000..b401100
 +	uint32_t sqe = g_rd(R_CP_SQE_STATUS_PIPE), hwf = g_rd(R_CP_HW_FAULT_PIPE), ints = g_rd(R_CP_INT_STATUS_PIPE);
 +	aperture(0);
 +	volatile uint8_t *cb = gpu_cb();
++	IOLog("VGPU: CP %s: wptr reg %u, RB_BASE %08x%08x CNTL %08x SQE_BASE %08x%08x\n", what, g_rd(R_CP_RB_WPTR),
++	    g_rd(R_CP_RB_BASE + 1), g_rd(R_CP_RB_BASE), g_rd(R_CP_RB_CNTL), g_rd(R_CP_SQE_INSTR_BASE + 1),
++	    g_rd(R_CP_SQE_INSTR_BASE));
 +	IOLog("VGPU: SUMMARY CP %s %s: rptr %u wptr %u shadow %u rbbm %08x int0 %08x cpint %08x br sqe %08x hwfault %08x "
 +	    "int %08x CB%u FSR %08x FAR %08x%08x FSYNR0 %08x sGFSR %08x sGFSYNR1 %08x\n", what, ok ? "OK" : "STUCK",
 +	    g_rd(R_CP_RB_RPTR), rb_wptr, ((volatile uint32_t *)memb.va)[0], g_rd(R_RBBM_STATUS), g_rd(R_RBBM_INT_0_STATUS),
@@ -14281,8 +14410,20 @@ index 0000000..b401100
 +	    g_rd(R_CP_SQE_STATUS_PIPE), g_rd(R_CP_HW_FAULT_PIPE), g_rd(R_CP_RB_RPTR));
 +	aperture(0);
 +
++	/* GX path to DDR: the GCC branches were HW-controlled and off before GX was up; force them on now */
++	uint32_t c0 = rd(gccb, 0x10), c1 = rd(gccb, 0x18), c2 = rd(gccb, 0x15c), c3 = cc_rd(0x90f4);
++	if (vgpu_mode != 6) {
++		rmw(gccb, 0x10, 2, 1);
++		rmw(gccb, 0x18, 2, 1);
++		rmw(gccb, 0x15c, 2, 1);
++		rmw(base, GPUCC + 0x90f4, 2, 1);
++		IODelay(100);
++	}
++	IOLog("VGPU: SUMMARY axi memnoc %08x->%08x snoc %08x->%08x ddrss %08x->%08x gpucc_memnoc %08x->%08x\n", c0,
++	    rd(gccb, 0x10), c1, rd(gccb, 0x18), c2, rd(gccb, 0x15c), c3, cc_rd(0x90f4));
++
 +	/* a8xx_cp_init */
-+	out_pkt7(23, 1);                                /* CP_THREAD_CONTROL: no concurrent binning */
++	out_pkt7(23, 1);                               /* CP_THREAD_CONTROL: no concurrent binning */
 +	out_ring(1u << 27);
 +	out_pkt7(72, 7);                                /* CP_ME_INIT */
 +	out_ring((1u << 0) | (1u << 1) | (1u << 3) | (1u << 6) | (1u << 8));
@@ -14295,7 +14436,16 @@ index 0000000..b401100
 +	if (!rb_flush("ME_INIT")) {
 +		return;
 +	}
-+	/* no zap yet: a memory write as a liveness test (CP_MEM_WRITE to memptr + 0x100) */
++	if (vgpu_mode >= 5) {
++		/* a8xx hw_init: zap, then the CP leaves secure mode */
++		if (zap_load()) {
++			out_pkt7(102, 1);               /* CP_SET_SECURE_MODE */
++			out_ring(0);
++			rb_flush("SET_SECURE_MODE");
++		}
++		IOLog("VGPU: trust_cntl %08x\n", g_rd(R_SECVID_TRUST_CNTL));
++	}
++	/* a memory write as a liveness test (CP_MEM_WRITE to memptr + 0x100) */
 +	out_pkt7(61, 3);
 +	out_ring((uint32_t)(memb.iova + 0x100));
 +	out_ring((uint32_t)((memb.iova + 0x100) >> 32));
