@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..4473955
+index 0000000..b401100
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,830 @@
+@@ -0,0 +1,1076 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -13602,7 +13602,7 @@ index 0000000..4473955
 +	return (uint64_t *)(tables.va + 4096 * tables_used++);
 +}
 +
-+static uint64_t *l1;
++static uint64_t *l1, l1pa;
 +static uint64_t *l2v[4], *l3v[4][512];
 +
 +static bool
@@ -13660,7 +13660,6 @@ index 0000000..4473955
 +	if (!gbuf_alloc(&tables, 0x20000, 0, "tables")) {
 +		return false;
 +	}
-+	uint64_t l1pa;
 +	l1 = table_new(&l1pa);
 +	if (!gbuf_alloc(&icache, 0x1000000 - 0x4000, 0x4000, "icache") || !gbuf_alloc(&dummy, 0x4000, 0x60000000, "dummy") ||
 +	    !gbuf_alloc(&debugb, 0x8000, 0x60400000, "debug") || !gbuf_alloc(&logb, 0x4000, 0x60004000, "log") ||
@@ -13742,7 +13741,9 @@ index 0000000..4473955
 +}
 +
 +static void hfi_init(void);
-+static void hfi_start(void);
++static bool hfi_start(void);
++static void cp_start(void);
++static uint32_t vgpu_mode;
 +
 +static void
 +gmu_boot(void)
@@ -13800,7 +13801,9 @@ index 0000000..4473955
 +	IOLog("VGPU: GMU log %08x %08x %08x %08x %08x %08x %08x %08x; dummy %08x debug %08x\n", lg[0], lg[1], lg[2],
 +	    lg[3], lg[4], lg[5], lg[6], lg[7], *(const uint32_t *)dummy.va, *(const uint32_t *)debugb.va);
 +	if (ok) {
-+		hfi_start();
++		if (hfi_start() && vgpu_mode >= 4) {
++			cp_start();
++		}
 +	}
 +}
 +
@@ -14010,14 +14013,14 @@ index 0000000..4473955
 +
 +#define GMU_PWR_CLK_STATUS 0x1f7e8
 +
-+static void
++static bool
 +hfi_start(void)
 +{
 +	gmu_wr(GMU_HFI_CTRL_INIT, 1);
 +	bool ok = poll(base, 4 * GMU_HFI_CTRL_STATUS, 1, 1, 10000);
 +	IOLog("VGPU: HFI queues %s (ctrl %08x)\n", ok ? "up" : "NOT up", gmu_rd(GMU_HFI_CTRL_STATUS));
 +	if (!ok) {
-+		return;
++		return false;
 +	}
 +	uint32_t m[8] = {};
 +	uint32_t v = 0;
@@ -14025,11 +14028,11 @@ index 0000000..4473955
 +	hfi_send(1, m, 2, &v, 1, "FW_VERSION");
 +	IOLog("VGPU: HFI fw version reply %08x; pwr_clk %08x\n", v, gmu_rd(GMU_PWR_CLK_STATUS));
 +	if (hfi_send_perf_table() || hfi_send_bw_table()) {
-+		return;
++		return false;
 +	}
 +	bzero(m, sizeof(m));
 +	if (hfi_send(14, m, 2, NULL, 0, "CORE_FW_START")) {
-+		return;
++		return false;
 +	}
 +	state("core fw start");
 +	IOLog("VGPU: pwr_clk %08x\n", gmu_rd(GMU_PWR_CLK_STATUS));
@@ -14039,7 +14042,7 @@ index 0000000..4473955
 +	IOLog("VGPU: HFI START %s; pwr_clk %08x (bit0 GX off, bit1 GX clk off)\n", r ? "FAILED" : "OK",
 +	    gmu_rd(GMU_PWR_CLK_STATUS));
 +	if (r) {
-+		return;
++		return false;
 +	}
 +	/* a6xx_hfi_set_freq: GX_BW_PERF_VOTE, blocking; 510 MHz (idx 3), 6 GB/s (bw idx 4) */
 +	bzero(m, sizeof(m));
@@ -14057,6 +14060,248 @@ index 0000000..4473955
 +	IOLog("VGPU: SUMMARY vote %d pwr_clk %08x; OOB GPU_SET %s (intr %08x) pwr_clk %08x GX GDSC(cc) %08x => GX %s\n", r,
 +	    p1, oob ? "ack" : "TIMEOUT", info, p2, cc_rd(0x905c), (p2 & 3) ? "OFF" : "ON");
 +	hfi_drain_debug();
++	return oob && (p2 & 3) == 0;
++}
++
++/* ---------------------------------------------------------------- CP (upstream a8xx_gpu.c hw_init / cp_init) */
++
++#define SQE_FW_PATH     "/private/var/tmp/volcano-gen80300_sqe.fw"
++#define GPU_SID         0               /* DT gfx3d_user iommus = <&kgsl_smmu 0 0> */
++#define GPU_CB          3
++#define GPU_SMR         3
++
++/* a810_nonctxt_regs (a8xx_catalog.c), offsets resolved from the generated a6xx.xml.h; pipes = BIT(PIPE_x) */
++static const struct { uint32_t off, val, pipes; } a810_nonctxt[] = {
++	{0x00814, 0x00000101, 0x01}, {0x08702, 0x00f80800, 0x06}, {0x09e0a, 0x00000001, 0x06},
++	{0x09e0d, 0x10010000, 0x06}, {0x09e64, 0x00000002, 0x06}, {0x09e50, 0x00000003, 0x02},
++	{0x09e50, 0x00000023, 0x04}, {0x09f20, 0x00000200, 0x06}, {0x09e22, 0x00500000, 0x06},
++	{0x09e23, 0x00500050, 0x06}, {0x08e07, 0x00000068, 0x02}, {0x08e06, 0x00002200, 0x02},
++	{0x08f01, 0x00000007, 0x02}, {0x08f02, 0x00004000, 0x02}, {0x00440, 0x00000001, 0x01},
++	{0x005ec, 0x00000001, 0x01}, {0x00010, 0x00000030, 0x01}, {0x00011, 0x00000030, 0x01},
++	{0x00e12, 0x010240e0, 0x01}, {0x00008, 0x22122212, 0x01}, {0x0009d, 0x00000040, 0x01},
++	{0x0ae09, 0x00c00000, 0x01}, {0x0ae0a, 0x00300000, 0x01}, {0x0ae0f, 0x0000003f, 0x01},
++	{0x0ae6b, 0x00000080, 0x01}, {0x0b600, 0x10100000, 0x01}, {0x0b602, 0x04000724, 0x01},
++	{0x00e01, 0x00020000, 0x01}, {0x00f01, 0x00001000, 0x01}, {0x00f02, 0x00000800, 0x01},
++	{0x00e16, 0x00000100, 0x01}, {0x00e10, 0x00000020, 0x01}, {0x0a600, 0x00008000, 0x06},
++	{0x0a639, 0x00500050, 0x06}, {0x0a63a, 0x00600060, 0x06}, {0x0a63b, 0x00200020, 0x06},
++	{0x0a63c, 0x00100020, 0x06}, {0x09741, 0x00000001, 0x06}, {0x08e09, 0x00900000, 0x02},
++};
++
++#define R_RBBM_GBIF_HALT        0x000a
++#define R_RBBM_STATUS           0x0012
++#define R_RBBM_INT_0_STATUS     0x006a
++#define R_CP_RB_BASE            0x0800
++#define R_CP_RB_CNTL            0x0802
++#define R_CP_RB_RPTR_ADDR       0x0804
++#define R_CP_RB_RPTR            0x0806
++#define R_CP_RB_WPTR            0x0807
++#define R_CP_RB_RPTR_ADDR_BV    0x0808
++#define R_CP_SQE_CNTL           0x0815
++#define R_CP_SQE_INSTR_BASE     0x0816
++#define R_CP_APERTURE_HOST      0x081c
++#define R_CP_APRIV_CNTL_PIPE    0x084d
++#define R_CP_HW_FAULT_PIPE      0x08b3
++#define R_CP_HW_FAULT_MASK_PIPE 0x08b4
++#define R_CP_INT_STATUS_GLOBAL  0x08b5
++#define R_CP_INT_MASK_GLOBAL    0x08b6
++#define R_CP_INT_STATUS_PIPE    0x08b7
++#define R_CP_INT_MASK_PIPE      0x08b8
++#define R_CP_SQE_STATUS_PIPE    0x08bb
++#define R_UCHE_WRITE_THRU       0x0e06
++#define R_UCHE_TRAP_BASE        0x0e08
++#define R_UCHE_CLIENT_PF        0x0e11
++#define R_UCHE_CCHE_WT          0x0f04
++#define R_UCHE_CCHE_TRAP        0x0f06
++#define R_UCHE_CCHE_GMEM_MIN    0x0f08
++#define R_GBIF_HALT             0x3c45
++#define R_SP_GMEM_MIN           0xae10
++#define R_SECVID_TRUST_CNTL     0xf400
++#define R_TSB_TRUSTED_BASE      0xf800
++#define R_TSB_TRUSTED_SIZE      0xf802
++#define R_SECVID_TSB_CNTL       0xf803
++
++#define PIPE_BR 1
++#define PIPE_LPAC 3
++#define PIPE_DDE_BV 7
++
++static struct gbuf sqeb, rbb, memb;
++static uint32_t rb_wptr;
++
++static inline uint32_t g_rd(uint32_t reg) { return rd(base, 4 * reg); }
++static inline void g_wr(uint32_t reg, uint32_t v) { wr(base, 4 * reg, v); }
++static inline void g_wr64(uint32_t reg, uint64_t v) { g_wr(reg, (uint32_t)v); g_wr(reg + 1, (uint32_t)(v >> 32)); }
++static inline void aperture(uint32_t pipe) { g_wr(R_CP_APERTURE_HOST, (pipe & 0xf) << 12); }
++static inline volatile uint8_t *gpu_cb(void) { return smmu + SMMU_CB_BASE + GPU_CB * 0x1000; }
++
++static uint32_t
++pm4_parity(uint32_t v)
++{
++	return (0x9669 >> (0xf & (v ^ (v >> 4) ^ (v >> 8) ^ (v >> 12) ^ (v >> 16) ^ (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1;
++}
++
++static void
++out_pkt7(uint32_t op, uint32_t cnt)
++{
++	uint32_t *r = (uint32_t *)rbb.va;
++	r[rb_wptr++] = 0x70000000u | cnt | (pm4_parity(cnt) << 15) | ((op & 0x7f) << 16) | (pm4_parity(op) << 23);
++}
++
++static void
++out_ring(uint32_t v)
++{
++	((uint32_t *)rbb.va)[rb_wptr++] = v;
++}
++
++/* clean the ring, write WPTR, wait for RPTR to catch up */
++static bool
++rb_flush(const char *what)
++{
++	__asm__ volatile ("dsb sy" ::: "memory");
++	sweet_dcache_clean((vm_offset_t)rbb.va, (unsigned)rbb.size);
++	g_wr(R_CP_RB_WPTR, rb_wptr);
++	bool ok = poll(base, 4 * R_CP_RB_RPTR, 0xffffffff, rb_wptr, 200000);
++	sweet_dcache_flush((vm_offset_t)memb.va, 0x1000);
++	aperture(PIPE_BR);
++	uint32_t sqe = g_rd(R_CP_SQE_STATUS_PIPE), hwf = g_rd(R_CP_HW_FAULT_PIPE), ints = g_rd(R_CP_INT_STATUS_PIPE);
++	aperture(0);
++	volatile uint8_t *cb = gpu_cb();
++	IOLog("VGPU: SUMMARY CP %s %s: rptr %u wptr %u shadow %u rbbm %08x int0 %08x cpint %08x br sqe %08x hwfault %08x "
++	    "int %08x CB%u FSR %08x FAR %08x%08x FSYNR0 %08x sGFSR %08x sGFSYNR1 %08x\n", what, ok ? "OK" : "STUCK",
++	    g_rd(R_CP_RB_RPTR), rb_wptr, ((volatile uint32_t *)memb.va)[0], g_rd(R_RBBM_STATUS), g_rd(R_RBBM_INT_0_STATUS),
++	    g_rd(R_CP_INT_STATUS_GLOBAL), sqe, hwf, ints, GPU_CB, rd(cb, 0x58), rd(cb, 0x64), rd(cb, 0x60), rd(cb, 0x68),
++	    rd(smmu, 0x48), rd(smmu, 0x54));
++	return ok;
++}
++
++static bool
++smmu_gpu_setup(void)
++{
++	volatile uint8_t *cb = gpu_cb();
++	wr(cb, 0x000, 0);
++	wr(cb, 0x058, 0xffffffff);
++	wr(smmu, 0x1800 + 4 * GPU_CB, 1);
++	wr(smmu, 0x1000 + 4 * GPU_CB, 0x0001f000);
++	wr(cb, 0x020, (uint32_t)l1pa);                  /* same tables as the GMU: GPU buffers at 0x20000000+ */
++	wr(cb, 0x024, (uint32_t)(l1pa >> 32));
++	wr(cb, 0x028, 0);
++	wr(cb, 0x02c, 0);
++	wr(cb, 0x030, 32 | (1u << 23));
++	wr(cb, 0x010, 1);
++	wr(cb, 0x038, 0x44);
++	wr(cb, 0x03c, 0);
++	wr(cb, 0x618, 0);
++	wr(cb, 0x7f0, 0);
++	poll(cb, 0x7f4, 1, 0, 1000);
++	wr(cb, 0x000, 0x67);
++	wr(smmu, 0xc00 + 4 * GPU_SMR, GPU_CB);
++	wr(smmu, 0x800 + 4 * GPU_SMR, (1u << 31) | GPU_SID);
++	IOLog("VGPU: SMMU CB%u for SID %u: SCTLR %08x SMR %08x S2CR %08x\n", GPU_CB, GPU_SID, rd(cb, 0),
++	    rd(smmu, 0x800 + 4 * GPU_SMR), rd(smmu, 0xc00 + 4 * GPU_SMR));
++	return true;
++}
++
++static void
++cp_start(void)
++{
++	void *data = NULL;
++	size_t size = 0;
++	if (topaz_fw_read(SQE_FW_PATH, &data, &size) != 0 || data == NULL || size < 16) {
++		IOLog("VGPU: SQE fw %s not readable\n", SQE_FW_PATH);
++		return;
++	}
++	IOLog("VGPU: SQE fw %zu bytes, version word %08x\n", size, ((const uint32_t *)data)[1]);
++	if (!gbuf_alloc(&sqeb, size, 0x20000000, "sqe") || !gbuf_alloc(&rbb, 0x8000, 0x20100000, "rb") ||
++	    !gbuf_alloc(&memb, 0x4000, 0x20200000, "memptr")) {
++		return;
++	}
++	memcpy(sqeb.va, (const uint8_t *)data + 4, size - 4);
++	if (!gbuf_map(&sqeb) || !gbuf_map(&rbb) || !gbuf_map(&memb)) {
++		return;
++	}
++	sweet_dcache_clean((vm_offset_t)sqeb.va, (unsigned)sqeb.size);
++	sweet_dcache_clean((vm_offset_t)rbb.va, (unsigned)rbb.size);
++	sweet_dcache_clean((vm_offset_t)memb.va, (unsigned)memb.size);
++	sweet_dcache_clean((vm_offset_t)tables.va, (unsigned)tables.size);
++	wr(gmu_cb(), 0x618, 0);                         /* TLBIALL on the GMU bank too: shared tables changed */
++	wr(gmu_cb(), 0x7f0, 0);
++	poll(gmu_cb(), 0x7f4, 1, 0, 1000);
++	smmu_gpu_setup();
++
++	IOLog("VGPU: [hw_init] rbbm %08x rptr %08x sqe_cntl %08x trust %08x\n", g_rd(R_RBBM_STATUS), g_rd(R_CP_RB_RPTR),
++	    g_rd(R_CP_SQE_CNTL), g_rd(R_SECVID_TRUST_CNTL));
++	aperture(0);
++	g_wr(R_GBIF_HALT, 0);
++	(void)g_rd(R_GBIF_HALT);
++	g_wr(R_RBBM_GBIF_HALT, 0);
++	(void)g_rd(R_RBBM_GBIF_HALT);
++	g_wr(R_SECVID_TSB_CNTL, 0);
++	g_wr64(R_TSB_TRUSTED_BASE, 0);
++	g_wr(R_TSB_TRUSTED_SIZE, 0);
++	g_wr64(R_UCHE_CCHE_GMEM_MIN, 64ull << 20);
++	g_wr64(R_SP_GMEM_MIN, 64ull << 20);
++	const uint64_t trap = 0x1fffffffff000ull;
++	g_wr64(R_UCHE_TRAP_BASE, trap);
++	g_wr64(R_UCHE_WRITE_THRU, trap);
++	g_wr64(R_UCHE_CCHE_TRAP, trap);
++	g_wr64(R_UCHE_CCHE_WT, trap);
++	g_wr(R_UCHE_CLIENT_PF, (1u << 7) | 1);
++	for (uint32_t p = 0; p <= PIPE_DDE_BV; p++) {
++		if (p == PIPE_LPAC) {
++			continue;
++		}
++		aperture(p);
++		for (unsigned i = 0; i < sizeof(a810_nonctxt) / sizeof(a810_nonctxt[0]); i++) {
++			if (a810_nonctxt[i].pipes & (1u << p)) {
++				g_wr(a810_nonctxt[i].off, a810_nonctxt[i].val);
++			}
++		}
++	}
++	for (uint32_t p = PIPE_BR; p <= PIPE_DDE_BV; p++) {
++		if (p == PIPE_LPAC) {
++			continue;
++		}
++		aperture(p);
++		g_wr(R_CP_APRIV_CNTL_PIPE, p == PIPE_BR ? 0x6f : 0x0f);
++		g_wr(R_CP_INT_MASK_PIPE, 0x07e83f7f);
++		g_wr(R_CP_HW_FAULT_MASK_PIPE, 0x0000077f);
++	}
++	aperture(0);
++	g_wr(R_CP_INT_MASK_GLOBAL, 0x007f007f);
++
++	g_wr64(R_CP_SQE_INSTR_BASE, sqeb.iova);
++	g_wr64(R_CP_RB_BASE, rbb.iova);
++	g_wr(R_CP_RB_CNTL, 12 | (9u << 8));             /* BUFSZ log2(32K/8), BLKSZ log2(4K/8) */
++	g_wr64(R_CP_RB_RPTR_ADDR, memb.iova);
++	g_wr64(R_CP_RB_RPTR_ADDR_BV, memb.iova + 4);
++	rb_wptr = 0;
++	g_wr(R_CP_SQE_CNTL, 1);
++	IODelay(1000);
++	aperture(PIPE_BR);
++	IOLog("VGPU: [sqe on] rbbm %08x br sqe %08x hwfault %08x rptr %u\n", g_rd(R_RBBM_STATUS),
++	    g_rd(R_CP_SQE_STATUS_PIPE), g_rd(R_CP_HW_FAULT_PIPE), g_rd(R_CP_RB_RPTR));
++	aperture(0);
++
++	/* a8xx_cp_init */
++	out_pkt7(23, 1);                                /* CP_THREAD_CONTROL: no concurrent binning */
++	out_ring(1u << 27);
++	out_pkt7(72, 7);                                /* CP_ME_INIT */
++	out_ring((1u << 0) | (1u << 1) | (1u << 3) | (1u << 6) | (1u << 8));
++	out_ring(3);
++	out_ring(0x20000000);
++	out_ring(2);
++	out_ring((uint32_t)(memb.iova + 0x1000));       /* pwrup reglist: zeroed = empty lists */
++	out_ring((uint32_t)((memb.iova + 0x1000) >> 32));
++	out_ring(1u << 31);
++	if (!rb_flush("ME_INIT")) {
++		return;
++	}
++	/* no zap yet: a memory write as a liveness test (CP_MEM_WRITE to memptr + 0x100) */
++	out_pkt7(61, 3);
++	out_ring((uint32_t)(memb.iova + 0x100));
++	out_ring((uint32_t)((memb.iova + 0x100) >> 32));
++	out_ring(0xcafe0810);
++	rb_flush("MEM_WRITE");
++	IOLog("VGPU: SUMMARY mem_write readback %08x\n", ((volatile uint32_t *)memb.va)[0x40]);
 +}
 +
 +static bool
@@ -14085,6 +14330,7 @@ index 0000000..4473955
 +{
 +	uint32_t mode = 1;
 +	PE_parse_boot_argn("vgpu", &mode, sizeof(mode));
++	vgpu_mode = mode;
 +	IOSleep(15000);
 +	base = (volatile uint8_t *)ml_io_map(GPU_PHYS, GPU_MAP);
 +	smmu = (volatile uint8_t *)ml_io_map(SMMU_PHYS, 0x40000);
