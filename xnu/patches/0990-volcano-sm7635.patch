@@ -13308,7 +13308,7 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..75efe0e
+index 0000000..8cf52f5
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
 @@ -0,0 +1,568 @@
@@ -13657,12 +13657,12 @@ index 0000000..75efe0e
 +static bool
 +smmu_gmu_setup(void)
 +{
-+	if (!gbuf_alloc(&tables, 0x10000, 0, "tables")) {
++	if (!gbuf_alloc(&tables, 0x20000, 0, "tables")) {
 +		return false;
 +	}
 +	uint64_t l1pa;
 +	l1 = table_new(&l1pa);
-+	if (!gbuf_alloc(&icache, 0x100000, 0x4000, "icache") || !gbuf_alloc(&dummy, 0x4000, 0x60000000, "dummy") ||
++	if (!gbuf_alloc(&icache, 0x1000000 - 0x4000, 0x4000, "icache") || !gbuf_alloc(&dummy, 0x4000, 0x60000000, "dummy") ||
 +	    !gbuf_alloc(&debugb, 0x8000, 0x60400000, "debug") || !gbuf_alloc(&logb, 0x4000, 0x60004000, "log") ||
 +	    !gbuf_alloc(&hfib, 0x4000, 0x60008000, "hfi")) {
 +		return false;
