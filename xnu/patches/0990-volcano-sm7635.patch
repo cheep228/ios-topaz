@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..bbf2750
+index 0000000..4473955
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,811 @@
+@@ -0,0 +1,830 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14038,6 +14038,25 @@ index 0000000..bbf2750
 +	state("hfi start");
 +	IOLog("VGPU: HFI START %s; pwr_clk %08x (bit0 GX off, bit1 GX clk off)\n", r ? "FAILED" : "OK",
 +	    gmu_rd(GMU_PWR_CLK_STATUS));
++	if (r) {
++		return;
++	}
++	/* a6xx_hfi_set_freq: GX_BW_PERF_VOTE, blocking; 510 MHz (idx 3), 6 GB/s (bw idx 4) */
++	bzero(m, sizeof(m));
++	m[1] = 1;
++	m[2] = 3;
++	m[3] = 4;
++	r = hfi_send(30, m, 4, NULL, 0, "GX_BW_PERF_VOTE");
++	uint32_t p1 = gmu_rd(GMU_PWR_CLK_STATUS);
++	/* a6xx_gmu_set_oob(GPU_SET), non-legacy bits: request 30, ack 31 */
++	gmu_wr(GMU_HOST2GMU_INTR_SET, 1u << 30);
++	bool oob = poll(base, 4 * GMU_GMU2HOST_INTR_INFO, 1u << 31, 1u << 31, 100000);
++	uint32_t info = gmu_rd(GMU_GMU2HOST_INTR_INFO);
++	gmu_wr(GMU_GMU2HOST_INTR_CLR, 1u << 31);
++	uint32_t p2 = gmu_rd(GMU_PWR_CLK_STATUS);
++	IOLog("VGPU: SUMMARY vote %d pwr_clk %08x; OOB GPU_SET %s (intr %08x) pwr_clk %08x GX GDSC(cc) %08x => GX %s\n", r,
++	    p1, oob ? "ack" : "TIMEOUT", info, p2, cc_rd(0x905c), (p2 & 3) ? "OFF" : "ON");
++	hfi_drain_debug();
 +}
 +
 +static bool
