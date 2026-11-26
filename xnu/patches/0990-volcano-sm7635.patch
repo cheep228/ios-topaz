@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..c661a55
+index 0000000..938494e
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,269 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -13319,7 +13319,7 @@ index 0000000..c661a55
 + * downstream gpucc-volcano.c / kgsl gen8 and upstream drm/msm a8xx (Milos = SM7635) do:
 + *   GCC: GPLL0 (+div) to the GPU CC (0x52000 bits 15/16), gpu_memnoc_gfx 0x71010,
 + *        gpu_snoc_dvm_gfx 0x71018, ddrss_gpu_axi 0x7115c
-+ *   GPU CC (0x3d90000): CX GDSC 0x9108, cxo 0x90e4, ahb 0x90bc, gmu rcg 0x9318
++ *   GPU CC (0x3d90000): CX GDSC 0x9080, cxo 0x90e4, ahb 0x90bc, gmu rcg 0x9318
 + *        (GPLL0/3 = 200 MHz), cx_gmu 0x90d4, hub rcg 0x93ec (200 MHz), hub_cx_int 0x90e8,
 + *        hub_aon 0x93e8, hlos1_vote_gpu_smmu 0x7000, memnoc_gfx 0x90f4
 + * then reads GMU registers (CX domain: GPU base 0x3d00000 + 4 * reg, upstream a6xx_gmu.xml),
@@ -13425,7 +13425,7 @@ index 0000000..c661a55
 +state(const char *when)
 +{
 +	IOLog("VGPU: [%s] CX GDSC %08x GX GDSC(cc) %08x gmu_clk %08x ahb %08x cxo %08x smmu_vote %08x\n", when,
-+	    cc_rd(0x9108), cc_rd(0x905c), cc_rd(0x90d4), cc_rd(0x90bc), cc_rd(0x90e4), cc_rd(0x7000));
++	    cc_rd(0x9080), cc_rd(0x905c), cc_rd(0x90d4), cc_rd(0x90bc), cc_rd(0x90e4), cc_rd(0x7000));
 +}
 +
 +static bool
@@ -13438,11 +13438,11 @@ index 0000000..c661a55
 +	branch(gccb, 0x18, "gcc_gpu_snoc_dvm_gfx");
 +	branch(gccb, 0x15c, "gcc_ddrss_gpu_axi");
 +
-+	uint32_t g = cc_rd(0x9108);
++	uint32_t g = cc_rd(0x9080);
 +	if (!(g & GDSC_PWR_ON)) {
-+		cc_rmw(0x9108, GDSC_COLLAPSE, 0);
-+		bool ok = poll(base, GPUCC + 0x9108, GDSC_PWR_ON, GDSC_PWR_ON, 1000);
-+		IOLog("VGPU: CX GDSC %08x -> %08x %s\n", g, cc_rd(0x9108), ok ? "ON" : "NO PWR_ON");
++		cc_rmw(0x9080, GDSC_COLLAPSE, 0);
++		bool ok = poll(base, GPUCC + 0x9080, GDSC_PWR_ON, GDSC_PWR_ON, 1000);
++		IOLog("VGPU: CX GDSC %08x -> %08x %s\n", g, cc_rd(0x9080), ok ? "ON" : "NO PWR_ON");
 +		if (!ok) {
 +			return false;
 +		}
@@ -13459,6 +13459,34 @@ index 0000000..c661a55
 +	branch(base, GPUCC + 0x7000, "gpu_cc_hlos1_vote_smmu");
 +	branch(base, GPUCC + 0x90f4, "gpu_cc_memnoc_gfx");
 +	return ok;
++}
++
++
++/* GPU SMMU (MMU-500 style): what the bootloader / hypervisor left: stream match, context banks */
++static void
++smmu_dump(void)
++{
++	uint32_t idr0 = rd(smmu, 0x20), idr1 = rd(smmu, 0x24);
++	uint32_t nsmr = idr0 & 0xff, ncb = idr1 & 0xff, pshift = (idr1 & (1u << 31)) ? 16 : 12;
++	uint32_t npage = 1u << (((idr1 >> 28) & 7) + 1);
++	uint32_t cbbase = npage << pshift;
++	IOLog("VGPU: SMMU IDR0 %08x IDR1 %08x: %u SMRs, %u CBs, page %u, CB space at %#x\n", idr0, idr1, nsmr, ncb,
++	    1u << pshift, cbbase);
++	for (uint32_t i = 0; i < nsmr && i < 64; i++) {
++		uint32_t smr = rd(smmu, 0x800 + 4 * i), s2cr = rd(smmu, 0xc00 + 4 * i);
++		if (smr & (1u << 31)) {
++			IOLog("VGPU: SMR%u %08x (sid %#x mask %#x) S2CR %08x\n", i, smr, smr & 0xffff, (smr >> 16) & 0x7fff, s2cr);
++		}
++	}
++	if (cbbase + ncb * (1u << pshift) > 0x40000) {
++		return;
++	}
++	for (uint32_t i = 0; i < ncb && i < 32; i++) {
++		volatile uint8_t *cb = smmu + cbbase + i * (1u << pshift);
++		uint32_t sctlr = rd(cb, 0);
++		IOLog("VGPU: CB%u CBAR %08x SCTLR %08x TTBR0 %08x%08x TCR %08x FSR %08x\n", i, rd(smmu, 0x1000 + 4 * i),
++		    sctlr, rd(cb, 0x24), rd(cb, 0x20), rd(cb, 0x30), rd(cb, 0x58));
++	}
 +}
 +
 +struct blk {
@@ -13506,7 +13534,7 @@ index 0000000..c661a55
 +	PE_parse_boot_argn("vgpu", &mode, sizeof(mode));
 +	IOSleep(15000);
 +	base = (volatile uint8_t *)ml_io_map(GPU_PHYS, GPU_MAP);
-+	smmu = (volatile uint8_t *)ml_io_map(SMMU_PHYS, 0x10000);
++	smmu = (volatile uint8_t *)ml_io_map(SMMU_PHYS, 0x40000);
 +	gcca = (volatile uint8_t *)ml_io_map(GCC_A_PHYS, 0x1000);
 +	gccb = (volatile uint8_t *)ml_io_map(GCC_B_PHYS, 0x1000);
 +	if (base == NULL || smmu == NULL || gcca == NULL || gccb == NULL) {
@@ -13530,6 +13558,7 @@ index 0000000..c661a55
 +	    gmu_rd(GMU_AO_SPARE_CNTL), gmu_rd(GMU_AHB_FENCE_RANGE_0), a0, a1);
 +	IOLog("VGPU: SMMU sCR0 %08x IDR0 %08x IDR1 %08x IDR2 %08x IDR7 %08x sGFSR %08x\n",
 +	    rd(smmu, 0x0), rd(smmu, 0x20), rd(smmu, 0x24), rd(smmu, 0x28), rd(smmu, 0x3c), rd(smmu, 0x48));
++	smmu_dump();
 +	IOLog("VGPU: RSCC(gpu+0x50000) %08x %08x cx_misc %08x %08x\n",
 +	    rd(base, 0x50000), rd(base, 0x50004), rd(base, 0x9e000), rd(base, 0x9e004));
 +	tcm_test(mode >= 2);
