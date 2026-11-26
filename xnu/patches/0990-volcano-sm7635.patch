@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..3ebd10a
+index 0000000..f5a12d7
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,559 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -13567,8 +13567,13 @@ index 0000000..3ebd10a
 +gbuf_alloc(struct gbuf *b, uint64_t size, uint64_t iova, const char *name)
 +{
 +	size = (size + 0x3fff) & ~0x3fffull;
-+	b->md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-+	    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache, size, 0x0000000ffffff000ull);
++	/*
++	 * Not contiguous: contiguous / masked allocations come from RAM below the
++	 * kernel's bank (0x900000000 + 4 GB here), which phystokv cannot map (panic).
++	 * The SMMU maps each 4 KB on its own; 36-bit OAS covers the kernel's bank.
++	 */
++	b->md = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++	    kIODirectionInOut | kIOMapWriteCombineCache, size, 0x4000);
 +	if (b->md == NULL) {
 +		IOLog("VGPU: alloc %s (%#llx) failed\n", name, size);
 +		return false;
@@ -13590,7 +13595,7 @@ index 0000000..3ebd10a
 +	if ((tables_used + 1) * 4096 > tables.size) {
 +		return NULL;
 +	}
-+	*pa = tables.pa + 4096 * tables_used;
++	*pa = tables.md->getPhysicalSegment(4096 * tables_used, NULL, kIOMemoryMapperNone);
 +	return (uint64_t *)(tables.va + 4096 * tables_used++);
 +}
 +
