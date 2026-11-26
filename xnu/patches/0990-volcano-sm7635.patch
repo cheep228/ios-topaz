@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..d141f89
+index 0000000..ae1320c
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,722 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -13741,6 +13741,9 @@ index 0000000..d141f89
 +	    gmu_rd(GMU_CORE_FW_VERSION), gmu_rd(GMU_CM3_DTCM_START + 0xff8));
 +}
 +
++static void hfi_init(void);
++static void hfi_start(void);
++
 +static void
 +gmu_boot(void)
 +{
@@ -13760,6 +13763,7 @@ index 0000000..d141f89
 +	    rd(base, 0x50000 + 4 * RSCC_SEQ_BUSY_DRV0));
 +
 +	gmu_load();
++	hfi_init();
 +	uint32_t v = gmu_rd(GMU_CM3_DTCM_START + 0xff8);
 +	uint32_t mask = v <= 0x20010004 ? 0xffffffff : 0x1ff, want = v <= 0x20010004 ? 0xbabeface : 0x100;
 +
@@ -13795,6 +13799,156 @@ index 0000000..d141f89
 +	const uint32_t *lg = (const uint32_t *)logb.va;
 +	IOLog("VGPU: GMU log %08x %08x %08x %08x %08x %08x %08x %08x; dummy %08x debug %08x\n", lg[0], lg[1], lg[2],
 +	    lg[3], lg[4], lg[5], lg[6], lg[7], *(const uint32_t *)dummy.va, *(const uint32_t *)debugb.va);
++	if (ok) {
++		hfi_start();
++	}
++}
++
++/* ---------------------------------------------------------------- HFI (upstream a6xx_hfi.c) */
++
++#define GMU_HFI_CTRL_INIT       0x1f986
++#define GMU_GMU2HOST_INTR_CLR   0x1f991
++#define GMU_GMU2HOST_INTR_INFO  0x1f992
++#define GMU_HOST2GMU_INTR_SET   0x1f994
++
++struct hfi_qhdr {
++	uint32_t status, iova, type, size, msg_size, dropped, rx_wm, tx_wm, rx_req, tx_req, rd, wr;
++};
++static struct hfi_qhdr *hq[3];
++static uint32_t *hqdata[3];
++static uint32_t hfi_seq;
++
++static void
++hfi_init(void)
++{
++	uint32_t *t = (uint32_t *)hfib.va;
++	t[0] = 0;                                       /* version */
++	t[1] = 6 * 4 + 3 * sizeof(struct hfi_qhdr);     /* size */
++	t[2] = 6;                                       /* qhdr0_offset (dwords) */
++	t[3] = sizeof(struct hfi_qhdr) / 4;
++	t[4] = 3;
++	t[5] = 3;
++	for (uint32_t i = 0; i < 3; i++) {
++		struct hfi_qhdr *h = (struct hfi_qhdr *)(hfib.va + 24) + i;
++		bzero(h, sizeof(*h));
++		h->iova = (uint32_t)hfib.iova + 0x1000 * (i + 1);
++		h->type = (10u << 8) | i;
++		h->status = 1;
++		h->size = 0x1000 / 4;
++		h->rx_wm = h->tx_wm = h->rx_req = 1;
++		hq[i] = h;
++		hqdata[i] = (uint32_t *)(hfib.va + 0x1000 * (i + 1));
++	}
++	sweet_dcache_clean((vm_offset_t)hfib.va, (unsigned)hfib.size);
++}
++
++/* one message from queue q into buf (max dwords): dwords read, 0 if empty */
++static uint32_t
++hfi_read(uint32_t q, uint32_t *buf, uint32_t max)
++{
++	sweet_dcache_flush((vm_offset_t)hfib.va, (unsigned)hfib.size);
++	struct hfi_qhdr *h = hq[q];
++	uint32_t idx = h->rd;
++	if (idx == h->wr) {
++		return 0;
++	}
++	uint32_t n = (hqdata[q][idx] >> 8) & 0xff;
++	if (n == 0 || n > max) {
++		IOLog("VGPU: HFI q%u bad header %08x at %u\n", q, hqdata[q][idx], idx);
++		h->rd = h->wr;
++		sweet_dcache_clean((vm_offset_t)h, sizeof(*h));
++		return 0;
++	}
++	for (uint32_t i = 0; i < n; i++) {
++		buf[i] = hqdata[q][idx];
++		idx = (idx + 1) % h->size;
++	}
++	idx = ((idx + 3) & ~3u) % h->size;
++	h->rd = idx;
++	sweet_dcache_clean((vm_offset_t)h, sizeof(*h));
++	return n;
++}
++
++static void
++hfi_drain_debug(void)
++{
++	uint32_t m[32];
++	for (int k = 0; k < 8; k++) {
++		uint32_t n = hfi_read(2, m, 32);
++		if (n == 0) {
++			break;
++		}
++		IOLog("VGPU: HFI dbg %08x %08x %08x %08x %08x %08x\n", m[0], n > 1 ? m[1] : 0, n > 2 ? m[2] : 0,
++		    n > 3 ? m[3] : 0, n > 4 ? m[4] : 0, n > 5 ? m[5] : 0);
++	}
++}
++
++/* send msg (dwords incl. header slot); wait for the ack; 0 ok, else -1 timeout, error code otherwise */
++static int
++hfi_send(uint32_t id, uint32_t *msg, uint32_t dwords, uint32_t *payload, uint32_t plen, const char *name)
++{
++	struct hfi_qhdr *h = hq[0];
++	uint32_t seq = ++hfi_seq % 0xfff;
++	msg[0] = (seq << 20) | (0u << 16) | (dwords << 8) | id;
++	sweet_dcache_flush((vm_offset_t)h, sizeof(*h));
++	uint32_t idx = h->wr;
++	for (uint32_t i = 0; i < dwords; i++) {
++		hqdata[0][idx] = msg[i];
++		idx = (idx + 1) % h->size;
++	}
++	for (; idx % 4; idx = (idx + 1) % h->size) {
++		hqdata[0][idx] = 0xfafafafa;
++	}
++	sweet_dcache_clean((vm_offset_t)hqdata[0], 0x1000);
++	h->wr = idx;
++	sweet_dcache_clean((vm_offset_t)h, sizeof(*h));
++	gmu_wr(GMU_HOST2GMU_INTR_SET, 1);
++
++	for (int tries = 0; tries < 4; tries++) {
++		if (!poll(base, 4 * GMU_GMU2HOST_INTR_INFO, 1, 1, 200000)) {
++			IOLog("VGPU: HFI %s (seq %u): no response (intr %08x, cmdq rd %u wr %u)\n", name, seq,
++			    gmu_rd(GMU_GMU2HOST_INTR_INFO), h->rd, h->wr);
++			hfi_drain_debug();
++			return -1;
++		}
++		gmu_wr(GMU_GMU2HOST_INTR_CLR, 1);
++		uint32_t r[24];
++		uint32_t n;
++		while ((n = hfi_read(1, r, 24)) != 0) {
++			if ((r[0] & 0xff) == 100) {
++				IOLog("VGPU: HFI %s: GMU error %u (%08x %08x)\n", name, r[1], r[2], r[3]);
++				continue;
++			}
++			if (((r[1] >> 20) & 0xfff) != seq) {
++				IOLog("VGPU: HFI %s: other message %08x %08x\n", name, r[0], r[1]);
++				continue;
++			}
++			IOLog("VGPU: HFI %s ack: error %u payload %08x %08x\n", name, r[2], n > 3 ? r[3] : 0, n > 4 ? r[4] : 0);
++			for (uint32_t i = 0; payload != NULL && i < plen && 3 + i < n; i++) {
++				payload[i] = r[3 + i];
++			}
++			hfi_drain_debug();
++			return (int)r[2];
++		}
++	}
++	return -1;
++}
++
++static void
++hfi_start(void)
++{
++	gmu_wr(GMU_HFI_CTRL_INIT, 1);
++	bool ok = poll(base, 4 * GMU_HFI_CTRL_STATUS, 1, 1, 10000);
++	IOLog("VGPU: HFI queues %s (ctrl %08x)\n", ok ? "up" : "NOT up", gmu_rd(GMU_HFI_CTRL_STATUS));
++	if (!ok) {
++		return;
++	}
++	uint32_t m[8] = {};
++	hfi_send(5, m, 1, NULL, 0, "TEST");
++	uint32_t v = 0;
++	m[1] = (1u << 28) | (1u << 19) | (1u << 17);
++	hfi_send(1, m, 2, &v, 1, "FW_VERSION");
++	IOLog("VGPU: HFI fw version reply %08x\n", v);
 +}
 +
 +static bool
