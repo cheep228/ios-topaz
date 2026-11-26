@@ -3918,10 +3918,10 @@ index 96c557b..208c1f2 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1d3ee17..cdfd674 100644
+index 1d3ee17..cd2d642 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -40,6 +40,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+@@ -40,11 +40,13 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
  extern "C" void sweet_console_retarget(vm_offset_t va);   /* osfmk/console/video_console.c */
  extern "C" void (*sweet_console_show_hook)(void);
  extern "C" void topaz_modem_init(void);
@@ -3929,7 +3929,13 @@ index 1d3ee17..cdfd674 100644
  extern "C" void topaz_audio_init(void);
  extern "C" void sweet_amfi_service_init(void);
  extern "C" void sweet_busy_init(void);              /* iokit/Kernel/arm/SweetBusy.cpp (boot-arg sweetbusy=N) */             /* iokit/Kernel/arm/TopazModem.cpp (boot-arg modem=1) */
-@@ -53,6 +54,11 @@ bool topaz_surface_drawn(SweetSurface *surface, uint64_t milliseconds);   /* Red
+ extern "C" int sweet_console_copy_dirty(void *dst);
+ extern "C" void topaz_adreno_init(void);           /* iokit/Kernel/arm/TopazAdreno.cpp (boot-arg gpu=1) */
++extern "C" void volcano_adreno_init(void);         /* iokit/Kernel/arm/VolcanoAdreno.cpp (boot-arg vgpu=1) */
+ bool topaz_surface_drawn(SweetSurface *surface, uint64_t milliseconds);   /* RedwoodGPU.cpp */
+ 
+ /*
+@@ -53,6 +55,11 @@ bool topaz_surface_drawn(SweetSurface *surface, uint64_t milliseconds);   /* Red
   * reads the u64 at +0x18 of the shared state page; held from SwapEnd until
   * one vsync after the next frame replaced it on the panel.
   */
@@ -3941,7 +3947,7 @@ index 1d3ee17..cdfd674 100644
  static uint64_t sweet_fps_tick;         /* mach time of the last vsync tick (SWEET FPS) */
  
  /* boot-arg sweetfb_nohold=1 (a test): frames on the panel are not marked in use */
-@@ -94,6 +100,62 @@ class OSDictionary;
+@@ -94,6 +101,62 @@ class OSDictionary;
  static void sweet_bl_log(const char *who, OSDictionary *d);
  extern "C" void sweet_dcache_clean(vm_offset_t addr, unsigned length);  /* osfmk/arm/caches.c */
  extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -4004,7 +4010,7 @@ index 1d3ee17..cdfd674 100644
  
  #if defined(SWEET)
  #include <IOKit/IOService.h>
-@@ -127,7 +189,14 @@ enum {
+@@ -127,7 +190,14 @@ enum {
  #define SWEET_FB_SWAP_REC_SIZE          0x46c
  #define SWEET_FB_LAYERS                 4
  #define SWEET_FB_FADE_STEPS             30      /* ~0.5 s at 60 Hz */
@@ -4020,7 +4026,7 @@ index 1d3ee17..cdfd674 100644
  #define SWEET_FB_NOTIFY_TYPES           8
  #define SWEET_FB_NOTIFY_VSYNC           5
  #define SWEET_FB_VSYNC_US               16667
-@@ -280,6 +349,9 @@ class IOAcceleratorES : public IOService {
+@@ -280,6 +350,9 @@ class IOAcceleratorES : public IOService {
  
  OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
  OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
@@ -4030,7 +4036,7 @@ index 1d3ee17..cdfd674 100644
  
  class IOMobileFramebufferUserClient : public IOUserClient {
  	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
-@@ -312,6 +384,7 @@ AppleCLCD::start(IOService *provider)
+@@ -312,6 +385,7 @@ AppleCLCD::start(IOService *provider)
  	if (!IOService::start(provider)) {
  		return false;
  	}
@@ -4038,7 +4044,7 @@ index 1d3ee17..cdfd674 100644
  	topaz_modem_init();
  	topaz_audio_init();
  	sweet_amfi_service_init();
-@@ -340,6 +413,20 @@ AppleCLCD::start(IOService *provider)
+@@ -340,6 +414,20 @@ AppleCLCD::start(IOService *provider)
  	fClients = OSArray::withCapacity(4);
  	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
  	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
@@ -4059,7 +4065,7 @@ index 1d3ee17..cdfd674 100644
  	fWorkLoop = IOWorkLoop::workLoop();
  	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
  		IOLog("SWEET FB: setup failed\n");
-@@ -352,16 +439,91 @@ AppleCLCD::start(IOService *provider)
+@@ -352,16 +440,94 @@ AppleCLCD::start(IOService *provider)
  		IOLog("SWEET FB: no vsync timer\n");
  		return false;
  	}
@@ -4109,6 +4115,9 @@ index 1d3ee17..cdfd674 100644
 +		}
 +	}
  	topaz_adreno_init();
++#if defined(VOLCANO)
++	volcano_adreno_init();
++#endif
  	setProperty("RedwoodWaitsForGPU", true);         /* present() waits for the GPU (eagl.c reads it) */
 -	fDsi = (volatile uint8_t *)ml_io_map(0x05e94000, 0x1000);
 +	/*
@@ -4154,7 +4163,7 @@ index 1d3ee17..cdfd674 100644
  	fBlSent = ~0u;
  	fBlCall = thread_call_allocate(&AppleCLCD::blWork, this);
  	if (fDsi != NULL) {
-@@ -372,7 +534,21 @@ AppleCLCD::start(IOService *provider)
+@@ -372,7 +538,21 @@ AppleCLCD::start(IOService *provider)
  		 * runs digital dimming, a colour filter over every frame, which the
  		 * CPU renderer cannot afford (the UI dropped to under 1 fps).
  		 */
@@ -4176,7 +4185,7 @@ index 1d3ee17..cdfd674 100644
  		(void)PE_parse_boot_argn("sweetbl", &blOn, sizeof(blOn));
  		AppleARMBacklight *bl = blOn ? OSTypeAlloc(AppleARMBacklight) : NULL;
  		if (bl != NULL && bl->init()) {
-@@ -380,6 +556,22 @@ AppleCLCD::start(IOService *provider)
+@@ -380,6 +560,22 @@ AppleCLCD::start(IOService *provider)
  			bl->setProperty("backlight-control", true);
  			bl->setProperty("brightness-nits", (unsigned long long)200, 32);
  			bl->setProperty("max-nits", (unsigned long long)SWEET_FB_MAX_NITS, 32);
@@ -4199,7 +4208,7 @@ index 1d3ee17..cdfd674 100644
  			if (bl->attach(this)) {
  				bl->registerService();
  				IOLog("SWEET FB: AppleARMBacklight published\n");
-@@ -399,7 +591,7 @@ AppleCLCD::start(IOService *provider)
+@@ -399,7 +595,7 @@ AppleCLCD::start(IOService *provider)
  	}
  	OSSafeReleaseNULL(accel);
  	/* dpu sm6115 catalog: intf_1 at mdp+0x6a800, mdp at 0x5e01000 */
@@ -4208,7 +4217,7 @@ index 1d3ee17..cdfd674 100644
  	if (fIntf1 != NULL) {
  		volatile uint32_t *r = fIntf1 + 0x800 / 4;
  		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
-@@ -472,6 +664,9 @@ AppleCLCD::start(IOService *provider)
+@@ -472,6 +668,9 @@ AppleCLCD::start(IOService *provider)
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
  	registerService();
@@ -4218,7 +4227,7 @@ index 1d3ee17..cdfd674 100644
  	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
  	return true;
-@@ -590,7 +785,22 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -590,7 +789,22 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		fb->flipBack();
  	}
  	if (rec != NULL) {
@@ -4241,7 +4250,7 @@ index 1d3ee17..cdfd674 100644
  		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
  		IOLockLock(fb->fLock);
  		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
-@@ -981,7 +1191,7 @@ AppleCLCD::dsiSend(const uint8_t hdr[4], const uint8_t *payload, uint32_t len)
+@@ -981,7 +1195,7 @@ AppleCLCD::dsiSend(const uint8_t hdr[4], const uint8_t *payload, uint32_t len)
  	if (fDsi == NULL || fDsiBuf == NULL || len > 60) {
  		return false;
  	}
@@ -4250,7 +4259,7 @@ index 1d3ee17..cdfd674 100644
  	uint32_t size = (4 + len + 3) & ~3u;
  	memset(p, 0xff, 64);
  	memcpy(p, hdr, 4);
-@@ -1006,7 +1216,11 @@ AppleCLCD::dsiSend(const uint8_t hdr[4], const uint8_t *payload, uint32_t len)
+@@ -1006,7 +1220,11 @@ AppleCLCD::dsiSend(const uint8_t hdr[4], const uint8_t *payload, uint32_t len)
  	 */
  	static int hs = -1;
  	if (hs < 0) {
@@ -4262,7 +4271,7 @@ index 1d3ee17..cdfd674 100644
  		(void)PE_parse_boot_argn("sweetdsi_hs", &hs, sizeof(hs));
  	}
  	dsi_wr(fDsi, 0x03c, hs ? (dma & ~(1u << 26)) : (dma | (1u << 26)));
-@@ -1070,6 +1284,13 @@ AppleCLCD::setPanelLevel(uint32_t level)
+@@ -1070,6 +1288,13 @@ AppleCLCD::setPanelLevel(uint32_t level)
  	uint8_t cmd[3] = { 0x51, (uint8_t)(level >> 8), (uint8_t)level };   /* MSB first */
  	IOLockLock(fBlLock);
  	bool done = dsiDcsLong(cmd, sizeof(cmd));
@@ -4276,7 +4285,7 @@ index 1d3ee17..cdfd674 100644
  	IOLockUnlock(fBlLock);
  	static uint32_t logs;
  	if (logs++ < 8 || !done) {
-@@ -1093,13 +1314,22 @@ AppleCLCD::setProperties(OSObject *properties)
+@@ -1093,13 +1318,22 @@ AppleCLCD::setProperties(OSObject *properties)
  	}
  	uint64_t v = n->unsigned64BitValue();
  	setProperty("IOMFBBrightnessLevel", v, 32);
@@ -4305,7 +4314,7 @@ index 1d3ee17..cdfd674 100644
  	}
  	IOLockLock(fLock);
  	fBlLevel = (uint32_t)level;
-@@ -1154,7 +1384,64 @@ AppleARMBacklight::setProperties(OSObject *properties)
+@@ -1154,7 +1388,64 @@ AppleARMBacklight::setProperties(OSObject *properties)
  {
  	OSDictionary *d = OSDynamicCast(OSDictionary, properties);
  	sweet_bl_log("backlight", d);
@@ -4370,7 +4379,7 @@ index 1d3ee17..cdfd674 100644
  	if (n != NULL && fFB != NULL) {
  		OSDictionary *m = OSDictionary::withCapacity(1);
  		/* same 16.16 nits scale as IOMFBBrightnessLevel */
-@@ -1169,6 +1456,7 @@ AppleARMBacklight::setProperties(OSObject *properties)
+@@ -1169,6 +1460,7 @@ AppleARMBacklight::setProperties(OSObject *properties)
  		m->release();
  		setProperty("brightness-nits", n);
  	}
@@ -4378,7 +4387,7 @@ index 1d3ee17..cdfd674 100644
  	return kIOReturnSuccess;
  }
  
-@@ -1433,6 +1721,8 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -1433,6 +1725,8 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  	if (fFlip[0] != NULL) {
  		flipBack();
@@ -4387,7 +4396,7 @@ index 1d3ee17..cdfd674 100644
  	}
  }
  
-@@ -1590,9 +1880,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1590,9 +1884,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			 */
  			int stayon = 0;
  			if (off && PE_parse_boot_argn("sweetfb_stayon", &stayon, sizeof(stayon)) && stayon) {
@@ -4401,7 +4410,7 @@ index 1d3ee17..cdfd674 100644
  			IOLockLock(fFB->fLock);
  			bool changed = off != fFB->fPowerOff;
  			if (changed) {
-@@ -1638,3 +1932,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1638,3 +1936,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  	return ret;
  }
  #endif /* SWEET */
@@ -13297,6 +13306,252 @@ index 8aa0c2f..9f0aac6 100644
  extern "C" void topaz_modem_init(void) {}
 +extern "C" void topaz_hwwdt_start(void) {}
  #endif
+diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
+new file mode 100644
+index 0000000..c661a55
+--- /dev/null
++++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
+@@ -0,0 +1,240 @@
++/*
++ * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
++ *
++ * Boot-arg vgpu=1: a thread 15 s after start powers the GPU's CX side the way
++ * downstream gpucc-volcano.c / kgsl gen8 and upstream drm/msm a8xx (Milos = SM7635) do:
++ *   GCC: GPLL0 (+div) to the GPU CC (0x52000 bits 15/16), gpu_memnoc_gfx 0x71010,
++ *        gpu_snoc_dvm_gfx 0x71018, ddrss_gpu_axi 0x7115c
++ *   GPU CC (0x3d90000): CX GDSC 0x9108, cxo 0x90e4, ahb 0x90bc, gmu rcg 0x9318
++ *        (GPLL0/3 = 200 MHz), cx_gmu 0x90d4, hub rcg 0x93ec (200 MHz), hub_cx_int 0x90e8,
++ *        hub_aon 0x93e8, hlos1_vote_gpu_smmu 0x7000, memnoc_gfx 0x90f4
++ * then reads GMU registers (CX domain: GPU base 0x3d00000 + 4 * reg, upstream a6xx_gmu.xml),
++ * writes the GMU firmware's TCM blocks (GMU_FW_PATH) (ITCM 0x1b400, DTCM 0x1c400) and reads them back,
++ * and logs the GPU SMMU (0x3da0000) ID registers. GX-domain registers are never touched:
++ * with the GX GDSC collapsed they fault on the bus. Lines "VGPU:".
++ * vgpu=2: also lists the firmware blocks that need GMU memory (through the SMMU, SID 5).
++ */
++#include <IOKit/IOLib.h>
++#include <pexpert/pexpert.h>
++#include <kern/thread.h>
++
++#if defined(VOLCANO)
++
++extern "C" {
++vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++void volcano_adreno_init(void);
++int topaz_fw_read(const char *path, void **data, size_t *size);
++void topaz_fw_free(void *data, size_t size);
++int topaz_root_mounted(void);
++}
++
++/* not in the (public) source tree: the boot payload blob writes it at every boot (Qualcomm firmware) */
++#define GMU_FW_PATH     "/private/var/tmp/volcano-gen80300_gmu.bin"
++static const uint8_t *volcano_fw_gmu;
++static size_t volcano_fw_gmu_size;
++
++#define GPU_PHYS        0x03d00000ull           /* kgsl_3d0_reg_memory, GMU regs follow */
++#define GPU_MAP         0x000a0000ull           /* through gpucc (0x3d90000) + cx_misc (0x3d9e000) */
++#define GPUCC           0x90000u                /* offset of the GPU CC in that map */
++#define SMMU_PHYS       0x03da0000ull
++#define GCC_A_PHYS      0x00152000ull           /* GCC page with the GPLL0 GPU votes */
++#define GCC_B_PHYS      0x00171000ull           /* GCC page with the GPU branches */
++
++/* GMU registers (dword index from GPU base) */
++#define GMU_CM3_ITCM_START      0x1b400
++#define GMU_CM3_DTCM_START      0x1c400
++#define GMU_CORE_FW_VERSION     0x1d3f8
++#define GMU_CM3_SYSRESET        0x1f800
++#define GMU_CM3_BOOT_CONFIG     0x1f801
++#define GMU_CM3_FW_INIT_RESULT  0x1f81c
++#define GMU_CM3_CFG             0x1f82d
++#define GMU_AO_COUNTER_L        0x1f840
++#define GMU_HFI_CTRL_STATUS     0x1f980
++#define GMU_AO_SPARE_CNTL       0x23b16
++#define GMU_AHB_FENCE_RANGE_0   0x23b11
++
++#define CBCR_EN         (1u << 0)
++#define CBCR_OFF        (1u << 31)
++#define GDSC_COLLAPSE   (1u << 0)
++#define GDSC_PWR_ON     (1u << 31)
++
++static volatile uint8_t *base, *smmu, *gcca, *gccb;
++
++static inline uint32_t rd(volatile uint8_t *b, uint32_t o) { return *(volatile uint32_t *)(b + o); }
++static inline void wr(volatile uint8_t *b, uint32_t o, uint32_t v)
++{
++	__asm__ volatile ("dsb sy" ::: "memory");
++	*(volatile uint32_t *)(b + o) = v;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++static inline void rmw(volatile uint8_t *b, uint32_t o, uint32_t clr, uint32_t set) { wr(b, o, (rd(b, o) & ~clr) | set); }
++static inline uint32_t cc_rd(uint32_t o) { return rd(base, GPUCC + o); }
++static inline void cc_rmw(uint32_t o, uint32_t clr, uint32_t set) { rmw(base, GPUCC + o, clr, set); }
++static inline uint32_t gmu_rd(uint32_t reg) { return rd(base, 4 * reg); }
++static inline void gmu_wr(uint32_t reg, uint32_t v) { wr(base, 4 * reg, v); }
++
++static bool
++poll(volatile uint8_t *b, uint32_t o, uint32_t mask, uint32_t want, uint32_t us)
++{
++	for (uint32_t i = 0; i < us; i++) {
++		if ((rd(b, o) & mask) == want) {
++			return true;
++		}
++		IODelay(1);
++	}
++	return (rd(b, o) & mask) == want;
++}
++
++static bool
++branch(volatile uint8_t *b, uint32_t o, const char *name)
++{
++	uint32_t was = rd(b, o);
++	rmw(b, o, 0, CBCR_EN);
++	bool ok = poll(b, o, CBCR_OFF, 0, 500);
++	IOLog("VGPU: %-22s %08x -> %08x %s\n", name, was, rd(b, o), ok ? "on" : "STAYS OFF");
++	return ok;
++}
++
++static bool
++rcg(uint32_t cmd, uint32_t src, uint32_t div2x, const char *name)
++{
++	uint32_t was = cc_rd(cmd + 4);
++	cc_rmw(cmd + 4, 0x71f, (src << 8) | (div2x - 1));
++	cc_rmw(cmd, 0, 1);
++	bool ok = poll(base, GPUCC + cmd, 1, 0, 1000);
++	IOLog("VGPU: rcg %-18s cfg %08x -> %08x cmd %08x %s\n", name, was, cc_rd(cmd + 4), cc_rd(cmd),
++	    ok ? "ok" : "UPDATE STUCK");
++	return ok;
++}
++
++static void
++state(const char *when)
++{
++	IOLog("VGPU: [%s] CX GDSC %08x GX GDSC(cc) %08x gmu_clk %08x ahb %08x cxo %08x smmu_vote %08x\n", when,
++	    cc_rd(0x9108), cc_rd(0x905c), cc_rd(0x90d4), cc_rd(0x90bc), cc_rd(0x90e4), cc_rd(0x7000));
++}
++
++static bool
++power_cx(void)
++{
++	IOLog("VGPU: gcc 0x52000 %08x, memnoc %08x snoc_dvm %08x ddrss_axi %08x\n",
++	    rd(gcca, 0), rd(gccb, 0x10), rd(gccb, 0x18), rd(gccb, 0x15c));
++	rmw(gcca, 0, 0, (1u << 15) | (1u << 16));
++	branch(gccb, 0x10, "gcc_gpu_memnoc_gfx");
++	branch(gccb, 0x18, "gcc_gpu_snoc_dvm_gfx");
++	branch(gccb, 0x15c, "gcc_ddrss_gpu_axi");
++
++	uint32_t g = cc_rd(0x9108);
++	if (!(g & GDSC_PWR_ON)) {
++		cc_rmw(0x9108, GDSC_COLLAPSE, 0);
++		bool ok = poll(base, GPUCC + 0x9108, GDSC_PWR_ON, GDSC_PWR_ON, 1000);
++		IOLog("VGPU: CX GDSC %08x -> %08x %s\n", g, cc_rd(0x9108), ok ? "ON" : "NO PWR_ON");
++		if (!ok) {
++			return false;
++		}
++	} else {
++		IOLog("VGPU: CX GDSC already on (%08x)\n", g);
++	}
++	bool ok = branch(base, GPUCC + 0x90e4, "gpu_cc_cxo");
++	ok &= branch(base, GPUCC + 0x90bc, "gpu_cc_ahb");
++	rcg(0x9318, 5, 6, "gmu (GPLL0/3)");
++	ok &= branch(base, GPUCC + 0x90d4, "gpu_cc_cx_gmu");
++	rcg(0x93ec, 5, 6, "hub (GPLL0/3)");
++	branch(base, GPUCC + 0x90e8, "gpu_cc_hub_cx_int");
++	branch(base, GPUCC + 0x93e8, "gpu_cc_hub_aon");
++	branch(base, GPUCC + 0x7000, "gpu_cc_hlos1_vote_smmu");
++	branch(base, GPUCC + 0x90f4, "gpu_cc_memnoc_gfx");
++	return ok;
++}
++
++struct blk {
++	uint32_t addr, size, type, value;
++	uint32_t data[];
++};
++
++static void
++tcm_test(int list)
++{
++	const uint8_t *p = volcano_fw_gmu, *end = volcano_fw_gmu + volcano_fw_gmu_size;
++	uint32_t n = 0, bad = 0, words = 0;
++	while (p + sizeof(struct blk) <= end) {
++		const struct blk *b = (const struct blk *)p;
++		if (b->size != 0) {
++			uint32_t reg = 0;
++			if (b->addr < 0x4000) {
++				reg = GMU_CM3_ITCM_START + b->addr / 4;
++			} else if (b->addr >= 0x10004000 && b->addr < 0x10008000) {
++				reg = GMU_CM3_DTCM_START + (b->addr - 0x10004000) / 4;
++			} else if (list) {
++				IOLog("VGPU: fw block %08x size %#x needs GMU memory\n", b->addr, b->size);
++			}
++			if (reg != 0) {
++				for (uint32_t i = 0; i < b->size / 4; i++) {
++					gmu_wr(reg + i, b->data[i]);
++				}
++				for (uint32_t i = 0; i < b->size / 4; i++) {
++					bad += gmu_rd(reg + i) != b->data[i];
++				}
++				words += b->size / 4;
++				n++;
++			}
++		}
++		p += sizeof(struct blk) + b->size;
++	}
++	IOLog("VGPU: TCM: %u blocks, %u words written, %u differ on read back; ITCM[0] %08x DTCM[0xff8] %08x\n",
++	    n, words, bad, gmu_rd(GMU_CM3_ITCM_START), gmu_rd(GMU_CM3_DTCM_START + 0xff8));
++}
++
++static void
++probe(void *, wait_result_t)
++{
++	uint32_t mode = 1;
++	PE_parse_boot_argn("vgpu", &mode, sizeof(mode));
++	IOSleep(15000);
++	base = (volatile uint8_t *)ml_io_map(GPU_PHYS, GPU_MAP);
++	smmu = (volatile uint8_t *)ml_io_map(SMMU_PHYS, 0x10000);
++	gcca = (volatile uint8_t *)ml_io_map(GCC_A_PHYS, 0x1000);
++	gccb = (volatile uint8_t *)ml_io_map(GCC_B_PHYS, 0x1000);
++	if (base == NULL || smmu == NULL || gcca == NULL || gccb == NULL) {
++		IOLog("VGPU: map failed\n");
++		return;
++	}
++	state("start");
++	if (!power_cx()) {
++		IOLog("VGPU: CX power-up failed, stop\n");
++		state("fail");
++		return;
++	}
++	state("cx on");
++	uint32_t a0 = gmu_rd(GMU_AO_COUNTER_L);
++	IODelay(100);
++	uint32_t a1 = gmu_rd(GMU_AO_COUNTER_L);
++	IOLog("VGPU: GMU fw_version %08x init_result %08x boot_cfg %08x cm3_cfg %08x sysreset %08x hfi_ctrl %08x "
++	    "ao_spare %08x fence0 %08x aocnt %08x -> %08x\n",
++	    gmu_rd(GMU_CORE_FW_VERSION), gmu_rd(GMU_CM3_FW_INIT_RESULT), gmu_rd(GMU_CM3_BOOT_CONFIG),
++	    gmu_rd(GMU_CM3_CFG), gmu_rd(GMU_CM3_SYSRESET), gmu_rd(GMU_HFI_CTRL_STATUS),
++	    gmu_rd(GMU_AO_SPARE_CNTL), gmu_rd(GMU_AHB_FENCE_RANGE_0), a0, a1);
++	IOLog("VGPU: SMMU sCR0 %08x IDR0 %08x IDR1 %08x IDR2 %08x IDR7 %08x sGFSR %08x\n",
++	    rd(smmu, 0x0), rd(smmu, 0x20), rd(smmu, 0x24), rd(smmu, 0x28), rd(smmu, 0x3c), rd(smmu, 0x48));
++	IOLog("VGPU: RSCC(gpu+0x50000) %08x %08x cx_misc %08x %08x\n",
++	    rd(base, 0x50000), rd(base, 0x50004), rd(base, 0x9e000), rd(base, 0x9e004));
++	tcm_test(mode >= 2);
++	IOLog("VGPU: probe done\n");
++}
++
++#endif /* VOLCANO */
++
++extern "C" void
++volcano_adreno_init(void)
++{
++#if defined(VOLCANO)
++	uint32_t on = 0;
++	if (!PE_parse_boot_argn("vgpu", &on, sizeof(on)) || on == 0) {
++		return;
++	}
++	thread_t t;
++	if (kernel_thread_start(probe, NULL, &t) == KERN_SUCCESS) {
++		thread_deallocate(t);
++	}
++#endif
++}
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 index d2f4fa1..1bae778 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
@@ -13549,6 +13804,18 @@ index d2f4fa1..1bae778 100644
 +		    (IOFixed)(((int64_t)z_mg << 16) / 1000), true);
  	}
  }
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index c92beb0..64323c6 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -24,6 +24,7 @@ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitc
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
+ iokit/Kernel/arm/TopazAdreno.cpp                                 optional iokitcpp
+ iokit/Kernel/arm/TopazAdrenoFw.cpp                               optional iokitcpp
++iokit/Kernel/arm/VolcanoAdreno.cpp                               optional iokitcpp
+ iokit/Kernel/arm/RedwoodGPU.cpp                                  optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index b926886..d1837aa 100644
 --- a/osfmk/arm64/arm_vm_init.c
