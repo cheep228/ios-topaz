@@ -13308,7 +13308,7 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..8cf52f5
+index 0000000..d141f89
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
 @@ -0,0 +1,568 @@
@@ -13554,7 +13554,7 @@ index 0000000..8cf52f5
 +#define GBIF_QSB_SIDE0          0x3c03
 +#define GMU_CHIPID              0x8030000       /* gen8_3_0 */
 +
-+#define PTE_PAGE        ((1ull << 0) | (1ull << 1) | (1ull << 6) | (2ull << 8) | (1ull << 10))
++#define PTE_PAGE        ((1ull << 0) | (1ull << 1) | (2ull << 8) | (1ull << 10))   /* privileged only (EL0-writable would mean no privileged execute) */
 +#define PTE_TABLE       ((1ull << 0) | (1ull << 1))
 +
 +struct gbuf {
