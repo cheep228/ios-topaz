@@ -931,10 +931,10 @@ index 0000000..a418268
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
 new file mode 100644
-index 0000000..93bb2de
+index 0000000..38e3101
 --- /dev/null
 +++ b/bsd/dev/sweet_i2c7.c
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,261 @@
 +/*
 + * topaz: polled FIFO I2C on QUP0 SE1 (battery bus: SM5602 fuel gauge 0x71,
 + * bq2589x-class charger 0x6a). Values from MakrSas/topaz-woa TopazBattery
@@ -1091,6 +1091,15 @@ index 0000000..93bb2de
 +		wr(i2c7_se, SE_IRQ_CLR, irq & ~SE_DONE);
 +		delay(1);
 +	}
++	{
++		static int logged;
++		if (logged++ < 2) {
++			printf("SWEET I2C7: timeout addr %#x status %#x irq %#x s_irq %#x ifdis %#x txc %#x rxc %#x m_cmd %#x clk %#x/%#x tlmm %#x/%#x\n",
++			    addr, rd(i2c7_se, SE_STATUS), rd(i2c7_se, SE_IRQ), rd(i2c7_se, 0x640), rd(i2c7_se, 0x64),
++			    rd(i2c7_se, SE_TX_COUNT), rd(i2c7_se, SE_RX_COUNT), rd(i2c7_se, SE_CMD),
++			    rd(i2c7_gcc, I2C7_CBCR), rd(i2c7_se, SE_MCLK), rd(i2c7_west, 0x0004), rd(i2c7_west, 0x1004));
++		}
++	}
 +	i2c7_abort();
 +	return ETIMEDOUT;
 +}
@@ -1182,7 +1191,8 @@ index 0000000..93bb2de
 +	wr(i2c7_se, 0x814, ((rxp >> 16) & 0x3fu) - 1u);
 +	wr(i2c7_se, SE_IRQ_EN, SE_DONE | SE_ERRORS | (3u << 26) | SE_TX_WM_IRQ);
 +	i2c7_ready = true;
-+	printf("SWEET I2C7: SE1 ready (fw %#x vote %#x)\n", fw, rd(i2c7_gcc, I2C7_GCC_VOTE));
++	printf("SWEET I2C7: SE0 ready (fw %#x vote %#x ifdis %#x gpio32 %#x/%#x gpio33 %#x/%#x)\n", fw, rd(i2c7_gcc, I2C7_GCC_VOTE),
++	    rd(i2c7_se, 0x64), rd(i2c7_west, 0), rd(i2c7_west, 4), rd(i2c7_west, 0x1000), rd(i2c7_west, 0x1004));
 +	return 0;
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
