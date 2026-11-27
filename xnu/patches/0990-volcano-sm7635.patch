@@ -13918,10 +13918,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..ca586ef
+index 0000000..4a4909d
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1441 @@
+@@ -0,0 +1,1442 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14235,7 +14235,8 @@ index 0000000..ca586ef
 +		}
 +		l2v[i1][i2] = tpa | PTE_TABLE;
 +	}
-+	l3v[i1][i2][i3] = pa | PTE_PAGE;
++	/* GPU buffers (0x20000000-0x3fffffff): CP fetches are unprivileged (log365 CB3 permission fault) -> AP[1] EL0 RW */
++	l3v[i1][i2][i3] = pa | PTE_PAGE | ((iova >= 0x20000000ull && iova < 0x40000000ull) ? (1ull << 6) : 0);
 +	return true;
 +}
 +
