@@ -931,10 +931,10 @@ index 0000000..a418268
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
 new file mode 100644
-index 0000000..38e3101
+index 0000000..dae9c44
 --- /dev/null
 +++ b/bsd/dev/sweet_i2c7.c
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,561 @@
 +/*
 + * topaz: polled FIFO I2C on QUP0 SE1 (battery bus: SM5602 fuel gauge 0x71,
 + * bq2589x-class charger 0x6a). Values from MakrSas/topaz-woa TopazBattery
@@ -1104,6 +1104,275 @@ index 0000000..38e3101
 +	return ETIMEDOUT;
 +}
 +
++/*
++ * GSI transport. QUP1 SE0 is "qcom,shared" on volcano: GENI_IF_DISABLE_RO=1,
++ * FIFO is off, only GPI DMA works. Minimal polled driver for gpi@800000
++ * (apps EE at ee-offset 0x10000), GPII 0, ch0 TX / ch1 RX, one event ring.
++ * TRE layout from msm_gpi.h / i2c-msm-geni.c (lock, cfg0, go, dma, unlock).
++ */
++#define GPI_PA          0x00800000u
++#define GPI_SZ          0x00060000u
++#define GPII_N          0u
++#define GR(o)           ((o) - 0x10000u + 0x4000u * GPII_N)
++#define CH_CTX(k)       GR(0x20000u + 0x80u * (k))
++#define CH_DB(k)        GR(0x22000u + 0x8u * (k))
++#define CH_SCR(k, i)    GR(0x20060u + 0x80u * (k) + 4u * (i))
++#define CH_QOS(k)       GR(0x2005cu + 0x80u * (k))
++#define CH_CMD          GR(0x23008u)
++#define EV_CTX          GR(0x21000u)
++#define EV_DB           GR(0x22100u)
++#define EV_CMD          GR(0x23010u)
++#define GPII_INTSET     GR(0x23180u)
++#define GPII_ERRLOG     GR(0x23200u)
++#define RING_N          64u
++#define RING_SZ         (RING_N * 16u)
++
++static vm_offset_t i2c7_gpi;
++static bool i2c7_gsi;
++static uint8_t gpi_mem[0x4000] __attribute__((aligned(0x4000)));
++static uint64_t gpi_pa;
++static unsigned tx_wp, rx_wp, ev_rp;
++static int gpi_logs;
++#define RING_TX         0x0000u
++#define RING_RX         0x0400u
++#define RING_EV         0x0800u
++#define BUF_RX          0x1000u
++
++extern vm_offset_t ml_vtophys(vm_offset_t);
++extern void sweet_dcache_clean(vm_offset_t addr, unsigned length);
++extern void sweet_dcache_flush(vm_offset_t addr, unsigned length);
++
++static unsigned
++ch_state(unsigned k)
++{
++	return (rd(i2c7_gpi, CH_CTX(k)) >> 20) & 0xfu;
++}
++
++static unsigned
++ev_state(void)
++{
++	return (rd(i2c7_gpi, EV_CTX) >> 20) & 0xfu;
++}
++
++static void
++gpi_clr_irqs(void)
++{
++	wr(i2c7_gpi, GR(0x230a0u), 0xffffffffu);
++	wr(i2c7_gpi, GR(0x230a4u), 0xffffffffu);
++	wr(i2c7_gpi, GR(0x230c0u), 0xffffffffu);
++	wr(i2c7_gpi, GR(0x23110u), 0xffffffffu);
++	wr(i2c7_gpi, GR(0x23128u), 0xffffffffu);
++}
++
++/* want 0xff: just give the command time, state not checked */
++static bool
++gpi_cmd(bool ev, unsigned k, unsigned op, unsigned want)
++{
++	wr(i2c7_gpi, ev ? EV_CMD : CH_CMD, (op << 24) | k);
++	for (unsigned i = 0; i < 20000; ++i) {
++		unsigned s = ev ? ev_state() : ch_state(k);
++		if (want != 0xffu && s == want) {
++			gpi_clr_irqs();
++			return true;
++		}
++		delay(1);
++		if (want == 0xffu && i > 2000) {
++			break;
++		}
++	}
++	gpi_clr_irqs();
++	return want == 0xffu;
++}
++
++static void
++gpi_teardown(void)
++{
++	for (unsigned k = 0; k < 2; ++k) {
++		if (ch_state(k) == 2u) {
++			(void)gpi_cmd(false, k, 2, 3);          /* STOP */
++		}
++		if (ch_state(k) != 0u) {
++			(void)gpi_cmd(false, k, 9, 0xff);       /* RESET */
++			(void)gpi_cmd(false, k, 10, 0);         /* DE_ALLOC */
++		}
++	}
++	if (ev_state() != 0u) {
++		(void)gpi_cmd(true, 0, 9, 0xff);
++		(void)gpi_cmd(true, 0, 10, 0);
++	}
++}
++
++static uint32_t
++lo(uint64_t pa)
++{
++	return (uint32_t)pa;
++}
++
++static uint32_t
++hi(uint64_t pa)
++{
++	return (uint32_t)(pa >> 32);
++}
++
++static int
++gpi_setup(void)
++{
++	gpi_teardown();
++	bzero(gpi_mem, sizeof(gpi_mem));
++	sweet_dcache_flush((vm_offset_t)gpi_mem, sizeof(gpi_mem));
++	tx_wp = rx_wp = ev_rp = 0;
++	wr(i2c7_gpi, GPII_INTSET, 1);
++	gpi_clr_irqs();
++
++	uint64_t ev = gpi_pa + RING_EV;
++	if (!gpi_cmd(true, 0, 0, 1)) {                  /* EV ALLOCATE */
++		return 1;
++	}
++	wr(i2c7_gpi, EV_CTX + 0x00, (16u << 24) | (1u << 16) | 2u);
++	wr(i2c7_gpi, EV_CTX + 0x04, RING_SZ);
++	wr(i2c7_gpi, EV_CTX + 0x08, lo(ev));
++	wr(i2c7_gpi, EV_CTX + 0x0c, hi(ev));
++	wr(i2c7_gpi, EV_DB + 0x04, hi(ev));
++	wr(i2c7_gpi, EV_CTX + 0x20, 0);
++	wr(i2c7_gpi, EV_CTX + 0x28, 0);
++	wr(i2c7_gpi, EV_CTX + 0x2c, 0);
++	wr(i2c7_gpi, EV_CTX + 0x30, 0);
++	wr(i2c7_gpi, EV_CTX + 0x34, 0);
++	wr(i2c7_gpi, EV_DB, lo(ev + RING_SZ - 16u));
++
++	for (unsigned k = 0; k < 2; ++k) {
++		uint64_t r = gpi_pa + (k ? RING_RX : RING_TX);
++		if (!gpi_cmd(false, k, 0, 1)) {         /* CH ALLOCATE */
++			return 2 + (int)k;
++		}
++		/* ch0 = TX (dir OUT 1), ch1 = RX (dir IN 0), erindex 0, proto GPI */
++		wr(i2c7_gpi, CH_CTX(k) + 0x00, (16u << 24) | ((k ? 0u : 1u) << 3) | 2u);
++		wr(i2c7_gpi, CH_CTX(k) + 0x04, RING_SZ);
++		wr(i2c7_gpi, CH_CTX(k) + 0x08, lo(r));
++		wr(i2c7_gpi, CH_CTX(k) + 0x0c, hi(r));
++		wr(i2c7_gpi, CH_DB(k) + 0x04, hi(r));
++		wr(i2c7_gpi, CH_SCR(k, 0), ((k ? 0u : 1u) << 16) | (3u << 4) | 0u);  /* pair, I2C, SE0 */
++		wr(i2c7_gpi, CH_SCR(k, 1), 0);
++		wr(i2c7_gpi, CH_SCR(k, 2), 0);
++		wr(i2c7_gpi, CH_SCR(k, 3), 0);
++		wr(i2c7_gpi, CH_QOS(k), 1);
++	}
++	for (unsigned k = 0; k < 2; ++k) {
++		if (!gpi_cmd(false, 1u - k, 1, 2)) {    /* START rx, then tx */
++			return 4 + (int)k;
++		}
++	}
++	return 0;
++}
++
++static void
++put_tre(uint32_t ring, unsigned *wp, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
++{
++	volatile uint32_t *t = (volatile uint32_t *)(gpi_mem + ring + 16u * *wp);
++	t[0] = d0;
++	t[1] = d1;
++	t[2] = d2;
++	t[3] = d3;
++	*wp = (*wp + 1u) % RING_N;
++}
++
++/* write nt (1..8) bytes, then optionally read nr (1..64) bytes, as one locked sequence */
++static int
++gpi_xfer(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr)
++{
++	uint32_t imm[2] = { 0, 0 };
++	for (unsigned j = 0; j < nt; ++j) {
++		imm[j / 4] |= (uint32_t)tx[j] << (8u * (j % 4));
++	}
++	bool rd2 = nr != 0;
++	uint64_t txr = gpi_pa + RING_TX, rxr = gpi_pa + RING_RX, evr = gpi_pa + RING_EV;
++
++	put_tre(RING_TX, &tx_wp, 0, 0, 0, (3u << 20) | 1u);                            /* LOCK, chain */
++	put_tre(RING_TX, &tx_wp, (3u << 24) | (22u << 16) | (3u << 8) | 11u, 0, 2u,
++	    (2u << 20) | (2u << 16) | 1u);                                             /* CONFIG0 400k */
++	put_tre(RING_TX, &tx_wp, ((rd2 ? 4u : 0u) << 24) | ((uint32_t)addr << 8) | 1u, 0, 0,
++	    (2u << 20) | 1u);                                                          /* GO write */
++	put_tre(RING_TX, &tx_wp, imm[0], imm[1], nt & 0xfu,
++	    (1u << 20) | (1u << 16) | (1u << 9) | (rd2 ? 0u : 1u));                    /* imm DMA, ieot */
++	if (rd2) {
++		uint64_t b = gpi_pa + BUF_RX;
++		put_tre(RING_RX, &rx_wp, lo(b), hi(b), nr, (1u << 20) | (1u << 9));    /* RX DMA, ieot */
++		put_tre(RING_TX, &tx_wp, ((uint32_t)addr << 8) | 2u, 0, nr,
++		    (2u << 20) | (1u << 11));                                          /* GO read, link_rx */
++	}
++	put_tre(RING_TX, &tx_wp, 0, 0, 0, (3u << 20) | (1u << 16) | (1u << 8));        /* UNLOCK, ieob */
++	sweet_dcache_flush((vm_offset_t)gpi_mem, 0x1100u);
++	__asm__ volatile("dsb sy" ::: "memory");
++	if (rd2) {
++		wr(i2c7_gpi, CH_DB(1), lo(rxr + 16u * rx_wp));
++	}
++	wr(i2c7_gpi, CH_DB(0), lo(txr + 16u * tx_wp));
++
++	int err = ETIMEDOUT;
++	uint32_t evt[4] = { 0, 0, 0, 0 }, nev = 0, notif = 0;
++	for (unsigned i = 0; i < 30000; ++i) {
++		uint32_t erp = rd(i2c7_gpi, EV_CTX + 0x10);
++		unsigned eidx = ((erp - lo(evr)) / 16u) % RING_N;
++		if (eidx != ev_rp) {
++			sweet_dcache_flush((vm_offset_t)(gpi_mem + RING_EV), RING_SZ);
++			while (ev_rp != eidx) {
++				volatile uint32_t *e = (volatile uint32_t *)(gpi_mem + RING_EV + 16u * ev_rp);
++				for (unsigned j = 0; j < 4; ++j) {
++					evt[j] = e[j];
++				}
++				uint32_t type = (evt[3] >> 16) & 0xffu;
++				if (type == 0x31u) {
++					notif = evt[0] ? evt[0] : 0x80000000u;
++				} else if (type == 0x22u) {
++					uint32_t code = evt[2] >> 24;
++					if (code != 1u && code != 2u && code != 4u) {
++						notif = 0x40000000u | code;
++					}
++				}
++				++nev;
++				ev_rp = (ev_rp + 1u) % RING_N;
++			}
++			wr(i2c7_gpi, EV_DB, lo(evr + 16u * ((ev_rp + RING_N - 1u) % RING_N)));
++		}
++		bool txd = rd(i2c7_gpi, CH_CTX(0) + 0x10) == lo(txr + 16u * tx_wp);
++		bool rxd = !rd2 || rd(i2c7_gpi, CH_CTX(1) + 0x10) == lo(rxr + 16u * rx_wp);
++		if (notif) {
++			err = (notif & 0x40000000u) ? EIO : ENXIO;
++			break;
++		}
++		if (txd && rxd) {
++			err = 0;
++			break;
++		}
++		if (ch_state(0) == 0xfu || ch_state(1) == 0xfu) {
++			err = EIO;
++			break;
++		}
++		delay(1);
++	}
++	if (gpi_logs < 8) {
++		++gpi_logs;
++		printf("SWEET GPI: x%d a%02x n%u/%u e%d tx %x/%x rx %x/%x st %x/%x/%x ev%u %08x %08x %08x %08x el %x\n",
++		    gpi_logs, addr, nt, nr, err, rd(i2c7_gpi, CH_CTX(0) + 0x10), lo(txr + 16u * tx_wp),
++		    rd(i2c7_gpi, CH_CTX(1) + 0x10), lo(rxr + 16u * rx_wp), ch_state(0), ch_state(1), ev_state(),
++		    nev, evt[0], evt[1], evt[2], evt[3], rd(i2c7_gpi, GPII_ERRLOG));
++	}
++	if (!err && rd2) {
++		sweet_dcache_flush((vm_offset_t)(gpi_mem + BUF_RX), 64);
++		for (unsigned j = 0; j < nr; ++j) {
++			rx[j] = gpi_mem[BUF_RX + j];
++		}
++	}
++	if (err) {
++		int s = gpi_setup();                    /* channel may be stuck/locked: start over */
++		if (s && gpi_logs < 10) {
++			++gpi_logs;
++			printf("SWEET GPI: re-setup failed %d\n", s);
++		}
++	}
++	return err;
++}
++
 +int
 +sweet_i2c7_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned len)
 +{
@@ -1111,6 +1380,11 @@ index 0000000..38e3101
 +		return ENXIO;
 +	}
 +	lck_mtx_lock(&sweet_i2c7_lock);
++	if (i2c7_gsi) {
++		int e = gpi_xfer(addr, &reg, 1, buf, len);
++		lck_mtx_unlock(&sweet_i2c7_lock);
++		return e;
++	}
 +	int err = i2c7_msg(addr, &reg, 1, NULL, 0, true);
 +	if (!err) {
 +		err = i2c7_msg(addr, NULL, 0, buf, len, false);
@@ -1129,7 +1403,7 @@ index 0000000..38e3101
 +		return ENXIO;
 +	}
 +	lck_mtx_lock(&sweet_i2c7_lock);
-+	int err = i2c7_msg(addr, tx, 2, NULL, 0, false);
++	int err = i2c7_gsi ? gpi_xfer(addr, tx, 2, NULL, 0) : i2c7_msg(addr, tx, 2, NULL, 0, false);
 +	lck_mtx_unlock(&sweet_i2c7_lock);
 +	return err;
 +}
@@ -1167,6 +1441,32 @@ index 0000000..38e3101
 +		printf("SWEET I2C7: SE1 not an idle I2C engine (fw %#x status %#x)\n",
 +		    fw, rd(i2c7_se, SE_STATUS));
 +		return EIO;
++	}
++	if (rd(i2c7_se, 0x64) & 1u) {
++		/* GSI only: geni_se_select_gpi_mode() then bring up our GPII */
++		i2c7_gpi = ml_io_map(GPI_PA, GPI_SZ);
++		gpi_pa = ml_vtophys((vm_offset_t)gpi_mem);
++		if (!i2c7_gpi || !gpi_pa) {
++			return ENOMEM;
++		}
++		wr(i2c7_se, SE_IRQ_CLR, 0xffffffffu);
++		wr(i2c7_se, 0x648, 0xffffffffu);
++		wr(i2c7_se, 0xe1c, 0);
++		wr(i2c7_se, SE_IRQ_EN, rd(i2c7_se, SE_IRQ_EN) & ~(SE_DONE | SE_TX_WM_IRQ | (3u << 26)));
++		wr(i2c7_se, SE_DMA, 1);
++		wr(i2c7_se, 0xe18, rd(i2c7_se, 0xe18) | 0xfu);
++		unsigned s0 = ch_state(0), s1 = ch_state(1), se = ev_state();
++		int s = gpi_setup();
++		printf("SWEET GPI: setup %d pa %#llx pre %x/%x/%x now %x/%x/%x el %x\n", s, gpi_pa,
++		    s0, s1, se, ch_state(0), ch_state(1), ev_state(), rd(i2c7_gpi, GPII_ERRLOG));
++		printf("SWEET GPI: setup %d pa %#llx pre %x/%x/%x now %x/%x/%x el %x\n", s, gpi_pa,
++		    s0, s1, se, ch_state(0), ch_state(1), ev_state(), rd(i2c7_gpi, GPII_ERRLOG));
++		if (s) {
++			return EIO;
++		}
++		i2c7_gsi = true;
++		i2c7_ready = true;
++		return 0;
 +	}
 +	wr(i2c7_se, 0xe18, 0);
 +	wr(i2c7_se, 0xe1c, 0);
