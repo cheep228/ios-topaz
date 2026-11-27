@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..29f3521
+index 0000000..dbffbe4
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1262 @@
+@@ -0,0 +1,1368 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14278,6 +14278,10 @@ index 0000000..29f3521
 +	((uint32_t *)rbb.va)[rb_wptr++] = v;
 +}
 +
++static void qtb_diag(const char *what);
++static uint64_t qtb_ecats(uint32_t sid, uint64_t iova, bool write);
++static void vgpd(const char *tag, volatile uint8_t *b, uint32_t from, uint32_t to);
++
 +/* clean the ring, write WPTR, wait for RPTR to catch up */
 +static bool
 +rb_flush(const char *what)
@@ -14315,12 +14319,96 @@ index 0000000..29f3521
 +				IOLog("VGPU: SMR%u %08x S2CR %08x\n", i, smr, rd(smmu, 0xc00 + 4 * i));
 +			}
 +		}
++		qtb_diag(what);
++		qtb_ecats(GPU_SID, sqeb.iova, false);
++		static bool dumped;
++		if (!dumped) {
++			dumped = true;
++			static const uint32_t gr[][2] = { {0, 0x100}, {0x200, 0x220}, {0x800, 0x830}, {0x840, 0x850},
++			    {0x8b0, 0x8c0}, {0xe00, 0xe20}, {0xf00, 0xf10}, {0x3c00, 0x3c50}, {0xf400, 0xf404}, {0xf800, 0xf814} };
++			for (unsigned i = 0; i < sizeof(gr) / sizeof(gr[0]); i++) {
++				vgpd("gpu", base, 4 * gr[i][0], 4 * gr[i][1]);
++			}
++			vgpd("gcca", gcca, 0, 0x1000);
++			vgpd("gccb", gccb, 0, 0x1000);
++			vgpd("smmucb3", gpu_cb(), 0, 0x80);
++		}
 +		IOLog("VGPU: SUMMARY gbif halt %08x ack %08x rbbm_gbif halt %08x ack %08x gbif_cx_cfg %08x qsb0 %08x "
 +		    "sGFSR %08x sGFAR %08x%08x sGFSYNR0 %08x\n", g_rd(R_GBIF_HALT), g_rd(R_GBIF_HALT + 1),
 +		    g_rd(R_RBBM_GBIF_HALT), g_rd(R_RBBM_GBIF_HALT + 1), g_rd(0x3c00), g_rd(0x3c03), rd(smmu, 0x48),
 +		    rd(smmu, 0x44), rd(smmu, 0x40), rd(smmu, 0x50));
 +	}
 +	return ok;
++}
++
++
++/* GPU QTB500 (TBU of the GPU SMMU, DT gpu_qtb@3de8000, 2 ports): debug fence, ECATS, outstanding txns */
++#define QTB_PHYS                0x03de8000ull
++static volatile uint8_t *qtb;
++static inline uint64_t rd64(volatile uint8_t *b, uint32_t o) { return *(volatile uint64_t *)(b + o); }
++static inline void wr64(volatile uint8_t *b, uint32_t o, uint64_t v)
++{
++	__asm__ volatile ("dsb sy" ::: "memory");
++	*(volatile uint64_t *)(b + o) = v;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++/* nonzero 16-byte rows of a register window, same format as the Android gpudump.ko ("GPD <tag> <off>: ...") */
++static void
++vgpd(const char *tag, volatile uint8_t *b, uint32_t from, uint32_t to)
++{
++	for (uint32_t o = from; o < to; o += 16) {
++		uint32_t a = rd(b, o), c = rd(b, o + 4), e = rd(b, o + 8), f = rd(b, o + 12);
++		if (a | c | e | f) {
++			IOLog("VGPD %s %05x: %08x %08x %08x %08x
++", tag, o, a, c, e, f);
++		}
++	}
++}
++
++static uint64_t
++qtb_ecats(uint32_t sid, uint64_t iova, bool write)
++{
++	if (qtb == NULL) {
++		return ~0ull;
++	}
++	wr64(qtb, 0x430, sid & 0x3ff);                                  /* INFLD0: SID, QAD 0 */
++	wr64(qtb, 0x438, (4u << 8) | (1u << 3) | (write ? 1u : 0u));    /* INFLD1: shared, NON_SEC, OPC */
++	wr64(qtb, 0x440, iova);                                         /* INFLD2 */
++	wr64(qtb, 0x448, 1);                                            /* TRIGGER START */
++	uint64_t st = 0, out = 0;
++	int i;
++	for (i = 0; i < 2000; i++) {
++		st = rd64(qtb, 0x450);
++		out = rd64(qtb, 0x458);
++		if ((st & 1) || (out & 1)) {
++			break;
++		}
++		IODelay(1);
++	}
++	out = rd64(qtb, 0x458);
++	wr64(qtb, 0x448, 0);
++	IOLog("VGPU: SUMMARY qtb ecats sid %u iova %llx %s: status %llx outfld0 %llx (%s) after %d us
++", sid, iova,
++	    write ? "W" : "R", st, out, (out & 1) ? "FAULT" : ((st & 1) ? "PA ok" : "TIMEOUT"), i);
++	return out;
++}
++
++static void
++qtb_diag(const char *what)
++{
++	if (qtb == NULL) {
++		qtb = (volatile uint8_t *)ml_io_map(QTB_PHYS, 0x1000);
++		if (qtb == NULL) {
++			IOLog("VGPU: qtb map failed
++");
++			return;
++		}
++	}
++	IOLog("VGPU: SUMMARY qtb %s: fencereq %llx fenceack %llx ot port0 %llx port1 %llx c00 %08x c08 %08x
++", what,
++	    rd64(qtb, 0x410), rd64(qtb, 0x418), rd64(qtb, 0xc10), rd64(qtb, 0xc20), rd(qtb, 0xc00), rd(qtb, 0xc08));
++	vgpd("qtb", qtb, 0, 0x1000);
 +}
 +
 +static bool
@@ -14342,7 +14430,12 @@ index 0000000..29f3521
 +	wr(cb, 0x618, 0);
 +	wr(cb, 0x7f0, 0);
 +	poll(cb, 0x7f4, 1, 0, 1000);
-+	wr(cb, 0x000, 0x67);
++	uint32_t vcb = 1;
++	PE_parse_boot_argn("vgpucb", &vcb, sizeof(vcb));
++	if (vcb & 1) {
++		wr(cb, 0x004, 0x32b);                   /* DT qcom,actlr: all GFX CBs +15 deep prefetch */
++	}
++	wr(cb, 0x000, (vcb & 2) ? 0x00c00067 : 0x67);  /* Android kgsl CB3 SCTLR has SHCFG 3 */
 +	wr(smmu, 0xc00 + 4 * GPU_SMR, GPU_CB);
 +	wr(smmu, 0x800 + 4 * GPU_SMR, (1u << 31) | GPU_SID);
 +	IOLog("VGPU: SMMU CB%u for SID %u: SCTLR %08x SMR %08x S2CR %08x\n", GPU_CB, GPU_SID, rd(cb, 0),
@@ -14376,6 +14469,19 @@ index 0000000..29f3521
 +	wr(gmu_cb(), 0x7f0, 0);
 +	poll(gmu_cb(), 0x7f4, 1, 0, 1000);
 +	smmu_gpu_setup();
++	qtb_diag("pre");
++	if (qtb != NULL) {
++		uint64_t fr = rd64(qtb, 0x410);
++		if (fr & 1) {
++			wr64(qtb, 0x410, fr & ~1ull);   /* left fenced (halted) by someone: release */
++			IOLog("VGPU: SUMMARY qtb fence was set (%llx), cleared -> %llx
++", fr, rd64(qtb, 0x410));
++		}
++	}
++	qtb_ecats(GPU_SID, sqeb.iova, false);
++	qtb_ecats(GPU_SID, rbb.iova, false);
++	qtb_ecats(GPU_SID, memb.iova, true);
++	qtb_ecats(5, 0x20000000ull, false);             /* GMU SID for comparison */
 +
 +	IOLog("VGPU: [hw_init] rbbm %08x rptr %08x sqe_cntl %08x trust %08x\n", g_rd(R_RBBM_STATUS), g_rd(R_CP_RB_RPTR),
 +	    g_rd(R_CP_SQE_CNTL), g_rd(R_SECVID_TRUST_CNTL));
