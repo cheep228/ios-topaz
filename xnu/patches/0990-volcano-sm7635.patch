@@ -13308,10 +13308,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..52d2ef5
+index 0000000..29f3521
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1248 @@
+@@ -0,0 +1,1262 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14380,10 +14380,24 @@ index 0000000..52d2ef5
 +	IOLog("VGPU: [hw_init] rbbm %08x rptr %08x sqe_cntl %08x trust %08x\n", g_rd(R_RBBM_STATUS), g_rd(R_CP_RB_RPTR),
 +	    g_rd(R_CP_SQE_CNTL), g_rd(R_SECVID_TRUST_CNTL));
 +	aperture(0);
++	uint32_t h0 = g_rd(R_GBIF_HALT), a0 = g_rd(R_GBIF_HALT + 1), rh0 = g_rd(R_RBBM_GBIF_HALT), ra0 = g_rd(R_RBBM_GBIF_HALT + 1);
 +	g_wr(R_GBIF_HALT, 0);
 +	(void)g_rd(R_GBIF_HALT);
 +	g_wr(R_RBBM_GBIF_HALT, 0);
 +	(void)g_rd(R_RBBM_GBIF_HALT);
++	IODelay(100);
++	uint32_t a1 = g_rd(R_GBIF_HALT + 1), ra1 = g_rd(R_RBBM_GBIF_HALT + 1);
++	if (a1 != 0 && vgpu_mode != 6) {
++		/* still acked as halted: a full upstream halt cycle (client, arb), then release */
++		g_wr(R_GBIF_HALT, 1);
++		poll(base, 4 * (R_GBIF_HALT + 1), 1, 1, 1000);
++		g_wr(R_GBIF_HALT, 2);
++		poll(base, 4 * (R_GBIF_HALT + 1), 2, 2, 1000);
++		g_wr(R_GBIF_HALT, 0);
++		poll(base, 4 * (R_GBIF_HALT + 1), 3, 0, 10000);
++	}
++	IOLog("VGPU: SUMMARY gbif before halt %08x ack %08x rbbm %08x/%08x; after clear ack %08x rbbm ack %08x; after cycle ack %08x "
++	    "rbbm ack %08x gpr0 %08x\n", h0, a0, rh0, ra0, a1, ra1, g_rd(R_GBIF_HALT + 1), g_rd(R_RBBM_GBIF_HALT + 1), g_rd(0x18));
 +	g_wr(R_SECVID_TSB_CNTL, 0);
 +	g_wr64(R_TSB_TRUSTED_BASE, 0);
 +	g_wr(R_TSB_TRUSTED_SIZE, 0);
