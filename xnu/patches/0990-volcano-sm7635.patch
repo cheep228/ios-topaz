@@ -13928,10 +13928,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..eec9a0a
+index 0000000..96b45d7
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1449 @@
+@@ -0,0 +1,1476 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14947,6 +14947,33 @@ index 0000000..eec9a0a
 +				IOLog("VGPU: SMR%u %08x S2CR %08x\n", i, smr, rd(smmu, 0xc00 + 4 * i));
 +			}
 +		}
++		{
++			/* gen8 snapshot regs (BR aperture): SQE_STAT 0x8f0/1, ROQ_DBG 0x8f4/5, UCODE_DBG 0x8f8/9 */
++			uint32_t st[32], rq[16];
++			aperture(PIPE_BR);
++			g_wr(0x8f0, 0);
++			for (unsigned i = 0; i < 32; i++) {
++				st[i] = g_rd(0x8f1);
++			}
++			g_wr(0x8f4, 0);
++			for (unsigned i = 0; i < 16; i++) {
++				rq[i] = g_rd(0x8f5);
++			}
++			g_wr(0x8f8, 0);
++			uint32_t u0 = g_rd(0x8f9), u1 = g_rd(0x8f9), u2 = g_rd(0x8f9), u3 = g_rd(0x8f9);
++			aperture(0);
++			for (unsigned k = 0; k < 2; k++) {
++				IOLog("VGPU: SUMMARY sqestat %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
++				    st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10], st[11], st[12],
++				    st[13], st[14], st[15]);
++				IOLog("VGPU: SUMMARY sqestat2 %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
++				    st[16], st[17], st[18], st[19], st[20], st[21], st[22], st[23], st[24], st[25], st[26], st[27],
++				    st[28], st[29], st[30], st[31]);
++				IOLog("VGPU: SUMMARY roq %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x ucode %08x %08x %08x %08x\n",
++				    rq[0], rq[1], rq[2], rq[3], rq[4], rq[5], rq[6], rq[7], rq[8], rq[9], rq[10], rq[11], rq[12],
++				    rq[13], rq[14], rq[15], u0, u1, u2, u3);
++			}
++		}
 +		qtb_diag(what);
 +		qtb_ecats(GPU_SID, sqeb.iova, false);
 +		static bool dumped;
@@ -15189,7 +15216,7 @@ index 0000000..eec9a0a
 +	/* vgpu=7: SQE base unmapped on purpose, to see whether GX fetches reach CB3 at all (expect a CB3 fault) */
 +	g_wr64(R_CP_SQE_INSTR_BASE, vgpu_mode == 7 ? 0x30000000ull : sqeb.iova);
 +	g_wr64(R_CP_RB_BASE, rbb.iova);
-+	g_wr(R_CP_RB_CNTL, 12 | (9u << 8));             /* BUFSZ log2(32K/8), BLKSZ log2(4K/8) */
++	g_wr(R_CP_RB_CNTL, 12 | (2u << 8));             /* BUFSZ 12, BLKSZ 2 as kgsl GEN8_CP_RB_CNTL_DEFAULT */
 +	g_wr64(R_CP_RB_RPTR_ADDR, memb.iova);
 +	g_wr64(R_CP_RB_RPTR_ADDR_BV, memb.iova + 4);
 +	rb_wptr = 0;
