@@ -931,7 +931,7 @@ index 0000000..a418268
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
 new file mode 100644
-index 0000000..c26c382
+index 0000000..ee967be
 --- /dev/null
 +++ b/bsd/dev/sweet_i2c7.c
 @@ -0,0 +1,681 @@
@@ -1408,7 +1408,7 @@ index 0000000..c26c382
 +	put_tre(RING_TX, &tx_wp, ((rd2 ? 4u : 0u) << 24) | ((uint32_t)addr << 8) | 1u, 0, 0,
 +	    (2u << 20) | 1u);                                                          /* GO write */
 +	put_tre(RING_TX, &tx_wp, imm[0], imm[1], nt & 0xfu,
-+	    (1u << 20) | (1u << 16) | (1u << 9) | (rd2 ? 0u : 1u));                    /* imm DMA, ieot */
++	    (1u << 20) | (1u << 16) | (1u << 9));                                      /* imm DMA, ieot, no chain (log368: chain -> 0x10 UNEXP) */
 +	if (rd2) {
 +		uint64_t b = gpi_da + BUF_RX;
 +		put_tre(RING_RX, &rx_wp, lo(b), hi(b), nr, (1u << 20) | (1u << 9));    /* RX DMA, ieot */
