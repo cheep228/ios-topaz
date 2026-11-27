@@ -931,10 +931,10 @@ index 0000000..a418268
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
 new file mode 100644
-index 0000000..ee967be
+index 0000000..b636948
 --- /dev/null
 +++ b/bsd/dev/sweet_i2c7.c
-@@ -0,0 +1,681 @@
+@@ -0,0 +1,691 @@
 +/*
 + * topaz: polled FIFO I2C on QUP0 SE1 (battery bus: SM5602 fuel gauge 0x71,
 + * bq2589x-class charger 0x6a). Values from MakrSas/topaz-woa TopazBattery
@@ -1395,6 +1395,14 @@ index 0000000..ee967be
 +static int
 +gpi_xfer(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr)
 +{
++	if (nt && nr) {
++		/* log368/370: write+read in one sequence -> XFER code 0x10 on the imm DMA; do write+STOP, then read */
++		int e = gpi_xfer(addr, tx, nt, NULL, 0);
++		if (e) {
++			return e;
++		}
++		nt = 0;
++	}
 +	uint32_t imm[2] = { 0, 0 };
 +	for (unsigned j = 0; j < nt; ++j) {
 +		imm[j / 4] |= (uint32_t)tx[j] << (8u * (j % 4));
@@ -1405,10 +1413,12 @@ index 0000000..ee967be
 +	put_tre(RING_TX, &tx_wp, 0, 0, 0, (3u << 20) | 1u);                            /* LOCK, chain */
 +	put_tre(RING_TX, &tx_wp, (3u << 24) | (22u << 16) | (3u << 8) | 11u, 0, 2u,
 +	    (2u << 20) | (2u << 16) | 1u);                                             /* CONFIG0 400k */
-+	put_tre(RING_TX, &tx_wp, ((rd2 ? 4u : 0u) << 24) | ((uint32_t)addr << 8) | 1u, 0, 0,
++	if (nt) {
++	put_tre(RING_TX, &tx_wp, ((uint32_t)addr << 8) | 1u, 0, 0,
 +	    (2u << 20) | 1u);                                                          /* GO write */
 +	put_tre(RING_TX, &tx_wp, imm[0], imm[1], nt & 0xfu,
 +	    (1u << 20) | (1u << 16) | (1u << 9));                                      /* imm DMA, ieot, no chain (log368: chain -> 0x10 UNEXP) */
++	}
 +	if (rd2) {
 +		uint64_t b = gpi_da + BUF_RX;
 +		put_tre(RING_RX, &rx_wp, lo(b), hi(b), nr, (1u << 20) | (1u << 9));    /* RX DMA, ieot */
