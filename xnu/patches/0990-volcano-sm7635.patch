@@ -13498,10 +13498,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..950994b
+index 0000000..05c4264
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1398 @@
+@@ -0,0 +1,1418 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14550,7 +14550,9 @@ index 0000000..950994b
 +	for (uint32_t o = from; o < to; o += 16) {
 +		uint32_t a = rd(b, o), c = rd(b, o + 4), e = rd(b, o + 8), f = rd(b, o + 12);
 +		if (a | c | e | f) {
-+			IOLog("VGPD %s %05x: %08x %08x %08x %08x\n", tag, o, a, c, e, f);
++			for (int k = 0; k < 3; k++) {   /* ramoops flips bits: majority-vote offline */
++				IOLog("VGPD %s %05x: %08x %08x %08x %08x\n", tag, o, a, c, e, f);
++			}
 +		}
 +	}
 +}
@@ -14745,6 +14747,24 @@ index 0000000..950994b
 +		rmw(gccb, 0x15c, 2, 1);
 +		rmw(base, GPUCC + 0x90f4, 2, 1);
 +		IODelay(100);
++	}
++	{
++		/* Android (kgsl active) GCC 0x171000 page: 004=1 150=3 250=3 300=0x10 15c=0x300003 */
++		uint32_t vcb2 = 1;
++		PE_parse_boot_argn("vgpucb", &vcb2, sizeof(vcb2));
++		uint32_t g004 = rd(gccb, 0x4), g150 = rd(gccb, 0x150), g250 = rd(gccb, 0x250), g300 = rd(gccb, 0x300);
++		if (vcb2 & 4) {
++			rmw(gccb, 0x004, 0, 1);
++			rmw(gccb, 0x150, 0, 1);
++			rmw(gccb, 0x250, 0, 1);
++			IODelay(100);
++		}
++		for (int k = 0; k < 3; k++) {
++			IOLog("VGPU: SUMMARY gccx 004 %08x->%08x 008 %08x 014 %08x 150 %08x->%08x 154 %08x 250 %08x->%08x 300 %08x "
++			    "gcca 000 %08x 008 %08x 010 %08x 020 %08x 14c %08x\n",
++			    g004, rd(gccb, 0x4), rd(gccb, 0x8), rd(gccb, 0x14), g150, rd(gccb, 0x150), rd(gccb, 0x154),
++			    g250, rd(gccb, 0x250), g300, rd(gcca, 0), rd(gcca, 8), rd(gcca, 0x10), rd(gcca, 0x20), rd(gcca, 0x14c));
++		}
 +	}
 +	IOLog("VGPU: SUMMARY axi memnoc %08x->%08x snoc %08x->%08x ddrss %08x->%08x gpucc_memnoc %08x->%08x\n", c0,
 +	    rd(gccb, 0x10), c1, rd(gccb, 0x18), c2, rd(gccb, 0x15c), c3, cc_rd(0x90f4));
