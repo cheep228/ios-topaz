@@ -931,10 +931,10 @@ index 0000000..a418268
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
 new file mode 100644
-index 0000000..b636948
+index 0000000..757df35
 --- /dev/null
 +++ b/bsd/dev/sweet_i2c7.c
-@@ -0,0 +1,691 @@
+@@ -0,0 +1,808 @@
 +/*
 + * topaz: polled FIFO I2C on QUP0 SE1 (battery bus: SM5602 fuel gauge 0x71,
 + * bq2589x-class charger 0x6a). Values from MakrSas/topaz-woa TopazBattery
@@ -1625,6 +1625,123 @@ index 0000000..b636948
 +	    rd(i2c7_se, 0x64), rd(i2c7_west, 0), rd(i2c7_west, 4), rd(i2c7_west, 0x1000), rd(i2c7_west, 0x1004));
 +	return 0;
 +}
++
++/*
++ * Minimal SPMI arbiter v7 write (apps EE 0) for PMR735B (SID 5) GPIO3/4
++ * = WL28681 camera-PMIC reset lines. Android state: 0x40=01 41=01 42=05
++ * 44=80 45=03 46=80 (out high). Channel: chnls + 0x1000*apid, CMD 0,
++ * STATUS 8, WDATA0 0x10; cmd v2 fmt (opc<<27)|((addr&0xff)<<4)|bc.
++ */
++#define SPMI_CORE_PA    0x0c400000u
++#define SPMI_CNFG_PA    0x0c42d000u
++#define SPMI_CHNL_PA    0x0c500000u
++#define SPMI_OBS_PA     0x0c440000u
++int sweet_pmic_cam_reset(void);
++static vm_offset_t spmi_core, spmi_cnfg, spmi_obs;
++
++static int
++spmi_apid(uint16_t ppid, uint32_t *owner)
++{
++	uint32_t count = rd(spmi_core, 4) & 0x7ffu;
++	int found = -1;
++	if (count > 1024) {
++		count = 1024;
++	}
++	for (uint32_t i = 0; i < count; ++i) {
++		uint32_t m = rd(spmi_core, 0x2000u + 4u * i);
++		if (m == 0 || ((m >> 8) & 0xfffu) != ppid) {
++			continue;
++		}
++		uint32_t o = rd(spmi_cnfg, 4u * i) & 7u;
++		if (found < 0 || o == 0) {
++			found = (int)i;
++			*owner = o;
++		}
++	}
++	return found;
++}
++
++static int
++spmi_rd8(int apid, uint16_t addr, uint8_t *v)
++{
++	uint32_t off = 0x20u * (uint32_t)apid;
++	wr(spmi_obs, off, (1u << 27) | ((uint32_t)(addr & 0xffu) << 4));
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t st = rd(spmi_obs, off + 8);
++		if (st & 1u) {
++			if (st & 0xeu) {
++				return (int)st;
++			}
++			*v = (uint8_t)rd(spmi_obs, off + 0x18);
++			return 0;
++		}
++		delay(1);
++	}
++	return -1;
++}
++
++static int
++spmi_wr8(vm_offset_t ch, uint16_t addr, uint8_t v)
++{
++	wr(ch, 0x10, v);
++	wr(ch, 0x00, (0u << 27) | ((uint32_t)(addr & 0xffu) << 4));
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t st = rd(ch, 8);
++		if (st & 1u) {
++			return (st & 0xeu) ? (int)st : 0;
++		}
++		delay(1);
++	}
++	return -1;
++}
++
++int
++sweet_pmic_cam_reset(void)
++{
++	static const uint8_t ra[6] = { 0x41, 0x42, 0x45, 0x44, 0x40, 0x46 };
++	static const uint8_t rv[6] = { 0x01, 0x05, 0x03, 0x80, 0x01, 0x80 };
++	int ret = 0;
++	spmi_core = ml_io_map(SPMI_CORE_PA, 0x3000);
++	spmi_cnfg = ml_io_map(SPMI_CNFG_PA, 0x1000);
++	spmi_obs = ml_io_map(SPMI_OBS_PA, 0x8000);
++	if (!spmi_core || !spmi_cnfg || !spmi_obs) {
++		return -2;
++	}
++	uint32_t ver = rd(spmi_core, 0);
++	for (int g = 0; g < 2; g++) {
++		uint16_t ppid = (uint16_t)((5u << 8) | (0x8au + (unsigned)g));
++		uint32_t owner = 9;
++		int apid = spmi_apid(ppid, &owner);
++		uint8_t t = 0, st = 0, b[6] = {}, a[6] = {};
++		int e = -3, w[6] = { 9, 9, 9, 9, 9, 9 };
++		if (apid >= 0) {
++			e = spmi_rd8(apid, 0x04, &t) | spmi_rd8(apid, 0x05, &st);
++			for (int i = 0; i < 6; i++) {
++				spmi_rd8(apid, ra[i], &b[i]);
++			}
++			if (!e && t == 0x10 && st == 0x11 && owner == 0) {
++				vm_offset_t ch = ml_io_map(SPMI_CHNL_PA + 0x1000u * (uint32_t)apid, 0x1000);
++				for (int i = 0; ch && i < 6; i++) {
++					w[i] = spmi_wr8(ch, ra[i], rv[i]);
++				}
++				delay(2000);
++				for (int i = 0; i < 6; i++) {
++					spmi_rd8(apid, ra[i], &a[i]);
++				}
++			}
++		}
++		for (int k = 0; k < 3; k++) {
++			printf("@@P@@ ver %#x ppid %#x apid %d own %u e %d type %02x/%02x before %02x %02x %02x %02x %02x %02x wr %d %d %d %d %d %d after %02x %02x %02x %02x %02x %02x\n",
++			    ver, ppid, apid, owner, e, t, st, b[0], b[1], b[2], b[3], b[4], b[5],
++			    w[0], w[1], w[2], w[3], w[4], w[5], a[0], a[1], a[2], a[3], a[4], a[5]);
++		}
++		if (apid < 0 || e || w[5]) {
++			ret = -1;
++		}
++	}
++	return ret;
++}
++
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
 index 65970f9..c3a318d 100644
@@ -13928,10 +14045,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..96b45d7
+index 0000000..4e7b4a5
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1476 @@
+@@ -0,0 +1,1480 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15359,6 +15476,7 @@ index 0000000..96b45d7
 +
 +extern "C" void sweet_glyph_test(void);
 +extern "C" int sweet_i2c7_init(void);
++extern "C" int sweet_pmic_cam_reset(void);
 +extern "C" int sweet_i2c7_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned len);
 +extern "C" int sweet_i2c7_write(uint8_t addr, uint8_t reg, uint8_t val);
 +static void
@@ -15368,6 +15486,9 @@ index 0000000..96b45d7
 +	PE_parse_boot_argn("vglyph", &vg, sizeof(vg));
 +	IOSleep(8000);
 +	/* camera LDO PMICs WL28681 0x35/0x61: regs 0..0x0b */
++	int pr = sweet_pmic_cam_reset();
++	IOLog("@@P@@ cam reset ret %d\n", pr);
++	IOSleep(20);
 +	int e7 = sweet_i2c7_init();
 +	uint8_t w[2][12] = {};
 +	int f[2] = { -1, -1 };
