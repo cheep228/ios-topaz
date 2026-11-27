@@ -13798,10 +13798,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..05c4264
+index 0000000..ca586ef
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1418 @@
+@@ -0,0 +1,1441 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14991,9 +14991,32 @@ index 0000000..05c4264
 +	}
 +	IOLog("VGPU: SUMMARY gbif before halt %08x ack %08x rbbm %08x/%08x; after clear ack %08x rbbm ack %08x; after cycle ack %08x "
 +	    "rbbm ack %08x gpr0 %08x\n", h0, a0, rh0, ra0, a1, ra1, g_rd(R_GBIF_HALT + 1), g_rd(R_RBBM_GBIF_HALT + 1), g_rd(0x18));
++	uint32_t vcb3 = 1;
++	PE_parse_boot_argn("vgpucb", &vcb3, sizeof(vcb3));
++	{
++		uint32_t q8 = g_rd(0x3c48), q9 = g_rd(0x3c49), qa = g_rd(0x3c4a), qb = g_rd(0x3c4b);
++		if (vcb3 & 8) {
++			g_wr(0x3c4b, 0);                /* Android 0, iOS 1 (log365 VGPD) */
++			(void)g_rd(0x3c4b);
++		}
++		if (vcb3 & 32) {
++			g_wr(0x3c49, 1);                /* a8xx GBIF_REINIT_ENABLE, wait DONE */
++			poll(base, 4 * 0x3c4a, 3, 3, 10000);
++			g_wr(0x3c49, 0);
++		}
++		for (int k = 0; k < 3; ++k) {
++			IOLog("VGPU: SUMMARY gbif3c48 %08x %08x %08x %08x -> %08x %08x %08x %08x\n", q8, q9, qa, qb,
++			    g_rd(0x3c48), g_rd(0x3c49), g_rd(0x3c4a), g_rd(0x3c4b));
++		}
++	}
 +	g_wr(R_SECVID_TSB_CNTL, 0);
-+	g_wr64(R_TSB_TRUSTED_BASE, 0);
-+	g_wr(R_TSB_TRUSTED_SIZE, 0);
++	if (vcb3 & 16) {
++		g_wr64(R_TSB_TRUSTED_BASE, 0xf0000000ull);      /* Android values */
++		g_wr(R_TSB_TRUSTED_SIZE, 0xfffff000u);
++	} else {
++		g_wr64(R_TSB_TRUSTED_BASE, 0);
++		g_wr(R_TSB_TRUSTED_SIZE, 0);
++	}
 +	g_wr64(R_UCHE_CCHE_GMEM_MIN, 64ull << 20);
 +	g_wr64(R_SP_GMEM_MIN, 64ull << 20);
 +	const uint64_t trap = 0x1fffffffff000ull;
