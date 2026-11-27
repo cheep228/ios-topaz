@@ -14045,10 +14045,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..4e7b4a5
+index 0000000..dc82dde
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1480 @@
+@@ -0,0 +1,1493 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15068,9 +15068,15 @@ index 0000000..4e7b4a5
 +			/* gen8 snapshot regs (BR aperture): SQE_STAT 0x8f0/1, ROQ_DBG 0x8f4/5, UCODE_DBG 0x8f8/9 */
 +			uint32_t st[32], rq[16];
 +			aperture(PIPE_BR);
-+			g_wr(0x8f0, 0);
 +			for (unsigned i = 0; i < 32; i++) {
++				g_wr(0x8f0, i);             /* explicit index (log373: no auto-increment seen) */
 +				st[i] = g_rd(0x8f1);
++			}
++			uint32_t pc[8];
++			for (unsigned i = 0; i < 8; i++) {
++				g_wr(0x8f0, 0);
++				pc[i] = g_rd(0x8f1);
++				IODelay(500);
 +			}
 +			g_wr(0x8f4, 0);
 +			for (unsigned i = 0; i < 16; i++) {
@@ -15080,6 +15086,11 @@ index 0000000..4e7b4a5
 +			uint32_t u0 = g_rd(0x8f9), u1 = g_rd(0x8f9), u2 = g_rd(0x8f9), u3 = g_rd(0x8f9);
 +			aperture(0);
 +			for (unsigned k = 0; k < 2; k++) {
++				IOLog("VGPU: SUMMARY sqepc %08x %08x %08x %08x %08x %08x %08x %08x rbbm1 %08x gfx %08x %08x br %08x bv %08x misc %08x\n",
++				    pc[0], pc[1], pc[2], pc[3], pc[4], pc[5], pc[6], pc[7], g_rd(0x13), g_rd(0x15), g_rd(0x16),
++				    g_rd(0x1a), g_rd(0x1c), g_rd(0x1e));
++				IOLog("VGPU: SUMMARY hang int0 %08x 2f %08x 30 %08x %08x %08x %08x %08x %08x %08x %08x\n", g_rd(R_RBBM_INT_0_STATUS),
++				    g_rd(0x2f), g_rd(0x30), g_rd(0x31), g_rd(0x32), g_rd(0x33), g_rd(0x34), g_rd(0x35), g_rd(0x36), g_rd(0x37));
 +				IOLog("VGPU: SUMMARY sqestat %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
 +				    st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10], st[11], st[12],
 +				    st[13], st[14], st[15]);
@@ -15307,6 +15318,8 @@ index 0000000..4e7b4a5
 +	g_wr64(R_UCHE_CCHE_TRAP, trap);
 +	g_wr64(R_UCHE_CCHE_WT, trap);
 +	g_wr(R_UCHE_CLIENT_PF, (1u << 7) | 1);
++	g_wr(0x002f, (1u << 30) | 0xcfffff);            /* RBBM_INTERFACE_HANG_INT_CNTL (upstream fault detection) */
++	g_wr(0x058f, 1u << 30);                         /* RBBM_SLICE_INTERFACE_HANG_INT_CNTL */
 +	for (uint32_t p = 0; p <= PIPE_DDE_BV; p++) {
 +		if (p == PIPE_LPAC) {
 +			continue;
