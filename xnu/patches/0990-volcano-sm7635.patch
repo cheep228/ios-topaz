@@ -931,10 +931,10 @@ index 0000000..a418268
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
 new file mode 100644
-index 0000000..dae9c44
+index 0000000..c26c382
 --- /dev/null
 +++ b/bsd/dev/sweet_i2c7.c
-@@ -0,0 +1,561 @@
+@@ -0,0 +1,681 @@
 +/*
 + * topaz: polled FIFO I2C on QUP0 SE1 (battery bus: SM5602 fuel gauge 0x71,
 + * bq2589x-class charger 0x6a). Values from MakrSas/topaz-woa TopazBattery
@@ -1129,8 +1129,8 @@ index 0000000..dae9c44
 +
 +static vm_offset_t i2c7_gpi;
 +static bool i2c7_gsi;
-+static uint8_t gpi_mem[0x4000] __attribute__((aligned(0x4000)));
-+static uint64_t gpi_pa;
++static uint8_t gpi_mem[0x8000] __attribute__((aligned(0x4000)));
++static uint64_t gpi_pa, gpi_da;
 +static unsigned tx_wp, rx_wp, ev_rp;
 +static int gpi_logs;
 +#define RING_TX         0x0000u
@@ -1214,17 +1214,132 @@ index 0000000..dae9c44
 +	return (uint32_t)(pa >> 32);
 +}
 +
++/*
++ * apps SMMU: unmatched streams fault (USFCFG=1) and the hypervisor turns a
++ * bypass S2CR into fault, so the first GPI fetch reset the SoC (log366).
++ * Same recipe as sweet_touch.c (its GPI@a00000 SID 0x576): a free context
++ * bank with identity S1 tables over gpi_mem, IOVA 0x40000000 | (pa & 2M-1)
++ * (the GPI wants 32-bit addresses), SMRs for the GPI (0x36) and the QUP1
++ * wrapper (0x23, the SE masters RX data with it).
++ */
++#define SMMU_PA         0x15000000u
++#define PT_OFF          0x4000u
++
++static int
++i2c7_smmu(void)
++{
++	vm_offset_t s = ml_io_map(SMMU_PA, 0x1000);
++	if (!s) {
++		return 1;
++	}
++	uint32_t cr0 = rd(s, 0), idr0 = rd(s, 0x20), idr1 = rd(s, 0x24);
++	uint32_t pg = (idr1 >> 31) ? 0x10000u : 0x1000u;
++	uint32_t np = 1u << (((idr1 >> 28) & 7u) + 1u);
++	unsigned nsmr = idr0 & 0xffu, ncb = idr1 & 0xffu;
++	bool exids = (cr0 >> 3) & 1u;
++	if (nsmr > 128u) {
++		nsmr = 128u;
++	}
++	uint8_t used[128] = {0};
++	unsigned fr[2] = { 0xffffu, 0xffffu }, nf = 0;
++	for (unsigned i = 0; i < nsmr; ++i) {
++		uint32_t smr = rd(s, 0x800u + 4u * i), s2cr = rd(s, 0xc00u + 4u * i);
++		bool valid = exids ? ((s2cr >> 10) & 1u) : (smr >> 31);
++		if (valid) {
++			if (((s2cr >> 16) & 3u) == 0u) {
++				used[s2cr & 0x7fu] = 1;
++			}
++			uint32_t id = smr & 0x7fffu, mask = (smr >> 16) & 0x7fffu;
++			if (((0x36u ^ id) & ~mask) == 0) {
++				printf("SWEET GPI: smmu SID 0x36 already at %u smr %#x s2cr %#x\n", i, smr, s2cr);
++				return 2;
++			}
++		} else if (nf < 2) {
++			fr[nf++] = i;
++		}
++	}
++	unsigned cb = 0xffffu;
++	for (unsigned i = 1; i < ncb && i < 128u; ++i) {
++		if (!used[i]) {
++			cb = i;
++			break;
++		}
++	}
++	uint64_t pa = gpi_pa;
++	if (nf < 2 || cb == 0xffffu || (pa >> 21) != ((pa + sizeof(gpi_mem) - 1u) >> 21) || (pa >> 36) ||
++	    ml_vtophys((vm_offset_t)gpi_mem + sizeof(gpi_mem) - 1u) != pa + sizeof(gpi_mem) - 1u) {
++		printf("SWEET GPI: smmu no room (free smr %u cb %u pa %#llx)\n", nf, cb, pa);
++		return 3;
++	}
++	volatile uint64_t *l1 = (volatile uint64_t *)(gpi_mem + PT_OFF);
++	volatile uint64_t *l2 = (volatile uint64_t *)(gpi_mem + PT_OFF + 0x1000u);
++	volatile uint64_t *l3 = (volatile uint64_t *)(gpi_mem + PT_OFF + 0x2000u);
++	volatile uint64_t *m2 = (volatile uint64_t *)(gpi_mem + PT_OFF + 0x3000u);
++	uint64_t pt = pa + PT_OFF;
++	for (unsigned i = 0; i < 512u * 4u; ++i) {
++		l1[i] = 0;
++	}
++	uint64_t da = 0x40000000ull | (pa & 0x1fffffull);
++	l1[(pa >> 30) & 0x3fu] = (pt + 0x1000u) | 3u;
++	l2[(pa >> 21) & 0x1ffu] = (pt + 0x2000u) | 3u;
++	l1[(da >> 30) & 0x3fu] = (pt + 0x3000u) | 3u;
++	m2[(da >> 21) & 0x1ffu] = (pt + 0x2000u) | 3u;
++	for (uint64_t a = pa; a < pa + sizeof(gpi_mem); a += 0x1000u) {
++		l3[(a >> 12) & 0x1ffu] = a | 3u | (1u << 2) | (1u << 6) | (3u << 8) | (1u << 10);
++	}
++	sweet_dcache_flush((vm_offset_t)(gpi_mem + PT_OFF), 0x4000u);
++	__asm__ volatile("dsb sy" ::: "memory");
++
++	vm_offset_t g1 = ml_io_map(SMMU_PA + pg, 0x1000);
++	vm_offset_t c = ml_io_map(SMMU_PA + (np + cb) * pg, 0x1000);
++	if (!g1 || !c) {
++		return 4;
++	}
++	wr(c, 0x0, 0);
++	wr(g1, 0x800u + 4u * cb, 1u);                   /* CBA2R: VA64 */
++	wr(g1, 4u * cb, 0x0001f300u);                   /* CBAR: S1, as touch/Android */
++	wr(c, 0x10, (7u << 15) | 2u);                   /* TCR2 */
++	wr(c, 0x38, 0xf404ff44u);                       /* MAIR0 */
++	wr(c, 0x3c, 0);
++	wr(c, 0x20, (uint32_t)pt);
++	wr(c, 0x24, (uint32_t)(pt >> 32));
++	wr(c, 0x28, 0);
++	wr(c, 0x2c, 0);
++	wr(c, 0x30, 0x0080351cu);                       /* TCR: T0SZ 28, 4K, WBWA ISH walks */
++	wr(c, 0x58, 0xffffffffu);
++	wr(c, 0x618, 0);
++	wr(c, 0x7f0, 0);
++	for (unsigned i = 0; i < 1000 && (rd(c, 0x7f4) & 1u); ++i) {
++		delay(1);
++	}
++	wr(c, 0x4, 3u);
++	wr(c, 0x0, 0x0a5f0067u);
++	static const uint32_t sids[2] = { 0x36u, 0x23u };
++	for (unsigned j = 0; j < 2; ++j) {
++		wr(s, 0xc00u + 4u * fr[j], 0x300u | cb | (exids ? (1u << 10) : 0u));
++		wr(s, 0x800u + 4u * fr[j], exids ? sids[j] : ((1u << 31) | sids[j]));
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	gpi_da = da;
++	for (int k = 0; k < 2; ++k) {
++		printf("SWEET GPI: smmu cb%u smr %u/%u s2cr %#x/%#x sctlr %#x fsr %#x gfsr %#x da %#llx pa %#llx\n", cb,
++		    fr[0], fr[1], rd(s, 0xc00u + 4u * fr[0]), rd(s, 0xc00u + 4u * fr[1]), rd(c, 0), rd(c, 0x58),
++		    rd(s, 0x48), da, pa);
++	}
++	return 0;
++}
++
 +static int
 +gpi_setup(void)
 +{
 +	gpi_teardown();
-+	bzero(gpi_mem, sizeof(gpi_mem));
-+	sweet_dcache_flush((vm_offset_t)gpi_mem, sizeof(gpi_mem));
++	bzero(gpi_mem, 0x4000);
++	sweet_dcache_flush((vm_offset_t)gpi_mem, 0x4000);
 +	tx_wp = rx_wp = ev_rp = 0;
 +	wr(i2c7_gpi, GPII_INTSET, 1);
 +	gpi_clr_irqs();
 +
-+	uint64_t ev = gpi_pa + RING_EV;
++	uint64_t ev = gpi_da + RING_EV;
 +	if (!gpi_cmd(true, 0, 0, 1)) {                  /* EV ALLOCATE */
 +		return 1;
 +	}
@@ -1241,7 +1356,7 @@ index 0000000..dae9c44
 +	wr(i2c7_gpi, EV_DB, lo(ev + RING_SZ - 16u));
 +
 +	for (unsigned k = 0; k < 2; ++k) {
-+		uint64_t r = gpi_pa + (k ? RING_RX : RING_TX);
++		uint64_t r = gpi_da + (k ? RING_RX : RING_TX);
 +		if (!gpi_cmd(false, k, 0, 1)) {         /* CH ALLOCATE */
 +			return 2 + (int)k;
 +		}
@@ -1285,7 +1400,7 @@ index 0000000..dae9c44
 +		imm[j / 4] |= (uint32_t)tx[j] << (8u * (j % 4));
 +	}
 +	bool rd2 = nr != 0;
-+	uint64_t txr = gpi_pa + RING_TX, rxr = gpi_pa + RING_RX, evr = gpi_pa + RING_EV;
++	uint64_t txr = gpi_da + RING_TX, rxr = gpi_da + RING_RX, evr = gpi_da + RING_EV;
 +
 +	put_tre(RING_TX, &tx_wp, 0, 0, 0, (3u << 20) | 1u);                            /* LOCK, chain */
 +	put_tre(RING_TX, &tx_wp, (3u << 24) | (22u << 16) | (3u << 8) | 11u, 0, 2u,
@@ -1295,7 +1410,7 @@ index 0000000..dae9c44
 +	put_tre(RING_TX, &tx_wp, imm[0], imm[1], nt & 0xfu,
 +	    (1u << 20) | (1u << 16) | (1u << 9) | (rd2 ? 0u : 1u));                    /* imm DMA, ieot */
 +	if (rd2) {
-+		uint64_t b = gpi_pa + BUF_RX;
++		uint64_t b = gpi_da + BUF_RX;
 +		put_tre(RING_RX, &rx_wp, lo(b), hi(b), nr, (1u << 20) | (1u << 9));    /* RX DMA, ieot */
 +		put_tre(RING_TX, &tx_wp, ((uint32_t)addr << 8) | 2u, 0, nr,
 +		    (2u << 20) | (1u << 11));                                          /* GO read, link_rx */
@@ -1448,6 +1563,11 @@ index 0000000..dae9c44
 +		gpi_pa = ml_vtophys((vm_offset_t)gpi_mem);
 +		if (!i2c7_gpi || !gpi_pa) {
 +			return ENOMEM;
++		}
++		int sm = i2c7_smmu();
++		if (sm) {
++			printf("SWEET GPI: smmu setup failed %d, no GSI\n", sm);
++			return EIO;
 +		}
 +		wr(i2c7_se, SE_IRQ_CLR, 0xffffffffu);
 +		wr(i2c7_se, 0x648, 0xffffffffu);
