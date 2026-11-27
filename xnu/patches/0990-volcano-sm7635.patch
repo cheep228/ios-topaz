@@ -1,13 +1,14 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index c2864ab..1750e53 100644
+index c2864ab..251196e 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -113,6 +113,8 @@ bsd/dev/sweet_sample.c			standard
+@@ -113,6 +113,9 @@ bsd/dev/sweet_sample.c			standard
  bsd/dev/sweet_keys.c			standard
  bsd/dev/sweet_touch.c			standard
  bsd/dev/sweet_i2c1.c			standard
 +bsd/dev/sweet_i2c13.c			standard
 +bsd/dev/sweet_i2c7.c		standard
++bsd/dev/sweet_glyph.c		standard
  bsd/dev/sweet_cpufreq.c			standard
  bsd/dev/topaz_fw.c			standard
  bsd/dev/topaz_redwood_audio.c		standard
@@ -492,6 +493,185 @@ index 94c7552..1a5a91a 100644
  	PE_parse_boot_argn("sweetcpufreq", &on, sizeof(on));
  	if (!on) {
  		return 0;
+diff --git a/bsd/dev/sweet_glyph.c b/bsd/dev/sweet_glyph.c
+new file mode 100755
+index 0000000..d55a2db
+--- /dev/null
++++ b/bsd/dev/sweet_glyph.c
+@@ -0,0 +1,173 @@
++/*
++ * sweet_glyph.c: Nothing Phone 3a (volcano) Glyph LEDs.
++ * AW20036 36-channel LED matrix driver on QUP1 SE0 (Linux i2c-7) at 0x3a.
++ * HWEN/reset is TLMM gpio54. Page register 0xF0: 0xC0 config, 0xC1 DIM, 0xC2 PWM.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <sys/sysctl.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern int sweet_i2c7_init(void);
++extern int sweet_i2c7_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned len);
++extern int sweet_i2c7_write(uint8_t addr, uint8_t reg, uint8_t val);
++int sweet_glyph_init(void);
++int sweet_glyph_set(unsigned level);
++int sweet_glyph_led(unsigned idx, unsigned level);
++void sweet_glyph_test(void);
++
++#define AW_ADDR         0x3au
++#define AW_PAGE         0xf0u
++#define AW_P0           0xc0u
++#define AW_P1           0xc1u
++#define AW_P2           0xc2u
++#define AW_NLED         36u
++#define GLYPH_GPIO_PA   (0x0f100000u + 54u * 0x1000u)
++
++static vm_offset_t glyph_gpio;
++static bool glyph_ready;
++static int glyph_level;
++
++static int
++aw_w(uint8_t reg, uint8_t val)
++{
++	int e = sweet_i2c7_write(AW_ADDR, reg, val);
++	if (e) {
++		e = sweet_i2c7_write(AW_ADDR, reg, val);
++	}
++	return e;
++}
++
++static void
++hwen(bool on)
++{
++	volatile uint32_t *g = (volatile uint32_t *)glyph_gpio;
++	g[1] = on ? 2u : 0u;                 /* IO: output value */
++	g[0] = (g[0] & ~0x3ffu) | (1u << 9); /* CFG: func 0 gpio, 2 mA, no pull, OE */
++	g[1] = on ? 2u : 0u;
++}
++
++int
++sweet_glyph_init(void)
++{
++	if (glyph_ready) {
++		return 0;
++	}
++	int e = sweet_i2c7_init();
++	if (e) {
++		printf("SWEET GLYPH: i2c7 init %d\n", e);
++		return e;
++	}
++	if (!glyph_gpio) {
++		glyph_gpio = ml_io_map(GLYPH_GPIO_PA, 0x1000);
++		if (!glyph_gpio) {
++			return ENOMEM;
++		}
++	}
++	uint32_t cfg0 = ((volatile uint32_t *)glyph_gpio)[0], io0 = ((volatile uint32_t *)glyph_gpio)[1];
++	hwen(false);
++	delay(1000);
++	hwen(true);
++	delay(2500);
++	uint8_t id = 0;
++	e = aw_w(AW_PAGE, AW_P0);
++	int r = e ? -1 : sweet_i2c7_read(AW_ADDR, 0x00, &id, 1);
++	printf("SWEET GLYPH: gpio54 cfg %#x io %#x -> %#x; page %d id %d %#x\n", cfg0, io0,
++	    ((volatile uint32_t *)glyph_gpio)[1], e, r, id);
++	if (e || r || id != 0x18) {
++		return EIO;
++	}
++	e |= aw_w(0x02, 0x01);               /* SWRST */
++	delay(2500);
++	e |= aw_w(AW_PAGE, AW_P0);
++	e |= aw_w(0x03, 0x38);               /* GCCR: imax (Android WHITE profile) */
++	e |= aw_w(0x80, 0x02);
++	e |= aw_w(0x01, 0x00);               /* GCR: chip on */
++	e |= aw_w(AW_PAGE, AW_P1);
++	for (unsigned i = 0; i < AW_NLED; i++) {
++		e |= aw_w((uint8_t)i, i == 0x14 ? 0x16 : i == 0x21 ? 0x2a : 0x02);
++	}
++	e |= aw_w(AW_PAGE, AW_P2);
++	for (unsigned i = 0; i < AW_NLED; i++) {
++		e |= aw_w((uint8_t)i, 0);
++	}
++	printf("SWEET GLYPH: AW20036 ready (err %d)\n", e);
++	if (e) {
++		return EIO;
++	}
++	glyph_ready = true;
++	return 0;
++}
++
++int
++sweet_glyph_led(unsigned idx, unsigned level)
++{
++	if (!glyph_ready || idx >= AW_NLED) {
++		return ENXIO;
++	}
++	int e = aw_w(AW_PAGE, AW_P2);
++	return e | aw_w((uint8_t)idx, (uint8_t)(level > 255 ? 255 : level));
++}
++
++int
++sweet_glyph_set(unsigned level)
++{
++	int e = sweet_glyph_init();
++	if (e) {
++		return e;
++	}
++	e = aw_w(AW_PAGE, AW_P2);
++	for (unsigned i = 0; i < AW_NLED; i++) {
++		e |= aw_w((uint8_t)i, (uint8_t)(level > 255 ? 255 : level));
++	}
++	glyph_level = (int)level;
++	return e;
++}
++
++void
++sweet_glyph_test(void)
++{
++	int e = sweet_glyph_init();
++	for (int k = 0; k < 4; k++) {
++		printf("@@G@@ glyph init %d\n", e);
++	}
++	if (e) {
++		return;
++	}
++	/* chase each LED, then all on, then off */
++	for (unsigned i = 0; i < AW_NLED; i++) {
++		sweet_glyph_led(i, 255);
++		delay(60000);
++		sweet_glyph_led(i, 0);
++	}
++	e = sweet_glyph_set(255);
++	delay(1500000);
++	e |= sweet_glyph_set(0);
++	for (int k = 0; k < 4; k++) {
++		printf("@@G@@ glyph test done %d\n", e);
++	}
++}
++
++static int
++sysctl_sweet_glyph SYSCTL_HANDLER_ARGS
++{
++#pragma unused(oidp, arg1, arg2)
++	int v = glyph_level, changed = 0;
++	int e = sysctl_io_number(req, v, sizeof(v), &v, &changed);
++	if (e || !changed) {
++		return e;
++	}
++	if (v < 0 || v > 255) {
++		return EINVAL;
++	}
++	return sweet_glyph_set((unsigned)v) ? EIO : 0;
++}
++
++SYSCTL_PROC(_kern, OID_AUTO, sweet_glyph, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
++    0, 0, sysctl_sweet_glyph, "I", "glyph LED brightness 0..255");
++#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c13.c b/bsd/dev/sweet_i2c13.c
 new file mode 100644
 index 0000000..a418268
@@ -13308,10 +13488,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..dbffbe4
+index 0000000..950994b
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1368 @@
+@@ -0,0 +1,1398 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14360,8 +14540,7 @@ index 0000000..dbffbe4
 +	for (uint32_t o = from; o < to; o += 16) {
 +		uint32_t a = rd(b, o), c = rd(b, o + 4), e = rd(b, o + 8), f = rd(b, o + 12);
 +		if (a | c | e | f) {
-+			IOLog("VGPD %s %05x: %08x %08x %08x %08x
-+", tag, o, a, c, e, f);
++			IOLog("VGPD %s %05x: %08x %08x %08x %08x\n", tag, o, a, c, e, f);
 +		}
 +	}
 +}
@@ -14388,8 +14567,7 @@ index 0000000..dbffbe4
 +	}
 +	out = rd64(qtb, 0x458);
 +	wr64(qtb, 0x448, 0);
-+	IOLog("VGPU: SUMMARY qtb ecats sid %u iova %llx %s: status %llx outfld0 %llx (%s) after %d us
-+", sid, iova,
++	IOLog("VGPU: SUMMARY qtb ecats sid %u iova %llx %s: status %llx outfld0 %llx (%s) after %d us\n", sid, iova,
 +	    write ? "W" : "R", st, out, (out & 1) ? "FAULT" : ((st & 1) ? "PA ok" : "TIMEOUT"), i);
 +	return out;
 +}
@@ -14400,13 +14578,11 @@ index 0000000..dbffbe4
 +	if (qtb == NULL) {
 +		qtb = (volatile uint8_t *)ml_io_map(QTB_PHYS, 0x1000);
 +		if (qtb == NULL) {
-+			IOLog("VGPU: qtb map failed
-+");
++			IOLog("VGPU: qtb map failed\n");
 +			return;
 +		}
 +	}
-+	IOLog("VGPU: SUMMARY qtb %s: fencereq %llx fenceack %llx ot port0 %llx port1 %llx c00 %08x c08 %08x
-+", what,
++	IOLog("VGPU: SUMMARY qtb %s: fencereq %llx fenceack %llx ot port0 %llx port1 %llx c00 %08x c08 %08x\n", what,
 +	    rd64(qtb, 0x410), rd64(qtb, 0x418), rd64(qtb, 0xc10), rd64(qtb, 0xc20), rd(qtb, 0xc00), rd(qtb, 0xc08));
 +	vgpd("qtb", qtb, 0, 0x1000);
 +}
@@ -14474,8 +14650,7 @@ index 0000000..dbffbe4
 +		uint64_t fr = rd64(qtb, 0x410);
 +		if (fr & 1) {
 +			wr64(qtb, 0x410, fr & ~1ull);   /* left fenced (halted) by someone: release */
-+			IOLog("VGPU: SUMMARY qtb fence was set (%llx), cleared -> %llx
-+", fr, rd64(qtb, 0x410));
++			IOLog("VGPU: SUMMARY qtb fence was set (%llx), cleared -> %llx\n", fr, rd64(qtb, 0x410));
 +		}
 +	}
 +	qtb_ecats(GPU_SID, sqeb.iova, false);
@@ -14664,13 +14839,48 @@ index 0000000..dbffbe4
 +	IOLog("VGPU: probe done\n");
 +}
 +
++extern "C" void sweet_glyph_test(void);
++extern "C" int sweet_i2c7_init(void);
++extern "C" int sweet_i2c7_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned len);
++extern "C" int sweet_i2c7_write(uint8_t addr, uint8_t reg, uint8_t val);
++static void
++glyph_thread(void *, wait_result_t)
++{
++	uint32_t vg = 0;
++	PE_parse_boot_argn("vglyph", &vg, sizeof(vg));
++	IOSleep(8000);
++	/* camera LDO PMICs WL28681 0x35/0x61: regs 0..0x0b */
++	int e7 = sweet_i2c7_init();
++	uint8_t w[2][12] = {};
++	int f[2] = { -1, -1 };
++	if (!e7) {
++		f[0] = sweet_i2c7_read(0x35, 0x00, w[0], 12);
++		f[1] = sweet_i2c7_read(0x61, 0x00, w[1], 12);
++	}
++	for (int k = 0; k < 4; k++) {
++		for (int j = 0; j < 2; j++) {
++			IOLog("@@C@@ i2c7 %d wl%02x %d: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
++			    e7, j ? 0x61 : 0x35, f[j], w[j][0], w[j][1], w[j][2], w[j][3], w[j][4], w[j][5],
++			    w[j][6], w[j][7], w[j][8], w[j][9], w[j][10], w[j][11]);
++		}
++	}
++	if (vg & 1) {
++		sweet_glyph_test();
++	}
++}
 +#endif /* VOLCANO */
 +
 +extern "C" void
 +volcano_adreno_init(void)
 +{
 +#if defined(VOLCANO)
-+	uint32_t on = 0;
++	uint32_t on = 0, vg = 0;
++	if (PE_parse_boot_argn("vglyph", &vg, sizeof(vg)) && vg) {
++		thread_t gt;
++		if (kernel_thread_start(glyph_thread, NULL, &gt) == KERN_SUCCESS) {
++			thread_deallocate(gt);
++		}
++	}
 +	if (!PE_parse_boot_argn("vgpu", &on, sizeof(on)) || on == 0) {
 +		return;
 +	}
