@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..5f95f26
+index 0000000..cc0237b
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1849 @@
+@@ -0,0 +1,1861 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15133,6 +15133,12 @@ index 0000000..5f95f26
 +	for (int k = 0; vgpu_mode == 8 && k < 3; k++) {
 +		IOLog("VGPU: SUMMARY hwsched START %d memallocs %u\n", r, mab_n);
 +	}
++	uint32_t vhws = 3;
++	PE_parse_boot_argn("vhws", &vhws, sizeof(vhws));
++	if (vgpu_mode == 8 && vhws <= 1) {
++		IOLog("VGPU: SUMMARY hwsched stop after START (vhws=1)\n");
++		return false;
++	}
 +	if (r) {
 +		return false;
 +	}
@@ -15859,7 +15865,13 @@ index 0000000..5f95f26
 +	/* vgpu=7: SQE base unmapped on purpose, to see whether GX fetches reach CB3 at all (expect a CB3 fault) */
 +	g_wr64(R_CP_SQE_INSTR_BASE, vgpu_mode == 7 ? 0x30000000ull : sqeb.iova);
 +	if (vgpu_mode == 8) {
-+		hws_cp_init();
++		uint32_t vhws = 3;
++		PE_parse_boot_argn("vhws", &vhws, sizeof(vhws));
++		if (vhws >= 3) {
++			hws_cp_init();
++		} else {
++			IOLog("VGPU: SUMMARY hwsched stop before CP_INIT (vhws=2) rbbm %08x\n", g_rd(R_RBBM_STATUS));
++		}
 +		return;
 +	}
 +	g_wr64(R_CP_RB_BASE, rbb.iova);
