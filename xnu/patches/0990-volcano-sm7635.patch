@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..cc0237b
+index 0000000..973692e
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1861 @@
+@@ -0,0 +1,1870 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14895,7 +14895,10 @@ index 0000000..cc0237b
 +	uint64_t a = al > 14 ? (1ull << al) : 0x4000ull;
 +	uint64_t gpu = 0, gmu = 0;
 +	bool gfx = (flags & 1) != 0;
-+	if (mab_n < 32 && size != 0 && size <= 0x2000000u) {
++	uint32_t vcd = 0;
++	PE_parse_boot_argn("vhwscd", &vcd, sizeof(vcd));
++	bool refuse = vcd != 0 && kind == 10;  /* HFI_MEMKIND_CRASH_DUMP: GMU-run crash dumper (cold reset in log381) */
++	if (!refuse && mab_n < 32 && size != 0 && size <= 0x2000000u) {
 +		struct gbuf *b = &mab[mab_n];
 +		uint64_t *va = gfx ? &mab_gpu_va : &mab_gmu_va;
 +		uint64_t iova = (*va + a - 1) & ~(a - 1);
@@ -14913,7 +14916,6 @@ index 0000000..cc0237b
 +			if (!gfx || (flags & 8)) {
 +				gmu = iova;
 +			}
-+			size = (uint32_t)b->size;
 +		}
 +	}
 +	uint32_t m[11];
@@ -14924,14 +14926,16 @@ index 0000000..cc0237b
 +	m[3] = (uint32_t)(gpu >> 32);
 +	m[4] = flags;
 +	m[5] = kind;
-+	m[6] = gmh;             /* host_mem_handle = gmu_mem_handle: success */
++	m[6] = refuse ? 0 : gmh;        /* host_mem_handle = gmu_mem_handle: success */
 +	m[7] = gmh;
 +	m[8] = (uint32_t)gmu;
 +	m[9] = size;
 +	m[10] = d[8];
 +	hfi_post(m, 11);
-+	IOLog("VGPU: SUMMARY memalloc v%u kind %u flags %#x size %#x align %#x h %#x -> gpu %#llx gmu %#llx\n", r[1], kind,
-+	    flags, d[7], d[8], gmh, gpu, gmu);
++	for (int k = 0; k < 3; k++) {
++		IOLog("VGPU: SUMMARY memalloc v%u kind %u flags %#x size %#x align %#x h %#x -> gpu %#llx gmu %#llx%s\n", r[1],
++		    kind, flags, d[7], d[8], gmh, gpu, gmu, refuse ? " REFUSED" : "");
++	}
 +}
 +
 +static void
@@ -15725,6 +15729,11 @@ index 0000000..cc0237b
 +	c[i++] = (uint32_t)((memb.iova + 0x1000) >> 32);
 +	c[i++] = 1u << 31;
 +	int r = hws_raw(c, i, "CP_INIT");
++	uint32_t vhws = 3;
++	PE_parse_boot_argn("vhws", &vhws, sizeof(vhws));
++	if (vhws == 3) {
++		return;
++	}
 +	if (r == 0 && zap_load()) {
 +		c[0] = pkt7(102, 1);            /* CP_SET_SECURE_MODE 0 */
 +		c[1] = 0;
