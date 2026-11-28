@@ -495,10 +495,10 @@ index 94c7552..1a5a91a 100644
  		return 0;
 diff --git a/bsd/dev/sweet_glyph.c b/bsd/dev/sweet_glyph.c
 new file mode 100755
-index 0000000..d55a2db
+index 0000000..0bc81b1
 --- /dev/null
 +++ b/bsd/dev/sweet_glyph.c
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,191 @@
 +/*
 + * sweet_glyph.c: Nothing Phone 3a (volcano) Glyph LEDs.
 + * AW20036 36-channel LED matrix driver on QUP1 SE0 (Linux i2c-7) at 0x3a.
@@ -672,6 +672,24 @@ index 0000000..d55a2db
 +SYSCTL_PROC(_kern, OID_AUTO, sweet_glyph, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
 +    0, 0, sysctl_sweet_glyph, "I", "glyph LED brightness 0..255");
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
++
++/* kern.sweet_gpu: the Adreno ring's state now (iokit/Kernel/arm/VolcanoAdreno.cpp), for gl_test */
++extern int volcano_rg_snapshot(char *s, int n) __attribute__((weak));
++
++static int
++sysctl_sweet_gpu SYSCTL_HANDLER_ARGS
++{
++#pragma unused(arg1, arg2, oidp)
++	char s[512] = "no rg";
++	if (volcano_rg_snapshot != NULL) {
++		volcano_rg_snapshot(s, sizeof(s));
++	}
++	s[sizeof(s) - 1] = 0;
++	return SYSCTL_OUT(req, s, strlen(s) + 1);
++}
++
++SYSCTL_PROC(_kern, OID_AUTO, sweet_gpu, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
++    0, 0, sysctl_sweet_gpu, "A", "Adreno ring state");
 diff --git a/bsd/dev/sweet_i2c13.c b/bsd/dev/sweet_i2c13.c
 new file mode 100644
 index 0000000..a418268
@@ -14411,10 +14429,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..a3c456a
+index 0000000..abde634
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,2543 @@
+@@ -0,0 +1,2568 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -16550,6 +16568,8 @@ index 0000000..a3c456a
 +static struct { uint64_t start, size; } rg_free[512];
 +static unsigned rg_free_count;
 +static uint32_t rg_subs;
++static uint32_t rg_last_n, rg_last_w;
++static uint64_t rg_last_ib;
 +
 +extern "C" void RedwoodGPUStart(void);
 +
@@ -16730,6 +16750,7 @@ index 0000000..a3c456a
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +	sweet_dcache_clean((vm_offset_t)rbb.va, (unsigned)rbb.size);
 +	g_wr(R_CP_RB_WPTR, rb_wptr & (RG_RBN - 1));
++	rg_last_n = count; rg_last_ib = addresses[0]; rg_last_w = words[0];
 +	rg_subs++;
 +	IOLockUnlock(rg_lock);
 +	return fence;
@@ -16747,6 +16768,28 @@ index 0000000..a3c456a
 +		    why, rg_seqno, ((volatile uint32_t *)memb.va)[0x80], g_rd(R_CP_RB_RPTR), rb_wptr & (RG_RBN - 1),
 +		    g_rd(R_RBBM_STATUS), sqe, hwf, ints, rd(cb, 0x58), rd(cb, 0x64), rd(cb, 0x60), rd(cb, 0x68));
 +	}
++}
++
++/* kern.sweet_gpu (bsd/dev/sweet_glyph.c): the RG state now, as text, for gl_test / rgprobe */
++extern "C" int
++volcano_rg_snapshot(char *s, int n)
++{
++	if (!rg_ready || memb.va == NULL) {
++		return snprintf(s, n, "rg not ready");
++	}
++	IOLockLock(rg_lock);
++	sweet_dcache_flush((vm_offset_t)memb.va + 0x200, 64);
++	aperture(PIPE_BR);
++	uint32_t sqe = g_rd(R_CP_SQE_STATUS_PIPE), hwf = g_rd(R_CP_HW_FAULT_PIPE), ints = g_rd(R_CP_INT_STATUS_PIPE);
++	uint32_t ib1l = g_rd(0x928), ib1h = g_rd(0x929), ib1r = g_rd(0x92a);
++	aperture(0);
++	IOLockUnlock(rg_lock);
++	volatile uint8_t *cb = gpu_cb();
++	return snprintf(s, n, "fence %u done %u subs %u rptr %u wptr %u rbbm %08x sqe %08x hwf %08x int %08x ib1 %08x%08x rem %u "
++	    "last n %u ib %llx w %u FSR %08x FAR %08x%08x FSYNR0 %08x",
++	    rg_seqno, ((volatile uint32_t *)memb.va)[0x80], rg_subs, g_rd(R_CP_RB_RPTR), rb_wptr & (RG_RBN - 1), g_rd(R_RBBM_STATUS),
++	    sqe, hwf, ints, ib1h, ib1l, ib1r, rg_last_n, (unsigned long long)rg_last_ib, rg_last_w, rd(cb, 0x58), rd(cb, 0x64),
++	    rd(cb, 0x60), rd(cb, 0x68));
 +}
 +
 +extern "C" void volcano_rg_stop(void) { rg_ready = false; }
