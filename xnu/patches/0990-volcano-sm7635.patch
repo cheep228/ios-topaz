@@ -14411,7 +14411,7 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..cb07288
+index 0000000..7d040a2
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
 @@ -0,0 +1,2534 @@
@@ -16808,7 +16808,7 @@ index 0000000..cb07288
 +	for (int i = 0; i < 60; i++) {
 +		IOSleep(10000);
 +		IOLog("VGPU: SUMMARY memw t%d free %u wired %u rptr %u wptr %u subs %u\n", (i + 1) * 10,
-+		    vm_page_free_count, vm_page_wire_count, rd(base, R_CP_RB_RPTR), (unsigned)rb_wptr, (unsigned)rg_subs);
++		    vm_page_free_count, vm_page_wire_count, g_rd(R_CP_RB_RPTR), (unsigned)rb_wptr, (unsigned)rg_subs);
 +	}
 +}
 +
