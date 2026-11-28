@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..87e5579
+index 0000000..06e1c0d
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1650 @@
+@@ -0,0 +1,1653 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15372,12 +15372,15 @@ index 0000000..87e5579
 +			}
 +			g_wr(0x8f8, 0);
 +			uint32_t u0 = g_rd(0x8f9), u1 = g_rd(0x8f9), u2 = g_rd(0x8f9), u3 = g_rd(0x8f9);
-+			{
++				uint32_t vcd2 = 0; PE_parse_boot_argn("vgpucb", &vcd2, sizeof(vcd2));
++				if (vcd2 & 128) {
 +				/* kgsl snapshot sets CP_CHICKEN_DBG[StabilizeMVC] (0x8b2 bit2) before indexed dumps */
 +				uint32_t ch = g_rd(0x8b2);
 +				g_wr(0x8b2, ch | 4);
++					g_wr(R_CP_SQE_CNTL, 0);
++					IODelay(100);
 +				const uint32_t *fw = (const uint32_t *)sqeb.va;
-+				uint32_t nfw = 0x53d4, match = 0, firstbad = 0xffffffff, fbv = 0, fbf = 0, nz = 0;
++				uint32_t nfw = 64, match = 0, firstbad = 0xffffffff, fbv = 0, fbf = 0, nz = 0;
 +				uint32_t s0[8];
 +				g_wr(0x8f8, 0);
 +				for (uint32_t i = 0; i < nfw; i++) {
