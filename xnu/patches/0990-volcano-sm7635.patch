@@ -14249,10 +14249,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..01613c5
+index 0000000..f13ec60
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1612 @@
+@@ -0,0 +1,1620 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15278,13 +15278,19 @@ index 0000000..01613c5
 +		 * Crash dumper (independent CP DMA engine): reads regs into memory per a script.
 +		 * If it completes, the GX -> SMMU -> DDR path works and the SQE problem is elsewhere.
 +		 */
++		uint32_t vcd = 0;
++		PE_parse_boot_argn("vgpucb", &vcd, sizeof(vcd));
++		if (!(vcd & 64)) {
++			goto no_cd;     /* log381: crash dumper run -> cold reset, ramoops lost */
++		}
++		{
 +		volatile uint64_t *sc = (volatile uint64_t *)(memb.va + 0x2000);
 +		volatile uint32_t *dd = (volatile uint32_t *)(memb.va + 0x3000);
 +		for (int i = 0; i < 0x100; i++) {
 +			dd[i] = 0x55555555u;
 +		}
 +		dd[0x40] = 0xaaaaaaaau;
-+		sc[0] = memb.iova + 0x3000; sc[1] = (0x000ull << 44) | 16;   /* RBBM 0x0..0xf */
++		sc[0] = memb.iova + 0x3000; sc[1] = (0x012ull << 44) | 1;    /* RBBM_STATUS only (0x0-0xf has locked regs) */
 +		sc[2] = memb.iova + 0x3040; sc[3] = (0x800ull << 44) | 16;   /* CP 0x800..0x80f */
 +		sc[4] = memb.iova + 0x3100; sc[5] = (0x845ull << 44) | 1;    /* CRASH_DUMP_STATUS -> end marker */
 +		sc[6] = 0; sc[7] = 0;
@@ -15307,6 +15313,8 @@ index 0000000..01613c5
 +			IOLog("VGPU: SUMMARY crashdump status %08x end %08x d0 %08x %08x %08x cp %08x %08x %08x rbbm %08x\n",
 +			    cds, end, dd[0], dd[1], dd[2], dd[0x10], dd[0x12], dd[0x17], g_rd(R_RBBM_STATUS));
 +		}
++		}
++no_cd:;
 +	}
 +	volatile uint8_t *cb = gpu_cb();
 +	IOLog("VGPU: CP %s: wptr reg %u, RB_BASE %08x%08x CNTL %08x SQE_BASE %08x%08x\n", what, g_rd(R_CP_RB_WPTR),
