@@ -931,10 +931,10 @@ index 0000000..a418268
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
 new file mode 100644
-index 0000000..4265607
+index 0000000..680ecb4
 --- /dev/null
 +++ b/bsd/dev/sweet_i2c7.c
-@@ -0,0 +1,810 @@
+@@ -0,0 +1,1004 @@
 +/*
 + * topaz: polled FIFO I2C on QUP0 SE1 (battery bus: SM5602 fuel gauge 0x71,
 + * bq2589x-class charger 0x6a). Values from MakrSas/topaz-woa TopazBattery
@@ -1742,6 +1742,200 @@ index 0000000..4265607
 +		    w[0], w[1], w[2], w[3], w[4], w[5], a[0], a[1], a[2], a[3], a[4], a[5]);
 +	}
 +	return (apid < 0 || e || w[5] || a[3] != rv[3]) ? -1 : 0;
++}
++
++/*
++ * Camera slot0 bring-up probe (volcano): GCC camera clocks, CAMCC gdsc + XO
++ * clocks for cci0/mclk0, TLMM (gpio83 MCLK0, 88/89 CCI0 M0, 40 reset), then a
++ * polled CCI0 master0 16-bit register read of the main sensor (0x20, reg 0).
++ */
++#define CAM_GCC_PA   0x00100000u
++#define CAM_CC_PA    0x0adb0000u
++#define CAM_CCI0_PA  0x0ac15000u
++#define CAM_TLMM_PA  0x0f100000u
++#define R32(b, o)    (*(volatile uint32_t *)((b) + (o)))
++
++static uint32_t
++cam_poll(vm_offset_t b, uint32_t o, uint32_t mask, uint32_t want, int us)
++{
++	uint32_t v = R32(b, o);
++	while (((v & mask) != want) && us-- > 0) {
++		delay(1);
++		v = R32(b, o);
++	}
++	return v;
++}
++
++static void
++cam_gpio(int gpio, uint32_t cfg, int out)
++{
++	vm_offset_t t = ml_io_map(CAM_TLMM_PA + 0x1000u * (uint32_t)gpio, 0x1000);
++	if (!t) {
++		return;
++	}
++	uint32_t before = R32(t, 0);
++	if (out >= 0) {
++		R32(t, 4) = out ? 2u : 0u;
++	}
++	R32(t, 0) = cfg;
++	printf("@@K@@ gpio %d cfg %#x -> %#x io %#x\n", gpio, before, R32(t, 0), R32(t, 4));
++}
++
++static vm_offset_t cam_cci;
++
++static uint32_t
++cam_cci_run(int q, uint32_t donemask)
++{
++	R32(cam_cci, 0x300 + 0x100 * q) = R32(cam_cci, 0x304 + 0x100 * q);
++	R32(cam_cci, 0x008) = 1u << q;
++	uint32_t st = 0;
++	for (int i = 0; i < 20000; i++) {
++		st = R32(cam_cci, 0xc0c);
++		if (st & (donemask | 0x18000ee6u)) {
++			break;
++		}
++		delay(5);
++	}
++	R32(cam_cci, 0xc08) = st;
++	R32(cam_cci, 0xc00) = 1;
++	if (st & 0x18000ee6u) {
++		R32(cam_cci, 0x034) = 1;   /* halt M0 */
++		delay(1000);
++		uint32_t s2 = R32(cam_cci, 0xc0c);
++		R32(cam_cci, 0xc08) = s2;
++		R32(cam_cci, 0xc00) = 1;
++		R32(cam_cci, 0x004) = 0x3f1u; /* reset M0 */
++		delay(1000);
++		s2 = R32(cam_cci, 0xc0c);
++		R32(cam_cci, 0xc08) = s2;
++		R32(cam_cci, 0xc00) = 1;
++	}
++	return st;
++}
++
++/* returns 16-bit value or negative; addr is 8-bit */
++static int
++cam_cci_rd16(uint8_t addr8, uint16_t reg, uint32_t *wst, uint32_t *rst, uint32_t *raw0, uint32_t *raw1, uint32_t *lvl)
++{
++	uint32_t a7 = (addr8 >> 1) & 0x7f;
++	R32(cam_cci, 0x310) = 1u | (a7 << 4);                 /* Q0 SET_PARAM */
++	R32(cam_cci, 0x310) = 9u | (2u << 4) | ((uint32_t)(reg >> 8) << 8) | ((uint32_t)(reg & 0xff) << 16);
++	R32(cam_cci, 0x310) = 8u | (1u << 8);                 /* REPORT + irq */
++	*wst = cam_cci_run(0, 1u << 4);
++	if (*wst & 0x18000ee6u) {
++		return -1;
++	}
++	R32(cam_cci, 0x410) = 1u | (a7 << 4);                 /* Q1 SET_PARAM */
++	R32(cam_cci, 0x410) = 10u | (2u << 4);                /* READ 2 */
++	*rst = cam_cci_run(1, 1u);
++	*lvl = R32(cam_cci, 0x11c);
++	*raw0 = *lvl ? R32(cam_cci, 0x118) : 0;
++	*raw1 = (*lvl > 1) ? R32(cam_cci, 0x118) : 0;
++	if (*rst & 0x18000ee6u) {
++		return -2;
++	}
++	/* LS byte of first word is skipped (see i2c-qcom-cci.c) */
++	return (int)((((*raw0 >> 8) & 0xff) << 8) | ((*raw0 >> 16) & 0xff));
++}
++
++int sweet_cam_probe(void);
++int
++sweet_cam_probe(void)
++{
++	vm_offset_t g = ml_io_map(CAM_GCC_PA, 0x80000);
++	vm_offset_t c = ml_io_map(CAM_CC_PA, 0x40000);
++	if (!g || !c) {
++		return -9;
++	}
++	uint32_t g0 = R32(g, 0x26004), g1 = R32(g, 0x26018), g2 = R32(g, 0x2601c), g3 = R32(g, 0x26010);
++	R32(g, 0x26004) |= 1; R32(g, 0x26018) |= 1; R32(g, 0x2601c) |= 1; R32(g, 0x26010) |= 1;
++	delay(100);
++	printf("@@K@@ gcc cam ahb %#x->%#x hfxo %#x->%#x sfxo %#x->%#x hfaxi %#x->%#x\n",
++	    g0, R32(g, 0x26004), g1, R32(g, 0x26018), g2, R32(g, 0x2601c), g3, R32(g, 0x26010));
++	if (R32(g, 0x26004) & 0x80000000u) {
++		printf("@@K@@ camera ahb clk still off, abort\n");
++		return -1;
++	}
++	uint32_t gd0 = R32(c, 0x25004), gc0 = R32(c, 0x25008);
++	printf("@@K@@ camcc gdsc %#x cfg %#x gdscclk %#x sleep %#x cpas %#x core %#x cci %#x mclk %#x\n",
++	    gd0, gc0, R32(c, 0x25038), R32(c, 0x2505c), R32(c, 0x23004), R32(c, 0x2501c), R32(c, 0x2101c), R32(c, 0x1801c));
++	R32(c, 0x25038) |= 1;
++	R32(c, 0x2505c) |= 1;
++	delay(100);
++	if (gd0 & 1) {
++		R32(c, 0x25004) = gd0 & ~1u;
++	}
++	uint32_t gd = cam_poll(c, 0x25004, 0x80000000u, 0x80000000u, 100000);
++	printf("@@K@@ gdsc on %#x cfg %#x\n", gd, R32(c, 0x25008));
++	if (!(gd & 0x80000000u)) {
++		return -2;
++	}
++	/* RCGs from XO: CFG=0 (bypass, src0), M/N/D 0, UPDATE */
++	static const uint32_t rcg[3] = { 0x21004, 0x18004, 0x2401c };
++	for (int i = 0; i < 3; i++) {
++		uint32_t cmd0 = R32(c, rcg[i]), cfg0 = R32(c, rcg[i] + 4);
++		R32(c, rcg[i] + 4) = 0;
++		if (i < 2) {
++			R32(c, rcg[i] + 8) = 0; R32(c, rcg[i] + 0xc) = 0; R32(c, rcg[i] + 0x10) = 0;
++		}
++		R32(c, rcg[i]) = cmd0 | 1u;
++		uint32_t cmd = cam_poll(c, rcg[i], 1u, 0u, 2000);
++		printf("@@K@@ rcg %#x cmd %#x cfg %#x -> cmd %#x cfg %#x\n", rcg[i], cmd0, cfg0, cmd, R32(c, rcg[i] + 4));
++	}
++	static const uint32_t br[6] = { 0x23004, 0x2501c, 0x24010, 0x24004, 0x2101c, 0x1801c };
++	uint32_t bv[6];
++	for (int i = 0; i < 6; i++) {
++		R32(c, br[i]) |= 1;
++		bv[i] = cam_poll(c, br[i], 0x80000000u, 0u, 5000);
++	}
++	printf("@@K@@ br cpas %#x core %#x hfaxi %#x sfaxi %#x cci %#x mclk %#x\n", bv[0], bv[1], bv[2], bv[3], bv[4], bv[5]);
++	if ((bv[0] | bv[1] | bv[4]) & 0x80000000u) {
++		printf("@@K@@ cci clocks off, abort\n");
++		return -3;
++	}
++	/* pins: reset low, CCI pull-up func1, MCLK func1 */
++	cam_gpio(40, 0x200u, 0);           /* gpio, OE, out low */
++	cam_gpio(88, (1u << 2) | 3u, -1);
++	cam_gpio(89, (1u << 2) | 3u, -1);
++	cam_gpio(83, (1u << 2), -1);
++	delay(2000);
++	cam_gpio(40, 0x200u, 1);           /* release reset */
++	delay(20000);
++
++	cam_cci = ml_io_map(CAM_CCI0_PA, 0x1000);
++	if (!cam_cci) {
++		return -4;
++	}
++	uint32_t ver = R32(cam_cci, 0);
++	R32(cam_cci, 0xc04) = 0x7fffffffu;
++	R32(cam_cci, 0xc08) = 0xffffffffu;
++	R32(cam_cci, 0xc00) = 1;
++	R32(cam_cci, 0x004) = 0x0f73f3f7u;
++	uint32_t rs = cam_poll(cam_cci, 0xc0c, 1u << 24, 1u << 24, 100000);
++	R32(cam_cci, 0xc08) = rs;
++	R32(cam_cci, 0xc00) = 1;
++	R32(cam_cci, 0x100) = (78u << 16) | 114u;
++	R32(cam_cci, 0x104) = (28u << 16) | 28u;
++	R32(cam_cci, 0x108) = (10u << 16) | 77u;
++	R32(cam_cci, 0x10c) = 118u;
++	R32(cam_cci, 0x110) = (6u << 4) | 1u;
++	printf("@@K@@ cci ver %#x reset st %#x\n", ver, rs);
++	static const struct { uint8_t a; uint16_t r; } pr[4] = {
++		{ 0x20, 0x0000 }, { 0x20, 0x0002 }, { 0x5a, 0x0000 }, { 0x34, 0x0016 },
++	};
++	int id0 = -1;
++	for (int i = 0; i < 4; i++) {
++		uint32_t ws = 0, rsx = 0, r0 = 0, r1 = 0, lv = 0;
++		int v = cam_cci_rd16(pr[i].a, pr[i].r, &ws, &rsx, &r0, &r1, &lv);
++		if (i == 0) {
++			id0 = v;
++		}
++		for (int k = 0; k < 2; k++) {
++			printf("@@K@@ sensor %#x reg %#x -> %d (%#x) wst %#x rst %#x lvl %u raw %#x %#x\n",
++			    pr[i].a, pr[i].r, v, v, ws, rsx, lv, r0, r1);
++		}
++	}
++	return id0;
 +}
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
@@ -14047,10 +14241,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..8d4dba6
+index 0000000..1727224
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1559 @@
+@@ -0,0 +1,1565 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15510,6 +15704,7 @@ index 0000000..8d4dba6
 +extern "C" void sweet_glyph_test(void);
 +extern "C" int sweet_i2c7_init(void);
 +extern "C" int sweet_pmic_cam_gpio(int gpio, int high);
++extern "C" int sweet_cam_probe(void);
 +extern "C" int sweet_i2c7_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned len);
 +extern "C" int sweet_i2c7_write(uint8_t addr, uint8_t reg, uint8_t val);
 +
@@ -15583,6 +15778,11 @@ index 0000000..8d4dba6
 +			IOLog("@@C@@ ldo on wr %d en %02x seq %02x uvp %02x ocp %02x\n", v, en, sq, uv, oc);
 +		}
 +		wl_dump(e7, w, f, "ldo");
++		IOSleep(10);
++		int cid = sweet_cam_probe();
++		for (int k = 0; k < 3; k++) {
++			IOLog("@@K@@ cam probe result %d (%#x)\n", cid, cid);
++		}
 +	}
 +	if (vg & 1) {
 +		sweet_glyph_test();
