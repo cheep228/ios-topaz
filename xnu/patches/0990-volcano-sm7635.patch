@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..6bd25d3
+index 0000000..2b932d1
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,2027 @@
+@@ -0,0 +1,2125 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15897,6 +15897,95 @@ index 0000000..6bd25d3
 +	}
 +}
 +
++/*
++ * Display framebuffer (cont_splash, a8r8g8b8 1080x2392 stride 4320) mapped at GPU VA 0x22000000.
++ * A2D pitch is in 64-byte units and 4320 is not, so two rows are one: 2160 px wide, pitch 8640.
++ */
++#define FBG_PA     0xe3940000ull
++#define FBG_IOVA   0x22000000ull
++#define FBG_STRIDE 4320u
++#define FBG_H      2392u
++#define FBG_SIZE   (((uint64_t)FBG_STRIDE * FBG_H + 4095) & ~4095ull)
++static bool fbg_mapped;
++
++static void
++a2d_fill(uint64_t iova, uint32_t pitch, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1, uint32_t r, uint32_t g,
++    uint32_t bl, uint32_t a)
++{
++	const uint32_t fmt = 0x30;
++	const uint32_t blit = (1u << 7) | (fmt << 8) | (0xfu << 20);
++	out_pkt7(0x65, 1);
++	out_ring(12);
++	out_reg(0x8c00, blit);
++	out_reg(0x8500, blit);
++	out_reg(0xa9bf, (fmt << 3) | (0xfu << 12));
++	out_reg(0x8c01, 0);
++	out_pkt4(0x8c17, 4);
++	out_ring(fmt);
++	out_ring((uint32_t)iova);
++	out_ring((uint32_t)(iova >> 32));
++	out_ring(pitch >> 6);
++	out_pkt4(0x8c2c, 4);
++	out_ring(r); out_ring(g); out_ring(bl); out_ring(a);
++	out_pkt4(0x8501, 4);
++	out_ring(0); out_ring(0); out_ring(0); out_ring(0);
++	out_pkt4(0x8505, 2);
++	out_ring(x0 | (y0 << 16));
++	out_ring(x1 | (y1 << 16));
++	out_pkt7(0x2c, 1);
++	out_ring(3);
++	out_pkt7(0x46, 1);
++	out_ring(0x21);
++	out_pkt7(0x46, 1);
++	out_ring(0x31);
++	out_pkt7(0x26, 0);
++}
++
++/* GPU fill of a visible band (rows 1000..1399) of the real framebuffer, timed */
++static void
++gpu_fb_test(void)
++{
++	if (!fbg_mapped) {
++		IOLog("VGPU: SUMMARY fbfill no mapping\n");
++		return;
++	}
++	volatile uint32_t *fb = (volatile uint32_t *)ml_io_map(FBG_PA, FBG_SIZE);
++	const uint32_t p2 = FBG_STRIDE * 2;             /* 8640 = 135 * 64 */
++	const uint32_t y0 = 1000 / 2, y1 = 1400 / 2 - 1;
++	uint32_t before = fb ? fb[1200 * 1080 + 540] : 0;
++	uint64_t t0 = mach_absolute_time();
++	bool ok = true;
++	const int N = 10;
++	for (int i = 0; i < N && ok; i++) {
++		out_pkt7(23, 1);
++		out_ring((1u << 31) | 1);
++		bool last = (i == N - 1);
++		a2d_fill(FBG_IOVA, p2, 0, y0, 2159, y1, last ? 0 : (i & 1 ? 0xff : 0), last ? 0xff : 0, last ? 0 : (i & 1 ? 0 : 0xff), 0xff);
++		ok = rb_flush("FB_FILL");
++	}
++	uint64_t t1 = mach_absolute_time(), ns = 0;
++	absolutetime_to_nanoseconds(t1 - t0, &ns);
++	/* full screen fill once, timed, then the band again so the console keeps the top */
++	uint64_t t2 = mach_absolute_time();
++	out_pkt7(23, 1);
++	out_ring((1u << 31) | 1);
++	a2d_fill(FBG_IOVA, p2, 0, 0, 2159, FBG_H / 2 - 1, 0x20, 0x20, 0x80, 0xff);
++	bool ok2 = rb_flush("FB_FULL");
++	uint64_t t3 = mach_absolute_time(), ns2 = 0;
++	absolutetime_to_nanoseconds(t3 - t2, &ns2);
++	out_pkt7(23, 1);
++	out_ring((1u << 31) | 1);
++	a2d_fill(FBG_IOVA, p2, 0, y0, 2159, y1, 0, 0xff, 0, 0xff);
++	ok2 = rb_flush("FB_BAND") && ok2;
++	IODelay(1000);
++	uint32_t mid = fb ? fb[1200 * 1080 + 540] : 0, top = fb ? fb[10 * 1080 + 5] : 0, edge = fb ? fb[1399 * 1080 + 1079] : 0,
++	    out = fb ? fb[1400 * 1080 + 5] : 0;
++	for (int k = 0; k < 3; k++) {
++		IOLog("VGPU: SUMMARY fbfill %s/%s before %08x mid %08x edge %08x below %08x top %08x band10 %llu us full %llu us rbbm %08x\n",
++		    ok ? "OK" : "STUCK", ok2 ? "OK" : "STUCK", before, mid, edge, out, top, ns / 1000, ns2 / 1000, g_rd(R_RBBM_STATUS));
++	}
++}
++
 +static void
 +cp_start(void)
 +{
@@ -15925,6 +16014,14 @@ index 0000000..6bd25d3
 +	}
 +	if (gbuf_alloc(&fillb, FILL_W * FILL_H * 4, 0x20300000, "fill") && !gbuf_map(&fillb)) {
 +		fillb.va = NULL;
++	}
++	fbg_mapped = true;
++	for (uint64_t o = 0; o < FBG_SIZE; o += 4096) {
++		if (!map_page(FBG_IOVA + o, FBG_PA + o)) {
++			IOLog("VGPU: fb map +%#llx failed\n", o);
++			fbg_mapped = false;
++			break;
++		}
 +	}
 +	sweet_dcache_clean((vm_offset_t)sqeb.va, (unsigned)sqeb.size);
 +	sweet_dcache_clean((vm_offset_t)rbb.va, (unsigned)rbb.size);
@@ -16112,6 +16209,7 @@ index 0000000..6bd25d3
 +	rb_flush("MEM_WRITE");
 +	IOLog("VGPU: SUMMARY mem_write readback %08x\n", ((volatile uint32_t *)memb.va)[0x40]);
 +	gpu_fill_test();
++	gpu_fb_test();
 +}
 +
 +static bool
