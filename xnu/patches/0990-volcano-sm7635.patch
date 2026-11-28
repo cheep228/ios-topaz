@@ -14241,10 +14241,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..1727224
+index 0000000..21d101e
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1565 @@
+@@ -0,0 +1,1579 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15253,6 +15253,20 @@ index 0000000..1727224
 +	aperture(PIPE_BR);
 +	uint32_t sqe = g_rd(R_CP_SQE_STATUS_PIPE), hwf = g_rd(R_CP_HW_FAULT_PIPE), ints = g_rd(R_CP_INT_STATUS_PIPE);
 +	aperture(0);
++	if (!ok) {
++		/* same format as Android gpudump (GPD gpu <byteoff>: 4 regs), for diffing */
++		static const uint16_t rng[][2] = { { 0x0, 0x60 }, { 0x800, 0x850 }, { 0x3c00, 0x3c50 } };
++		for (int pass = 0; pass < 2; pass++) {
++			for (unsigned r = 0; r < 3; r++) {
++				for (uint32_t o = rng[r][0]; o < rng[r][1]; o += 4) {
++					uint32_t a = g_rd(o), b = g_rd(o + 1), c = g_rd(o + 2), d = g_rd(o + 3);
++					if (a | b | c | d) {
++						IOLog("VGD gpu %05x: %08x %08x %08x %08x\n", 4 * o, a, b, c, d);
++					}
++				}
++			}
++		}
++	}
 +	volatile uint8_t *cb = gpu_cb();
 +	IOLog("VGPU: CP %s: wptr reg %u, RB_BASE %08x%08x CNTL %08x SQE_BASE %08x%08x\n", what, g_rd(R_CP_RB_WPTR),
 +	    g_rd(R_CP_RB_BASE + 1), g_rd(R_CP_RB_BASE), g_rd(R_CP_RB_CNTL), g_rd(R_CP_SQE_INSTR_BASE + 1),
