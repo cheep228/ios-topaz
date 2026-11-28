@@ -14411,10 +14411,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..5e88f9f
+index 0000000..00e2533
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,2524 @@
+@@ -0,0 +1,2513 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14793,25 +14793,14 @@ index 0000000..5e88f9f
 +	}
 +	l1 = table_new(&l1pa);
 +	l1g = table_new(&l1gpa);
-+	if (!gbuf_alloc(&icache, 0x40000 - 0x4000, 0x4000, "icache") || !gbuf_alloc(&dummy, 0x4000, 0x60000000, "dummy") ||
++	/* fw region headers: 0x4000, 0x100000, 0x200000, 0x300000 (+0x24548); the full 16 MB ran KVA out */
++	if (!gbuf_alloc(&icache, 0x330000 - 0x4000, 0x4000, "icache") || !gbuf_alloc(&dummy, 0x4000, 0x60000000, "dummy") ||
 +	    !gbuf_alloc(&debugb, 0x8000, 0x60400000, "debug") || !gbuf_alloc(&logb, 0x4000, 0x60004000, "log") ||
 +	    !gbuf_alloc(&hfib, 0x4000, 0x60008000, "hfi")) {
 +		return false;
 +	}
 +	if (!gbuf_map(&icache) || !gbuf_map(&dummy) || !gbuf_map(&debugb) || !gbuf_map(&logb) || !gbuf_map(&hfib)) {
 +		return false;
-+	}
-+	/* the rest of the 16 MB icache window: one shared scratch page (the full 16 MB alloc ran KVA out, a bare 256K cold-resets) */
-+	static struct gbuf icpad;
-+	if (gbuf_alloc(&icpad, 0x4000, 0, "icpad")) {
-+		uint64_t pp = ml_vtophys((vm_offset_t)icpad.va);
-+		for (uint64_t o = 0x40000; o < 0x1000000; o += 4096) {
-+			if (!map_page(o, pp)) {
-+				IOLog("VGPU: icpad map %#llx failed\n", o);
-+				break;
-+			}
-+		}
-+		sweet_dcache_clean((vm_offset_t)icpad.va, (unsigned)icpad.size);
 +	}
 +	sweet_dcache_clean((vm_offset_t)tables.va, (unsigned)tables.size);
 +
