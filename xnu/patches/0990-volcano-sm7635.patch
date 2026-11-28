@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..da27b9f
+index 0000000..6bd25d3
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1931 @@
+@@ -0,0 +1,2027 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15420,6 +15420,25 @@ index 0000000..da27b9f
 +	((uint32_t *)rbb.va)[rb_wptr++] = v;
 +}
 +
++/* PKT4: write cnt consecutive registers starting at reg */
++static void
++out_pkt4(uint32_t reg, uint32_t cnt)
++{
++	((uint32_t *)rbb.va)[rb_wptr++] = 0x40000000u | cnt | (pm4_parity(cnt) << 7) | ((reg & 0x3ffff) << 8) |
++	    (pm4_parity(reg) << 27);
++}
++
++static void
++out_reg(uint32_t reg, uint32_t v)
++{
++	out_pkt4(reg, 1);
++	out_ring(v);
++}
++
++static struct gbuf fillb;               /* A2D fill target, GPU VA 0x20300000 */
++#define FILL_W 64
++#define FILL_H 64
++
 +static void qtb_diag(const char *what);
 +static uint64_t qtb_ecats(uint32_t sid, uint64_t iova, bool write);
 +static void vgpd(const char *tag, volatile uint8_t *b, uint32_t from, uint32_t to);
@@ -15805,6 +15824,79 @@ index 0000000..da27b9f
 +	}
 +}
 +
++/* First GPU rendering: A2D solid fill of a 64x64 RGBA8 linear buffer (turnip r2d path, a8xx offsets) */
++static void
++gpu_fill_test(void)
++{
++	if (fillb.va == NULL) {
++		return;
++	}
++	volatile uint32_t *px = (volatile uint32_t *)fillb.va;
++	const uint32_t pitch = FILL_W * 4;
++	const uint32_t fmt = 0x30;                      /* FMT6_8_8_8_8_UNORM */
++	const uint32_t blit = (1u << 7) | (fmt << 8) | (0xfu << 20) | (0u << 24);  /* SOLID_COLOR, fmt, MASK, R2D_UNORM8 */
++	uint32_t vcol = 0;
++	PE_parse_boot_argn("vfillfp16", &vcol, sizeof(vcol));
++	for (uint32_t i = 0; i < FILL_W * FILL_H; i++) {
++		px[i] = 0x11111111;
++	}
++	sweet_dcache_clean((vm_offset_t)fillb.va, (unsigned)fillb.size);
++	uint32_t w0 = rb_wptr;
++	out_pkt7(23, 1);                                /* CP_THREAD_CONTROL: sync, BR */
++	out_ring((1u << 31) | 1);
++	out_pkt7(0x65, 1);                              /* CP_SET_MARKER RM6_BLIT2DSCALE */
++	out_ring(12);
++	out_reg(0x8c00, blit);                          /* RB_A2D_BLT_CNTL */
++	out_reg(0x8500, blit);                          /* GRAS_A2D_BLT_CNTL */
++	out_reg(0xa9bf, (fmt << 3) | (0xfu << 12));     /* SP_A2D_OUTPUT_INFO: float ifmt type */
++	out_reg(0x8c01, 0);                             /* RB_A2D_PIXEL_CNTL */
++	out_pkt4(0x8c17, 4);                            /* RB_A2D_DEST_BUFFER_INFO, BASE lo/hi, PITCH */
++	out_ring(fmt);
++	out_ring((uint32_t)fillb.iova);
++	out_ring((uint32_t)(fillb.iova >> 32));
++	out_ring(pitch >> 6);
++	out_pkt4(0x8c2c, 4);                            /* RB_A2D_CLEAR_COLOR_DW0..3: R G B A */
++	if (vcol) {
++		out_ring(0x3c00); out_ring(0x3800); out_ring(0); out_ring(0x3c00);       /* fp16 1.0 0.5 0 1.0 */
++	} else {
++		out_ring(0xff); out_ring(0x80); out_ring(0); out_ring(0xff);
++	}
++	out_pkt4(0x8501, 4);                            /* GRAS_A2D_SRC_X/Y MIN/MAX */
++	out_ring(0); out_ring(0); out_ring(0); out_ring(0);
++	out_pkt4(0x8505, 2);                            /* GRAS_A2D_DEST_TL / BR */
++	out_ring(0);
++	out_ring((FILL_W - 1) | ((FILL_H - 1) << 16));
++	out_pkt7(0x2c, 1);                              /* CP_BLIT BLIT_OP_SCALE */
++	out_ring(3);
++	out_pkt7(0x46, 1);                              /* CP_EVENT_WRITE7 CCU_CLEAN_COLOR */
++	out_ring(0x21);
++	out_pkt7(0x46, 1);                              /* CACHE_CLEAN (UCHE -> memory) */
++	out_ring(0x31);
++	out_pkt7(0x26, 0);                              /* CP_WAIT_FOR_IDLE */
++	out_pkt7(61, 3);                                /* marker: memptr + 0x104 = 0xb11700k */
++	out_ring((uint32_t)(memb.iova + 0x104));
++	out_ring((uint32_t)((memb.iova + 0x104) >> 32));
++	out_ring(0xb1170001);
++	bool ok = rb_flush("A2D_FILL");
++	IODelay(1000);
++	sweet_dcache_flush((vm_offset_t)fillb.va, (unsigned)fillb.size);
++	uint32_t same = 0, chg = 0;
++	for (uint32_t i = 0; i < FILL_W * FILL_H; i++) {
++		if (px[i] == px[0]) {
++			same++;
++		}
++		if (px[i] != 0x11111111) {
++			chg++;
++		}
++	}
++	uint32_t rbbm = g_rd(R_RBBM_STATUS);
++	for (int k = 0; k < 3; k++) {
++		IOLog("VGPU: SUMMARY a2dfill %s dw %u fp16 %u px0 %08x px1 %08x mid %08x last %08x same %u changed %u/%u marker %08x rbbm %08x\n",
++		    ok ? "OK" : "STUCK", rb_wptr - w0, vcol, px[0], px[1], px[FILL_W * FILL_H / 2 + 7], px[FILL_W * FILL_H - 1], same, chg,
++		    FILL_W * FILL_H, ((volatile uint32_t *)memb.va)[0x41], rbbm);
++	}
++}
++
 +static void
 +cp_start(void)
 +{
@@ -15830,6 +15922,9 @@ index 0000000..da27b9f
 +	map_ap = -1;
 +	if (!mok) {
 +		return;
++	}
++	if (gbuf_alloc(&fillb, FILL_W * FILL_H * 4, 0x20300000, "fill") && !gbuf_map(&fillb)) {
++		fillb.va = NULL;
 +	}
 +	sweet_dcache_clean((vm_offset_t)sqeb.va, (unsigned)sqeb.size);
 +	sweet_dcache_clean((vm_offset_t)rbb.va, (unsigned)rbb.size);
@@ -16016,6 +16111,7 @@ index 0000000..da27b9f
 +	out_ring(0xcafe0810);
 +	rb_flush("MEM_WRITE");
 +	IOLog("VGPU: SUMMARY mem_write readback %08x\n", ((volatile uint32_t *)memb.va)[0x40]);
++	gpu_fill_test();
 +}
 +
 +static bool
