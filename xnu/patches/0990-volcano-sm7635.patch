@@ -931,7 +931,7 @@ index 0000000..a418268
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
 new file mode 100644
-index 0000000..8b4f58d
+index 0000000..6bf8c27
 --- /dev/null
 +++ b/bsd/dev/sweet_i2c7.c
 @@ -0,0 +1,1012 @@
@@ -1877,14 +1877,14 @@ index 0000000..8b4f58d
 +		return -2;
 +	}
 +	/* RCGs from XO: CFG=0 (bypass, src0), M/N/D 0, UPDATE */
-+	static const uint32_t rcg[3] = { 0x21004, 0x18004, 0x2401c };
-+	for (int i = 0; i < 3; i++) {
++	static const uint32_t rcg[4] = { 0x1a04c, 0x21004, 0x18004, 0x2401c };
++	for (int i = 0; i < 4; i++) {
 +		uint32_t cmd0 = R32(c, rcg[i]), cfg0 = R32(c, rcg[i] + 4);
 +		R32(c, rcg[i] + 4) = 0;
-+		if (i < 2) {
++		if (i == 1 || i == 2) {
 +			R32(c, rcg[i] + 8) = 0; R32(c, rcg[i] + 0xc) = 0; R32(c, rcg[i] + 0x10) = 0;
 +		}
-+		R32(c, rcg[i]) = cmd0 | 1u;
++		R32(c, rcg[i]) = cmd0 | 3u;    /* UPDATE + ROOT_EN (force root on) */
 +		uint32_t cmd = cam_poll(c, rcg[i], 1u, 0u, 2000);
 +		printf("@@Q@@ rcg %#x cmd %#x cfg %#x -> cmd %#x cfg %#x\n", rcg[i], cmd0, cfg0, cmd, R32(c, rcg[i] + 4));
 +	}
