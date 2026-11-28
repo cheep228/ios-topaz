@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..06e1c0d
+index 0000000..5f95f26
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1653 @@
+@@ -0,0 +1,1849 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14855,6 +14855,100 @@ index 0000000..06e1c0d
 +	}
 +}
 +
++/* write a complete message (header filled) to the command queue and ring the GMU */
++static void
++hfi_post(const uint32_t *msg, uint32_t dwords)
++{
++	struct hfi_qhdr *h = hq[0];
++	sweet_dcache_flush((vm_offset_t)h, sizeof(*h));
++	uint32_t idx = h->wr;
++	for (uint32_t i = 0; i < dwords; i++) {
++		hqdata[0][idx] = msg[i];
++		idx = (idx + 1) % h->size;
++	}
++	for (; idx % 4; idx = (idx + 1) % h->size) {
++		hqdata[0][idx] = 0xfafafafa;
++	}
++	sweet_dcache_clean((vm_offset_t)hqdata[0], 0x1000);
++	h->wr = idx;
++	sweet_dcache_clean((vm_offset_t)h, sizeof(*h));
++	gmu_wr(GMU_HOST2GMU_INTR_SET, 1);
++}
++
++/* hwsched: F2H_MSG_MEM_ALLOC (20) replies; GFX-visible buffers at 0x21000000+ (shared GMU/GPU tables), GMU-only at 0x61000000+ */
++static struct gbuf mab[32];
++static uint32_t mab_n;
++static uint64_t mab_gpu_va = 0x21000000ull, mab_gmu_va = 0x61000000ull;
++
++static void
++hfi_mem_alloc_reply(const uint32_t *r, uint32_t n)
++{
++	/* {hdr, version, desc{u64 gpu, flags, kind, host_h, gmu_h, gmu_addr, size, align}}; version 0: no align */
++	uint32_t d[9] = {};
++	for (uint32_t i = 0; i < 9 && 2 + i < n; i++) {
++		d[i] = r[2 + i];
++	}
++	if (r[1] == 0) {
++		d[8] = 0;
++	}
++	uint32_t flags = d[2], kind = d[3], gmh = d[5], size = d[7], al = d[8] & 0xff;
++	uint64_t a = al > 14 ? (1ull << al) : 0x4000ull;
++	uint64_t gpu = 0, gmu = 0;
++	bool gfx = (flags & 1) != 0;
++	if (mab_n < 32 && size != 0 && size <= 0x2000000u) {
++		struct gbuf *b = &mab[mab_n];
++		uint64_t *va = gfx ? &mab_gpu_va : &mab_gmu_va;
++		uint64_t iova = (*va + a - 1) & ~(a - 1);
++		if (gbuf_alloc(b, size, iova, "hfimem") && gbuf_map(b)) {
++			*va = iova + b->size;
++			mab_n++;
++			sweet_dcache_clean((vm_offset_t)b->va, (unsigned)b->size);
++			sweet_dcache_clean((vm_offset_t)tables.va, (unsigned)tables.size);
++			wr(gmu_cb(), 0x618, 0);
++			wr(gmu_cb(), 0x7f0, 0);
++			poll(gmu_cb(), 0x7f4, 1, 0, 1000);
++			if (gfx) {
++				gpu = iova;
++			}
++			if (!gfx || (flags & 8)) {
++				gmu = iova;
++			}
++			size = (uint32_t)b->size;
++		}
++	}
++	uint32_t m[11];
++	uint32_t seq = ++hfi_seq % 0xfff;
++	m[0] = (seq << 20) | (1u << 16) | (11u << 8) | 20;
++	m[1] = r[0];
++	m[2] = (uint32_t)gpu;
++	m[3] = (uint32_t)(gpu >> 32);
++	m[4] = flags;
++	m[5] = kind;
++	m[6] = gmh;             /* host_mem_handle = gmu_mem_handle: success */
++	m[7] = gmh;
++	m[8] = (uint32_t)gmu;
++	m[9] = size;
++	m[10] = d[8];
++	hfi_post(m, 11);
++	IOLog("VGPU: SUMMARY memalloc v%u kind %u flags %#x size %#x align %#x h %#x -> gpu %#llx gmu %#llx\n", r[1], kind,
++	    flags, d[7], d[8], gmh, gpu, gmu);
++}
++
++static void
++hfi_cntr_reply(const uint32_t *r)
++{
++	uint32_t m[6];
++	uint32_t seq = ++hfi_seq % 0xfff;
++	m[0] = (seq << 20) | (1u << 16) | (6u << 8) | 110;
++	m[1] = r[0];
++	m[2] = r[1];
++	m[3] = r[2];
++	m[4] = 0;
++	m[5] = 0;
++	hfi_post(m, 6);
++	IOLog("VGPU: SUMMARY cntr_register group %u countable %u -> none\n", r[1], r[2]);
++}
++
 +/* send msg (dwords incl. header slot); wait for the ack; 0 ok, else -1 timeout, error code otherwise */
 +static int
 +hfi_send(uint32_t id, uint32_t *msg, uint32_t dwords, uint32_t *payload, uint32_t plen, const char *name)
@@ -14876,7 +14970,7 @@ index 0000000..06e1c0d
 +	sweet_dcache_clean((vm_offset_t)h, sizeof(*h));
 +	gmu_wr(GMU_HOST2GMU_INTR_SET, 1);
 +
-+	for (int tries = 0; tries < 4; tries++) {
++	for (int tries = 0; tries < 64; tries++) {
 +		if (!poll(base, 4 * GMU_GMU2HOST_INTR_INFO, 1, 1, 200000)) {
 +			IOLog("VGPU: HFI %s (seq %u): no response (intr %08x, cmdq rd %u wr %u)\n", name, seq,
 +			    gmu_rd(GMU_GMU2HOST_INTR_INFO), h->rd, h->wr);
@@ -14889,6 +14983,15 @@ index 0000000..06e1c0d
 +		while ((n = hfi_read(1, r, 24)) != 0) {
 +			if ((r[0] & 0xff) == 100) {
 +				IOLog("VGPU: HFI %s: GMU error %u (%08x %08x)\n", name, r[1], r[2], r[3]);
++				IOLog("VGPU: SUMMARY HFI %s GMU error %u (%08x %08x %08x)\n", name, r[1], r[2], r[3], n > 4 ? r[4] : 0);
++				continue;
++			}
++			if (((r[0] >> 16) & 0xf) == 0 && (r[0] & 0xff) == 20) {
++				hfi_mem_alloc_reply(r, n);
++				continue;
++			}
++			if (((r[0] >> 16) & 0xf) == 0 && (r[0] & 0xff) == 110) {
++				hfi_cntr_reply(r);
 +				continue;
 +			}
 +			if (((r[1] >> 20) & 0xfff) != seq) {
@@ -14999,6 +15102,23 @@ index 0000000..06e1c0d
 +	if (hfi_send_perf_table() || hfi_send_bw_table()) {
 +		return false;
 +	}
++	if (vgpu_mode == 8) {
++		/* kgsl hwsched: HFI_FEATURE_HWSCHED (1), then KPROF (16) */
++		bzero(m, sizeof(m));
++		m[1] = 1;
++		m[2] = 1;
++		int fr = hfi_send(11, m, 4, NULL, 0, "FEATURE_HWSCHED");
++		bzero(m, sizeof(m));
++		m[1] = 16;
++		m[2] = 1;
++		int fk = hfi_send(11, m, 4, NULL, 0, "FEATURE_KPROF");
++		for (int k = 0; k < 3; k++) {
++			IOLog("VGPU: SUMMARY hwsched feature_ctrl %d kprof %d\n", fr, fk);
++		}
++		if (fr) {
++			return false;
++		}
++	}
 +	bzero(m, sizeof(m));
 +	if (hfi_send(14, m, 2, NULL, 0, "CORE_FW_START")) {
 +		return false;
@@ -15010,6 +15130,9 @@ index 0000000..06e1c0d
 +	state("hfi start");
 +	IOLog("VGPU: HFI START %s; pwr_clk %08x (bit0 GX off, bit1 GX clk off)\n", r ? "FAILED" : "OK",
 +	    gmu_rd(GMU_PWR_CLK_STATUS));
++	for (int k = 0; vgpu_mode == 8 && k < 3; k++) {
++		IOLog("VGPU: SUMMARY hwsched START %d memallocs %u\n", r, mab_n);
++	}
 +	if (r) {
 +		return false;
 +	}
@@ -15545,6 +15668,75 @@ index 0000000..06e1c0d
 +	return true;
 +}
 +
++/* ---------------------------------------------------------------- hwsched (vgpu=8): the GMU owns the ringbuffer */
++
++static inline uint32_t
++pkt7(uint32_t op, uint32_t cnt)
++{
++	return 0x70000000u | cnt | (pm4_parity(cnt) << 15) | ((op & 0x7f) << 16) | (pm4_parity(op) << 23);
++}
++
++/* H2F_MSG_ISSUE_CMD_RAW (131): pm4 dwords after the header; then wait GPU_CX_BUSY_STATUS bit23 clear */
++static int
++hws_raw(const uint32_t *cmds, uint32_t n, const char *name)
++{
++	uint32_t m[24] = {};
++	for (uint32_t i = 0; i < n && i < 23; i++) {
++		m[1 + i] = cmds[i];
++	}
++	int r = hfi_send(131, m, n + 1, NULL, 0, name);
++	bool idle = poll(base, 4 * 0x23b0c, 1u << 23, 0, 200000);
++	aperture(PIPE_BR);
++	uint32_t sqs = g_rd(R_CP_SQE_STATUS_PIPE), hwf = g_rd(R_CP_HW_FAULT_PIPE);
++	aperture(0);
++	for (int k = 0; k < 3; k++) {
++		IOLog("VGPU: SUMMARY hws %s ack %d idle %d busy %08x rbbm %08x sqe_cntl %08x rb_base %08x%08x rptr %08x "
++		    "br sqe %08x hwfault %08x\n", name, r, idle, gmu_rd(0x23b0c), g_rd(R_RBBM_STATUS), g_rd(R_CP_SQE_CNTL),
++		    g_rd(R_CP_RB_BASE + 1), g_rd(R_CP_RB_BASE), g_rd(R_CP_RB_RPTR), sqs, hwf);
++	}
++	hfi_drain_debug();
++	return r;
++}
++
++static void
++hws_cp_init(void)
++{
++	rmw(gccb, 0x10, 2, 1);
++	rmw(gccb, 0x18, 2, 1);
++	rmw(gccb, 0x15c, 2, 1);
++	rmw(base, GPUCC + 0x90f4, 2, 1);
++	IODelay(100);
++	uint32_t c[16];
++	uint32_t i = 0;
++	c[i++] = pkt7(23, 1);                   /* CP_THREAD_CONTROL */
++	c[i++] = 1u << 27;
++	c[i++] = pkt7(72, 7);                   /* CP_ME_INIT, as gen8_cp_init_cmds() */
++	c[i++] = (1u << 0) | (1u << 1) | (1u << 3) | (1u << 6) | (1u << 8);
++	c[i++] = 3;
++	c[i++] = 0x20000000;
++	c[i++] = 2;
++	c[i++] = (uint32_t)(memb.iova + 0x1000);
++	c[i++] = (uint32_t)((memb.iova + 0x1000) >> 32);
++	c[i++] = 1u << 31;
++	int r = hws_raw(c, i, "CP_INIT");
++	if (r == 0 && zap_load()) {
++		c[0] = pkt7(102, 1);            /* CP_SET_SECURE_MODE 0 */
++		c[1] = 0;
++		hws_raw(c, 2, "SET_SECURE_MODE");
++	}
++	IOLog("VGPU: SUMMARY hws trust_cntl %08x\n", g_rd(R_SECVID_TRUST_CNTL));
++	c[0] = pkt7(61, 3);                     /* CP_MEM_WRITE memptr + 0x100 */
++	c[1] = (uint32_t)(memb.iova + 0x100);
++	c[2] = (uint32_t)((memb.iova + 0x100) >> 32);
++	c[3] = 0xcafe0810;
++	hws_raw(c, 4, "MEM_WRITE");
++	IODelay(1000);
++	sweet_dcache_flush((vm_offset_t)memb.va, (unsigned)memb.size);
++	for (int k = 0; k < 3; k++) {
++		IOLog("VGPU: SUMMARY hws mem_write readback %08x (want cafe0810)\n", ((volatile uint32_t *)memb.va)[0x40]);
++	}
++}
++
 +static void
 +cp_start(void)
 +{
@@ -15666,6 +15858,10 @@ index 0000000..06e1c0d
 +
 +	/* vgpu=7: SQE base unmapped on purpose, to see whether GX fetches reach CB3 at all (expect a CB3 fault) */
 +	g_wr64(R_CP_SQE_INSTR_BASE, vgpu_mode == 7 ? 0x30000000ull : sqeb.iova);
++	if (vgpu_mode == 8) {
++		hws_cp_init();
++		return;
++	}
 +	g_wr64(R_CP_RB_BASE, rbb.iova);
 +	g_wr(R_CP_RB_CNTL, 12 | (2u << 8));             /* BUFSZ 12, BLKSZ 2 as kgsl GEN8_CP_RB_CNTL_DEFAULT */
 +	g_wr64(R_CP_RB_RPTR_ADDR, memb.iova);
