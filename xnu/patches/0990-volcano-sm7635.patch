@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..b89468d
+index 0000000..fccbb25
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1890 @@
+@@ -0,0 +1,1906 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14558,26 +14558,37 @@ index 0000000..b89468d
 +static int map_ap = -1;         /* >= 0: AP[2:1] for the next mappings (kgsl-like per-buffer priv/RO) */
 +static uint64_t *l2v[4], *l3v[4][512];
 +
++/* GPU (CB3) has its own tables (l1g) so a buffer can be RO for the CP but RW for the GMU (kgsl maps them separately) */
++static uint64_t *l1g, l1gpa;
++static uint64_t *l2g[4], *l3g[4][512];
++
 +static bool
-+map_page(uint64_t iova, uint64_t pa)
++map_one(uint64_t *top, uint64_t **l2s, uint64_t *(*l3s)[512], uint64_t iova, uint64_t pte)
 +{
 +	uint32_t i1 = (uint32_t)(iova >> 30), i2 = (uint32_t)((iova >> 21) & 511), i3 = (uint32_t)((iova >> 12) & 511);
 +	uint64_t tpa;
 +	if (i1 >= 4) {
 +		return false;
 +	}
-+	if (l2v[i1] == NULL) {
-+		if ((l2v[i1] = table_new(&tpa)) == NULL) {
++	if (l2s[i1] == NULL) {
++		if ((l2s[i1] = table_new(&tpa)) == NULL) {
 +			return false;
 +		}
-+		l1[i1] = tpa | PTE_TABLE;
++		top[i1] = tpa | PTE_TABLE;
 +	}
-+	if (l3v[i1][i2] == NULL) {
-+		if ((l3v[i1][i2] = table_new(&tpa)) == NULL) {
++	if (l3s[i1][i2] == NULL) {
++		if ((l3s[i1][i2] = table_new(&tpa)) == NULL) {
 +			return false;
 +		}
-+		l2v[i1][i2] = tpa | PTE_TABLE;
++		l2s[i1][i2] = tpa | PTE_TABLE;
 +	}
++	l3s[i1][i2][i3] = pte;
++	return true;
++}
++
++static bool
++map_page(uint64_t iova, uint64_t pa)
++{
 +	/* GPU buffers (0x20000000-0x3fffffff): CP fetches are unprivileged (log365 CB3 permission fault) -> AP[1] EL0 RW */
 +	/* log369: SQE fetch is a privileged instr fetch -> EL0-writable = implicit PXN; SQE (0x20000000-0x200fffff) RO all */
 +	uint64_t ap = 0;
@@ -14586,10 +14597,14 @@ index 0000000..b89468d
 +	} else if (iova >= 0x20100000ull && iova < 0x40000000ull) {
 +		ap = (1ull << 6);
 +	}
-+	if (map_ap >= 0) {
-+		ap = (uint64_t)map_ap << 6;
++	uint64_t gap = map_ap >= 0 ? ((uint64_t)map_ap << 6) : ap;
++	/* GMU view: per-buffer override -> privileged RW (the GMU writes the RB) */
++	if (!map_one(l1, l2v, l3v, iova, pa | PTE_PAGE | (map_ap >= 0 ? 0 : ap))) {
++		return false;
 +	}
-+	l3v[i1][i2][i3] = pa | PTE_PAGE | ap;
++	if (l1g != NULL && iova >= 0x20000000ull && iova < 0x40000000ull) {
++		return map_one(l1g, l2g, l3g, iova, pa | PTE_PAGE | gap);
++	}
 +	return true;
 +}
 +
@@ -14621,10 +14636,11 @@ index 0000000..b89468d
 +static bool
 +smmu_gmu_setup(void)
 +{
-+	if (!gbuf_alloc(&tables, 0x20000, 0, "tables")) {
++	if (!gbuf_alloc(&tables, 0x40000, 0, "tables")) {
 +		return false;
 +	}
 +	l1 = table_new(&l1pa);
++	l1g = table_new(&l1gpa);
 +	if (!gbuf_alloc(&icache, 0x1000000 - 0x4000, 0x4000, "icache") || !gbuf_alloc(&dummy, 0x4000, 0x60000000, "dummy") ||
 +	    !gbuf_alloc(&debugb, 0x8000, 0x60400000, "debug") || !gbuf_alloc(&logb, 0x4000, 0x60004000, "log") ||
 +	    !gbuf_alloc(&hfib, 0x4000, 0x60008000, "hfi")) {
@@ -15666,8 +15682,8 @@ index 0000000..b89468d
 +	wr(cb, 0x058, 0xffffffff);
 +	wr(smmu, 0x1800 + 4 * GPU_CB, 1);
 +	wr(smmu, 0x1000 + 4 * GPU_CB, 0x0001f000);
-+	wr(cb, 0x020, (uint32_t)l1pa);                  /* same tables as the GMU: GPU buffers at 0x20000000+ */
-+	wr(cb, 0x024, (uint32_t)(l1pa >> 32));
++	wr(cb, 0x020, (uint32_t)l1gpa);                 /* own tables (0x20000000-0x3fffffff mirrored from map_page) */
++	wr(cb, 0x024, (uint32_t)(l1gpa >> 32));
 +	wr(cb, 0x028, 0);
 +	wr(cb, 0x02c, 0);
 +	wr(cb, 0x030, 32 | (1u << 23));
