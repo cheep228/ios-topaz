@@ -14411,10 +14411,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..7d040a2
+index 0000000..a3c456a
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,2534 @@
+@@ -0,0 +1,2543 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14441,6 +14441,10 @@ index 0000000..7d040a2
 +
 +extern "C" {
 +vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
++void ml_io_unmap(vm_offset_t addr, vm_size_t sz);
++/* GPU maps go to kernel_map: io_submap is only 8 MB, never freed, and the touch GPI map (384K) ran out (log405) */
++static inline vm_offset_t gpu_io_map(vm_offset_t pa, vm_size_t sz) { return ml_io_map_unmappable(pa, sz, 0x7 /* VM_WIMG_IO */); }
 +void volcano_adreno_init(void);
 +int topaz_fw_read(const char *path, void **data, size_t *size);
 +void topaz_fw_free(void *data, size_t size);
@@ -15439,7 +15443,7 @@ index 0000000..7d040a2
 +		IOLog("VGPU: zap layout unexpected (hash %#x+%#x, load %#x-%#x)\n", hash_off, hash_sz, min_a, max_a);
 +		return false;
 +	}
-+	volatile uint8_t *reg = (volatile uint8_t *)ml_io_map(ZAP_REGION, ZAP_REGION_SIZE);
++	volatile uint8_t *reg = (volatile uint8_t *)gpu_io_map(ZAP_REGION, ZAP_REGION_SIZE);
 +	if (reg == NULL) {
 +		return false;
 +	}
@@ -15837,7 +15841,7 @@ index 0000000..7d040a2
 +qtb_diag(const char *what)
 +{
 +	if (qtb == NULL) {
-+		qtb = (volatile uint8_t *)ml_io_map(QTB_PHYS, 0x1000);
++		qtb = (volatile uint8_t *)gpu_io_map(QTB_PHYS, 0x1000);
 +		if (qtb == NULL) {
 +			IOLog("VGPU: qtb map failed\n");
 +			return;
@@ -16065,8 +16069,13 @@ index 0000000..7d040a2
 +fb_px(uint32_t idx)
 +{
 +	uint64_t off = (uint64_t)idx * 4;
-+	volatile uint32_t *w = (volatile uint32_t *)ml_io_map(FBG_PA + (off & ~4095ull), 4096);
-+	return w ? w[(off & 4095) / 4] : 0xdeadbeef;
++	volatile uint32_t *w = (volatile uint32_t *)gpu_io_map(FBG_PA + (off & ~16383ull), 16384);
++	if (w == NULL) {
++		return 0xdeadbeef;
++	}
++	uint32_t v = w[(off & 16383) / 4];
++	ml_io_unmap((vm_offset_t)w, 16384);
++	return v;
 +}
 +
 +static void
@@ -16486,10 +16495,10 @@ index 0000000..7d040a2
 +	PE_parse_boot_argn("vgpu", &mode, sizeof(mode));
 +	vgpu_mode = mode;
 +	IOSleep(15000);
-+	base = (volatile uint8_t *)ml_io_map(GPU_PHYS, GPU_MAP);
-+	smmu = (volatile uint8_t *)ml_io_map(SMMU_PHYS, 0x40000);
-+	gcca = (volatile uint8_t *)ml_io_map(GCC_A_PHYS, 0x1000);
-+	gccb = (volatile uint8_t *)ml_io_map(GCC_B_PHYS, 0x1000);
++	base = (volatile uint8_t *)gpu_io_map(GPU_PHYS, GPU_MAP);
++	smmu = (volatile uint8_t *)gpu_io_map(SMMU_PHYS, 0x40000);
++	gcca = (volatile uint8_t *)gpu_io_map(GCC_A_PHYS, 0x1000);
++	gccb = (volatile uint8_t *)gpu_io_map(GCC_B_PHYS, 0x1000);
 +	if (base == NULL || smmu == NULL || gcca == NULL || gccb == NULL) {
 +		IOLog("VGPU: map failed\n");
 +		return;
