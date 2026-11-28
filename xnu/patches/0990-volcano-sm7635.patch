@@ -14411,10 +14411,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..e2ec6ef
+index 0000000..5e88f9f
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,2525 @@
+@@ -0,0 +1,2524 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14807,8 +14807,7 @@ index 0000000..e2ec6ef
 +		uint64_t pp = ml_vtophys((vm_offset_t)icpad.va);
 +		for (uint64_t o = 0x40000; o < 0x1000000; o += 4096) {
 +			if (!map_page(o, pp)) {
-+				IOLog("VGPU: icpad map %#llx failed
-+", o);
++				IOLog("VGPU: icpad map %#llx failed\n", o);
 +				break;
 +			}
 +		}
