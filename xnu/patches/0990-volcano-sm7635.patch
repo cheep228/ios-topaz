@@ -5426,6 +5426,157 @@ index 1d3ee17..cd2d642 100644
 +	IOLog("SHOT end\n");
 +}
 +#endif /* VOLCANO */
+diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
+index 16da336..6d0c697 100644
+--- a/iokit/Kernel/arm/TopazAdreno.cpp
++++ b/iokit/Kernel/arm/TopazAdreno.cpp
+@@ -784,15 +784,37 @@ static struct { uint64_t start, size; } va_free[1024];
+ static unsigned va_free_count;
+ 
+ extern "C" bool redwood_gpu_identity(void);
++extern "C" {
++bool volcano_rg_active(void);
++bool volcano_rg_ready(void);
++bool volcano_rg_parameter(uint32_t which, uint64_t *value);
++uint64_t volcano_rg_address(uint64_t size);
++void volcano_rg_address_free(uint64_t address, uint64_t size);
++bool volcano_rg_map(uint64_t address, uint64_t phys, bool read_only);
++void volcano_rg_mapped(void);
++void volcano_rg_unmap(uint64_t address, uint64_t size);
++bool volcano_rg_done(uint32_t fence);
++uint32_t volcano_rg_last(void);
++uint32_t volcano_rg_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count);
++void volcano_rg_report(const char *why);
++void volcano_rg_stop(void);
++}
++
+ bool
+ redwood_gpu_identity(void)
+ {
++	if (volcano_rg_active()) {
++		return false;
++	}
+ 	return gpu_identity != 0;
+ }
+ 
+ uint64_t
+ redwood_gpu_address(uint64_t size)
+ {
++	if (volcano_rg_active()) {
++		return volcano_rg_address(size);
++	}
+ 	size = (size + 0xffff) & ~0xffffull;
+ 	for (unsigned i = 0; i < va_free_count; i++) {
+ 		if (va_free[i].size >= size) {
+@@ -811,6 +833,9 @@ redwood_gpu_address(uint64_t size)
+ void
+ redwood_gpu_address_free(uint64_t address, uint64_t size)
+ {
++	if (volcano_rg_active()) {
++		volcano_rg_address_free(address, size); return;
++	}
+ 	unsigned at;
+ 
+ 	if (gpu_identity) {
+@@ -1026,12 +1051,18 @@ hw_start(void)
+ bool
+ redwood_gpu_ready(void)
+ {
++	if (volcano_rg_active()) {
++		return volcano_rg_ready();
++	}
+ 	return ready;
+ }
+ 
+ bool
+ redwood_gpu_parameter(uint32_t which, uint64_t *value)
+ {
++	if (volcano_rg_active()) {
++		return volcano_rg_parameter(which, value);
++	}
+ 	switch (which) {
+ 	case 0x01: *value = 610; return true;                   /* GPU_ID */
+ 	case 0x02: *value = GMEM_SIZE; return true;             /* GMEM_SIZE */
+@@ -1056,6 +1087,9 @@ redwood_gpu_parameter(uint32_t which, uint64_t *value)
+ bool
+ redwood_gpu_map(uint64_t address, uint64_t phys, bool read_only)
+ {
++	if (volcano_rg_active()) {
++		return volcano_rg_map(address, phys, read_only);
++	}
+ 	if (gpu_identity) {
+ 		return true;
+ 	}
+@@ -1065,6 +1099,9 @@ redwood_gpu_map(uint64_t address, uint64_t phys, bool read_only)
+ void
+ redwood_gpu_mapped(void)
+ {
++	if (volcano_rg_active()) {
++		volcano_rg_mapped(); return;
++	}
+ 	if (tables_dirty) {
+ 		tables_dirty = false;
+ 		tlb_flush();
+@@ -1074,6 +1111,9 @@ redwood_gpu_mapped(void)
+ void
+ redwood_gpu_unmap(uint64_t address, uint64_t size)
+ {
++	if (volcano_rg_active()) {
++		volcano_rg_unmap(address, size); return;
++	}
+ 	if (gpu_identity) {
+ 		return;
+ 	}
+@@ -1099,6 +1139,9 @@ redwood_gpu_to_memory(void *start, uint64_t size)
+ bool
+ redwood_gpu_done(uint32_t fence)
+ {
++	if (volcano_rg_active()) {
++		return volcano_rg_done(fence);
++	}
+ 	if (mem.va == NULL) {
+ 		return false;
+ 	}
+@@ -1109,6 +1152,9 @@ redwood_gpu_done(uint32_t fence)
+ uint32_t
+ redwood_gpu_last(void)
+ {
++	if (volcano_rg_active()) {
++		return volcano_rg_last();
++	}
+ 	return seqno;
+ }
+ 
+@@ -1124,6 +1170,9 @@ redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7]
+ uint32_t
+ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
+ {
++	if (volcano_rg_active()) {
++		return volcano_rg_submit(addresses, words, count);
++	}
+ 	uint32_t need = 4 * count + 5;
+ 
+ 	if (!ready) {
+@@ -1160,6 +1209,9 @@ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t co
+ void
+ redwood_gpu_report(const char *why)
+ {
++	if (volcano_rg_active()) {
++		volcano_rg_report(why); return;
++	}
+ 	uint64_t ib1 = gpu_rd(0x928) | ((uint64_t)gpu_rd(0x929) << 32);
+ 	IOLog("TopazGPU: %s: fence %u done %u rptr %u wptr %u RBBM_STATUS %08x CP_HW_FAULT %08x IB1 %llx rem %u\n", why,
+ 	    seqno, mem.va ? *(volatile uint32_t *)mem.va : 0, gpu_rd(0x806), wptr % RB_DWORDS, gpu_rd(0x210),
+@@ -1170,6 +1222,9 @@ redwood_gpu_report(const char *why)
+ void
+ redwood_gpu_stop(void)
+ {
++	if (volcano_rg_active()) {
++		volcano_rg_stop(); return;
++	}
+ 	if (ready) {
+ 		gpu_wr(0x808, 0);
+ 	}
 diff --git a/iokit/Kernel/arm/TopazAudio.cpp b/iokit/Kernel/arm/TopazAudio.cpp
 index 6bfe1a2..c5dc46f 100644
 --- a/iokit/Kernel/arm/TopazAudio.cpp
@@ -14260,10 +14411,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..21ff05c
+index 0000000..59f23f5
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,2217 @@
+@@ -0,0 +1,2512 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14637,7 +14788,7 @@ index 0000000..21ff05c
 +static bool
 +smmu_gmu_setup(void)
 +{
-+	if (!gbuf_alloc(&tables, 0x40000, 0, "tables")) {
++	if (!gbuf_alloc(&tables, 0x100000, 0, "tables")) {
 +		return false;
 +	}
 +	l1 = table_new(&l1pa);
@@ -16077,6 +16228,7 @@ index 0000000..21ff05c
 +	}
 +}
 +
++static void rg_start(void);
 +static void
 +cp_start(void)
 +{
@@ -16302,6 +16454,7 @@ index 0000000..21ff05c
 +	gpu_fill_test();
 +	gpu_fb_test();
 +	gpu_copy_test();
++	rg_start();
 +}
 +
 +static bool
@@ -16370,6 +16523,299 @@ index 0000000..21ff05c
 +		tcm_test(mode >= 2);
 +	}
 +	IOLog("VGPU: probe done\n");
++}
++
++/* ---------------------------------------------------------------- RedwoodGPU backend (msm DRM for userland) */
++/*
++ * TopazAdreno.cpp's redwood_gpu_* forward here when volcano_rg_active(). Client buffers live at GPU VA
++ * 0x40000000-0xffffffff in the CP's own tables (l1g) only. Submissions: CP_INDIRECT_BUFFER per IB on the
++ * non-hwsched ring (wrapping), then caches cleaned, WAIT_FOR_IDLE and CP_MEM_WRITE of the fence to memptr+0x200.
++ */
++#define RG_RBN      8192u                       /* ring dwords (CP_RB_CNTL BUFSZ 12) */
++#define RG_VA_START 0x40000000ull
++#define RG_VA_END   0x100000000ull
++static bool rg_ready;
++static IOLock *rg_lock;
++static uint32_t rg_seqno;
++static struct { uint64_t start, size; } rg_free[512];
++static unsigned rg_free_count;
++static uint32_t rg_subs;
++
++extern "C" void RedwoodGPUStart(void);
++
++static void
++rg_tlb_flush(void)
++{
++	sweet_dcache_clean((vm_offset_t)tables.va, (unsigned)tables.size);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	volatile uint8_t *cb = gpu_cb();
++	wr(cb, 0x618, 0);
++	wr(cb, 0x7f0, 0);
++	poll(cb, 0x7f4, 1, 0, 1000);
++}
++
++static inline void
++rg_emit(uint32_t v)
++{
++	((volatile uint32_t *)rbb.va)[rb_wptr & (RG_RBN - 1)] = v;
++	rb_wptr++;
++}
++
++static uint32_t
++rg_ring_free(void)
++{
++	uint32_t rptr = g_rd(R_CP_RB_RPTR) & (RG_RBN - 1);
++	return RG_RBN - 1 - (((rb_wptr & (RG_RBN - 1)) - rptr) & (RG_RBN - 1));
++}
++
++extern "C" bool volcano_rg_active(void) { return vgpu_mode == 5 && rg_lock != NULL; }
++extern "C" bool volcano_rg_ready(void) { return rg_ready; }
++
++extern "C" bool
++volcano_rg_parameter(uint32_t which, uint64_t *value)
++{
++	uint32_t chip = 0x44030000, gmem = 0x100000;
++	PE_parse_boot_argn("vchipid", &chip, sizeof(chip));
++	PE_parse_boot_argn("vgmem", &gmem, sizeof(gmem));
++	switch (which) {
++	case 0x01: *value = 810; return true;
++	case 0x02: *value = gmem; return true;
++	case 0x03: *value = chip; return true;
++	case 0x04: *value = 510000000ull; return true;
++	case 0x05: *value = rg_ready ? ((uint64_t)g_rd(0x0981) << 32 | g_rd(0x0980)) : 0; return true;
++	case 0x06: *value = 0x100000; return true;
++	case 0x07: *value = 1; return true;
++	case 0x08: case 0x09: case 0x0a: case 0x11: *value = 0; return true;
++	case 0x10: *value = 16; return true;
++	case 0x12: *value = 6; return true;
++	case 0x13: *value = 0; return true;
++	default: return false;
++	}
++}
++
++extern "C" uint64_t
++volcano_rg_address(uint64_t size)
++{
++	size = (size + 0xffff) & ~0xffffull;
++	uint64_t a = 0;
++	IOLockLock(rg_lock);
++	for (unsigned i = 0; i < rg_free_count; i++) {
++		if (rg_free[i].size >= size) {
++			a = rg_free[i].start;
++			rg_free[i].start += size;
++			rg_free[i].size -= size;
++			if (rg_free[i].size == 0) {
++				memmove(&rg_free[i], &rg_free[i + 1], (--rg_free_count - i) * sizeof(rg_free[0]));
++			}
++			break;
++		}
++	}
++	IOLockUnlock(rg_lock);
++	return a;
++}
++
++extern "C" void
++volcano_rg_address_free(uint64_t address, uint64_t size)
++{
++	size = (size + 0xffff) & ~0xffffull;
++	IOLockLock(rg_lock);
++	unsigned at;
++	for (at = 0; at < rg_free_count && rg_free[at].start < address; at++) {
++	}
++	if (at > 0 && rg_free[at - 1].start + rg_free[at - 1].size == address) {
++		rg_free[at - 1].size += size;
++		if (at < rg_free_count && address + size == rg_free[at].start) {
++			rg_free[at - 1].size += rg_free[at].size;
++			memmove(&rg_free[at], &rg_free[at + 1], (--rg_free_count - at) * sizeof(rg_free[0]));
++		}
++	} else if (at < rg_free_count && address + size == rg_free[at].start) {
++		rg_free[at].start = address;
++		rg_free[at].size += size;
++	} else if (rg_free_count < 512) {
++		memmove(&rg_free[at + 1], &rg_free[at], (rg_free_count++ - at) * sizeof(rg_free[0]));
++		rg_free[at].start = address;
++		rg_free[at].size = size;
++	}
++	IOLockUnlock(rg_lock);
++}
++
++extern "C" bool
++volcano_rg_map(uint64_t address, uint64_t phys, bool read_only)
++{
++	/* AP[2:1]: 01 EL0 RW (CP fetches are unprivileged), 11 RO */
++	uint64_t ap = read_only ? (3ull << 6) : (1ull << 6);
++	IOLockLock(rg_lock);
++	bool ok = map_one(l1g, l2g, l3g, address, phys | PTE_PAGE | ap);
++	IOLockUnlock(rg_lock);
++	return ok;
++}
++
++extern "C" void
++volcano_rg_mapped(void)
++{
++	IOLockLock(rg_lock);
++	rg_tlb_flush();
++	IOLockUnlock(rg_lock);
++}
++
++extern "C" void
++volcano_rg_unmap(uint64_t address, uint64_t size)
++{
++	IOLockLock(rg_lock);
++	for (uint64_t o = 0; o < size; o += 4096) {
++		uint64_t va = address + o;
++		uint32_t i1 = (uint32_t)(va >> 30), i2 = (uint32_t)((va >> 21) & 511), i3 = (uint32_t)((va >> 12) & 511);
++		if (i1 < 4 && l3g[i1][i2] != NULL) {
++			l3g[i1][i2][i3] = 0;
++		}
++	}
++	rg_tlb_flush();
++	IOLockUnlock(rg_lock);
++}
++
++extern "C" bool
++volcano_rg_done(uint32_t fence)
++{
++	sweet_dcache_flush((vm_offset_t)memb.va + 0x200, 64);
++	return (int32_t)(((volatile uint32_t *)memb.va)[0x80] - fence) >= 0;
++}
++
++extern "C" uint32_t volcano_rg_last(void) { return rg_seqno; }
++
++extern "C" uint32_t
++volcano_rg_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
++{
++	uint32_t need = 4 * count + 16;
++	if (!rg_ready || need >= RG_RBN / 2) {
++		return 0;
++	}
++	IOLockLock(rg_lock);
++	for (int spin = 0; rg_ring_free() < need && spin < 20000; spin++) {
++		IODelay(100);
++	}
++	if (rg_ring_free() < need) {
++		IOLockUnlock(rg_lock);
++		return 0;
++	}
++	rg_emit(pkt7(23, 1));                           /* CP_THREAD_CONTROL: sync, BR */
++	rg_emit((1u << 31) | 1);
++	for (uint32_t i = 0; i < count; i++) {
++		rg_emit(pkt7(0x3f, 3));                 /* CP_INDIRECT_BUFFER */
++		rg_emit((uint32_t)addresses[i]);
++		rg_emit((uint32_t)(addresses[i] >> 32));
++		rg_emit(words[i]);
++	}
++	if (++rg_seqno == 0) {
++		rg_seqno = 1;
++	}
++	uint32_t fence = rg_seqno;
++	rg_emit(pkt7(0x46, 1)); rg_emit(0x21);          /* CCU_CLEAN_COLOR */
++	rg_emit(pkt7(0x46, 1)); rg_emit(0x20);          /* CCU_CLEAN_DEPTH */
++	rg_emit(pkt7(0x46, 1)); rg_emit(0x31);          /* CACHE_CLEAN */
++	rg_emit(pkt7(0x26, 0));                         /* CP_WAIT_FOR_IDLE */
++	rg_emit(pkt7(61, 3));                           /* CP_MEM_WRITE fence -> memptr + 0x200 */
++	rg_emit((uint32_t)(memb.iova + 0x200));
++	rg_emit((uint32_t)((memb.iova + 0x200) >> 32));
++	rg_emit(fence);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	sweet_dcache_clean((vm_offset_t)rbb.va, (unsigned)rbb.size);
++	g_wr(R_CP_RB_WPTR, rb_wptr & (RG_RBN - 1));
++	rg_subs++;
++	IOLockUnlock(rg_lock);
++	return fence;
++}
++
++extern "C" void
++volcano_rg_report(const char *why)
++{
++	aperture(PIPE_BR);
++	uint32_t sqe = g_rd(R_CP_SQE_STATUS_PIPE), hwf = g_rd(R_CP_HW_FAULT_PIPE), ints = g_rd(R_CP_INT_STATUS_PIPE);
++	aperture(0);
++	volatile uint8_t *cb = gpu_cb();
++	for (int k = 0; k < 3; k++) {
++		IOLog("VGPU: SUMMARY rg %s: fence %u done %u rptr %u wptr %u rbbm %08x sqe %08x hwf %08x int %08x CB FSR %08x FAR %08x%08x FSYNR0 %08x\n",
++		    why, rg_seqno, ((volatile uint32_t *)memb.va)[0x80], g_rd(R_CP_RB_RPTR), rb_wptr & (RG_RBN - 1),
++		    g_rd(R_RBBM_STATUS), sqe, hwf, ints, rd(cb, 0x58), rd(cb, 0x64), rd(cb, 0x60), rd(cb, 0x68));
++	}
++}
++
++extern "C" void volcano_rg_stop(void) { rg_ready = false; }
++
++/* in-kernel client: an IB in "client" memory doing a MEM_WRITE and an A2D fill of the FB, after the GPU sat idle */
++static void
++rg_selftest(void *, wait_result_t)
++{
++	uint32_t delay = 20;
++	PE_parse_boot_argn("vrgdelay", &delay, sizeof(delay));
++	IOSleep(delay * 1000);
++	const uint64_t sz = 0x10000;
++	uint8_t *kv = (uint8_t *)IOMallocAligned(sz, 0x4000);
++	uint64_t va = kv ? volcano_rg_address(sz) : 0;
++	if (va == 0) {
++		IOLog("VGPU: SUMMARY rgtest no memory/va\n");
++		return;
++	}
++	bzero(kv, sz);
++	bool m = true;
++	for (uint64_t o = 0; o < sz && m; o += 4096) {
++		m = volcano_rg_map(va + o, ml_vtophys((vm_offset_t)(kv + o)), false);
++	}
++	volcano_rg_mapped();
++	uint32_t *ib = (uint32_t *)kv;
++	uint32_t n = 0;
++	ib[n++] = pkt7(61, 3);                          /* MEM_WRITE va+0x8000 = 0x5eed0001 */
++	ib[n++] = (uint32_t)(va + 0x8000);
++	ib[n++] = (uint32_t)((va + 0x8000) >> 32);
++	ib[n++] = 0x5eed0001;
++	sweet_dcache_clean((vm_offset_t)kv, (unsigned)sz);
++	uint64_t addr = va;
++	uint32_t words = n;
++	uint64_t t0 = mach_absolute_time(), ns = 0;
++	uint32_t f = volcano_rg_submit(&addr, &words, 1);
++	bool done = false;
++	for (int i = 0; i < 2000 && f && !(done = volcano_rg_done(f)); i++) {
++		IODelay(100);
++	}
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	sweet_dcache_flush((vm_offset_t)kv + 0x8000, 64);
++	uint32_t got = *(volatile uint32_t *)(kv + 0x8000);
++	/* a burst: 100 empty-ish submissions, fence latency */
++	uint64_t t1 = mach_absolute_time(), ns2 = 0;
++	uint32_t f2 = 0;
++	for (int i = 0; i < 100; i++) {
++		f2 = volcano_rg_submit(&addr, &words, 1);
++	}
++	bool done2 = false;
++	for (int i = 0; i < 20000 && f2 && !(done2 = volcano_rg_done(f2)); i++) {
++		IODelay(100);
++	}
++	absolutetime_to_nanoseconds(mach_absolute_time() - t1, &ns2);
++	for (int k = 0; k < 3; k++) {
++		IOLog("VGPU: SUMMARY rgtest map %d fence %u %s %llu us got %08x (want 5eed0001) va %#llx burst100 f %u %s %llu us\n",
++		    m, f, done ? "DONE" : "TIMEOUT", ns / 1000, got, va, f2, done2 ? "DONE" : "TIMEOUT", ns2 / 1000);
++	}
++	if (!done || !done2) {
++		volcano_rg_report("selftest");
++	}
++}
++
++/* after the boot tests (vgpu=5): hand the GPU to RedwoodGPU */
++static void
++rg_start(void)
++{
++	rg_lock = IOLockAlloc();
++	rg_free[0].start = RG_VA_START;
++	rg_free[0].size = RG_VA_END - RG_VA_START;
++	rg_free_count = 1;
++	((volatile uint32_t *)memb.va)[0x80] = 0;
++	sweet_dcache_clean((vm_offset_t)memb.va, (unsigned)memb.size);
++	rg_ready = true;
++	RedwoodGPUStart();
++	IOLog("VGPU: SUMMARY Adreno 810 ready, RedwoodGPU published (tables used %u)\n", tables_used);
++	thread_t t;
++	if (kernel_thread_start(rg_selftest, NULL, &t) == KERN_SUCCESS) {
++		thread_deallocate(t);
++	}
 +}
 +
 +extern "C" void sweet_glyph_test(void);
