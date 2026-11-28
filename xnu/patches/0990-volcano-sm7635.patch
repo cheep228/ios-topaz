@@ -931,10 +931,10 @@ index 0000000..a418268
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
 new file mode 100644
-index 0000000..6bf8c27
+index 0000000..3aee678
 --- /dev/null
 +++ b/bsd/dev/sweet_i2c7.c
-@@ -0,0 +1,1012 @@
+@@ -0,0 +1,1023 @@
 +/*
 + * topaz: polled FIFO I2C on QUP0 SE1 (battery bus: SM5602 fuel gauge 0x71,
 + * bq2589x-class charger 0x6a). Values from MakrSas/topaz-woa TopazBattery
@@ -1877,8 +1877,8 @@ index 0000000..6bf8c27
 +		return -2;
 +	}
 +	/* RCGs from XO: CFG=0 (bypass, src0), M/N/D 0, UPDATE */
-+	static const uint32_t rcg[4] = { 0x1a04c, 0x21004, 0x18004, 0x2401c };
-+	for (int i = 0; i < 4; i++) {
++	static const uint32_t rcg[5] = { 0x1a04c, 0x21004, 0x18004, 0x2401c, 0x1a030 };
++	for (int i = 0; i < 5; i++) {
 +		uint32_t cmd0 = R32(c, rcg[i]), cfg0 = R32(c, rcg[i] + 4);
 +		R32(c, rcg[i] + 4) = 0;
 +		if (i == 1 || i == 2) {
@@ -1888,13 +1888,16 @@ index 0000000..6bf8c27
 +		uint32_t cmd = cam_poll(c, rcg[i], 1u, 0u, 2000);
 +		printf("@@Q@@ rcg %#x cmd %#x cfg %#x -> cmd %#x cfg %#x\n", rcg[i], cmd0, cfg0, cmd, R32(c, rcg[i] + 4));
 +	}
-+	static const uint32_t br[6] = { 0x23004, 0x2501c, 0x24010, 0x24004, 0x2101c, 0x1801c };
-+	uint32_t bv[6];
-+	for (int i = 0; i < 6; i++) {
++	static const uint32_t br[9] = { 0x23004, 0x2501c, 0x24010, 0x24004, 0x2101c, 0x1801c, 0x25018, 0x24034, 0x2404c };
++	uint32_t bv[9];
++	for (int i = 0; i < 9; i++) {
 +		R32(c, br[i]) |= 1;
 +		bv[i] = cam_poll(c, br[i], 0x80000000u, 0u, 5000);
 +	}
-+	printf("@@Q@@ br cpas %#x core %#x hfaxi %#x sfaxi %#x cci %#x mclk %#x\n", bv[0], bv[1], bv[2], bv[3], bv[4], bv[5]);
++	for (int k = 0; k < 3; k++) {
++		printf("@@Q@@ br cpas %#x core %#x hfaxi %#x sfaxi %#x cci %#x mclk %#x\n", bv[0], bv[1], bv[2], bv[3], bv[4], bv[5]);
++		printf("@@Q@@ br2 soc %#x rt %#x nrt %#x\n", bv[6], bv[7], bv[8]);
++	}
 +	if ((bv[0] | bv[1] | bv[4]) & 0x80000000u) {
 +		printf("@@Q@@ cci clocks off, abort\n");
 +		return -3;
@@ -1913,6 +1916,14 @@ index 0000000..6bf8c27
 +		return -4;
 +	}
 +	uint32_t ver = R32(cam_cci, 0);
++	{
++		vm_offset_t ct = ml_io_map(0xac13000, 0x1000);
++		if (ct) {
++			for (int k = 0; k < 3; k++) {
++				printf("@@Q@@ cpastop %#x %#x %#x %#x cci0 %#x %#x\n", R32(ct, 0), R32(ct, 4), R32(ct, 8), R32(ct, 0xc), R32(cam_cci, 0), R32(cam_cci, 0xc0c));
++			}
++		}
++	}
 +	R32(cam_cci, 0xc04) = 0x7fffffffu;
 +	R32(cam_cci, 0xc08) = 0xffffffffu;
 +	R32(cam_cci, 0xc00) = 1;
