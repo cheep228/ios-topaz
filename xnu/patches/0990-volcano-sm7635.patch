@@ -14047,10 +14047,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..eb7758f
+index 0000000..8d4dba6
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1541 @@
+@@ -0,0 +1,1559 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14495,6 +14495,7 @@ index 0000000..eb7758f
 +static void
 +gmu_boot(void)
 +{
++	extern uint64_t vgpu_scm_init_regs(uint32_t req, uint32_t *before, uint32_t *after);
 +	if (!smmu_gmu_setup()) {
 +		IOLog("VGPU: SMMU setup failed\n");
 +		return;
@@ -14511,6 +14512,14 @@ index 0000000..eb7758f
 +	    rd(base, 0x50000 + 4 * RSCC_SEQ_BUSY_DRV0));
 +
 +	gmu_load();
++	{
++		/* kgsl gen8_scm_gpu_init_cx_regs: TZ programs CX regs (always-on, BCL, tsense, SW fuse); Android does it every cold GMU boot */
++		uint32_t fb = 0, fa = 0;
++		uint64_t r = vgpu_scm_init_regs(0xb, &fb, &fa);
++		for (int k = 0; k < 2; k++) {
++			IOLog("VGPU: SUMMARY scm gpu_init_regs ret %llx fuse %08x -> %08x\n",(unsigned long long)r, fb, fa);
++		}
++	}
 +	hfi_init();
 +	uint32_t v = gmu_rd(GMU_CM3_DTCM_START + 0xff8);
 +	uint32_t mask = v <= 0x20010004 ? 0xffffffff : 0x1ff, want = v <= 0x20010004 ? 0xbabeface : 0x100;
@@ -14854,6 +14863,15 @@ index 0000000..eb7758f
 +		*res1 = args[1];
 +	}
 +	return args[0];
++}
++
++uint64_t
++vgpu_scm_init_regs(uint32_t req, uint32_t *before, uint32_t *after)
++{
++	*before = rd(base, 0x9e000 + 4 * 0x400);       /* CX_MISC_SW_FUSE_VALUE */
++	uint64_t r = scm(SCM_FN(0x28, 0x01), 1, req, 0, 0, NULL);
++	*after = rd(base, 0x9e000 + 4 * 0x400);
++	return r;
 +}
 +
 +/* one-file .mbn: metadata = ELF header + program headers, then the hash segment; load segments relocated to the region */
