@@ -931,10 +931,10 @@ index 0000000..a418268
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_i2c7.c b/bsd/dev/sweet_i2c7.c
 new file mode 100644
-index 0000000..680ecb4
+index 0000000..8b4f58d
 --- /dev/null
 +++ b/bsd/dev/sweet_i2c7.c
-@@ -0,0 +1,1004 @@
+@@ -0,0 +1,1012 @@
 +/*
 + * topaz: polled FIFO I2C on QUP0 SE1 (battery bus: SM5602 fuel gauge 0x71,
 + * bq2589x-class charger 0x6a). Values from MakrSas/topaz-woa TopazBattery
@@ -1778,7 +1778,7 @@ index 0000000..680ecb4
 +		R32(t, 4) = out ? 2u : 0u;
 +	}
 +	R32(t, 0) = cfg;
-+	printf("@@K@@ gpio %d cfg %#x -> %#x io %#x\n", gpio, before, R32(t, 0), R32(t, 4));
++	printf("@@Q@@ gpio %d cfg %#x -> %#x io %#x\n", gpio, before, R32(t, 0), R32(t, 4));
 +}
 +
 +static vm_offset_t cam_cci;
@@ -1786,7 +1786,8 @@ index 0000000..680ecb4
 +static uint32_t
 +cam_cci_run(int q, uint32_t donemask)
 +{
-+	R32(cam_cci, 0x300 + 0x100 * q) = R32(cam_cci, 0x304 + 0x100 * q);
++	uint32_t cnt = R32(cam_cci, 0x304 + 0x100 * q);
++	R32(cam_cci, 0x300 + 0x100 * q) = cnt;
 +	R32(cam_cci, 0x008) = 1u << q;
 +	uint32_t st = 0;
 +	for (int i = 0; i < 20000; i++) {
@@ -1795,6 +1796,11 @@ index 0000000..680ecb4
 +			break;
 +		}
 +		delay(5);
++	}
++	for (int k = 0; k < 3; k++) {
++		printf("@@Q@@ q%d cnt %u st %#x exec %#x cur %#x cmd %#x rep %#x mask %#x\n", q, cnt, st,
++		    R32(cam_cci, 0x300 + 0x100 * q), R32(cam_cci, 0x304 + 0x100 * q), R32(cam_cci, 0x308 + 0x100 * q),
++		    R32(cam_cci, 0x30c + 0x100 * q), R32(cam_cci, 0xc04));
 +	}
 +	R32(cam_cci, 0xc08) = st;
 +	R32(cam_cci, 0xc00) = 1;
@@ -1850,14 +1856,14 @@ index 0000000..680ecb4
 +	uint32_t g0 = R32(g, 0x26004), g1 = R32(g, 0x26018), g2 = R32(g, 0x2601c), g3 = R32(g, 0x26010);
 +	R32(g, 0x26004) |= 1; R32(g, 0x26018) |= 1; R32(g, 0x2601c) |= 1; R32(g, 0x26010) |= 1;
 +	delay(100);
-+	printf("@@K@@ gcc cam ahb %#x->%#x hfxo %#x->%#x sfxo %#x->%#x hfaxi %#x->%#x\n",
++	printf("@@Q@@ gcc cam ahb %#x->%#x hfxo %#x->%#x sfxo %#x->%#x hfaxi %#x->%#x\n",
 +	    g0, R32(g, 0x26004), g1, R32(g, 0x26018), g2, R32(g, 0x2601c), g3, R32(g, 0x26010));
 +	if (R32(g, 0x26004) & 0x80000000u) {
-+		printf("@@K@@ camera ahb clk still off, abort\n");
++		printf("@@Q@@ camera ahb clk still off, abort\n");
 +		return -1;
 +	}
 +	uint32_t gd0 = R32(c, 0x25004), gc0 = R32(c, 0x25008);
-+	printf("@@K@@ camcc gdsc %#x cfg %#x gdscclk %#x sleep %#x cpas %#x core %#x cci %#x mclk %#x\n",
++	printf("@@Q@@ camcc gdsc %#x cfg %#x gdscclk %#x sleep %#x cpas %#x core %#x cci %#x mclk %#x\n",
 +	    gd0, gc0, R32(c, 0x25038), R32(c, 0x2505c), R32(c, 0x23004), R32(c, 0x2501c), R32(c, 0x2101c), R32(c, 0x1801c));
 +	R32(c, 0x25038) |= 1;
 +	R32(c, 0x2505c) |= 1;
@@ -1866,7 +1872,7 @@ index 0000000..680ecb4
 +		R32(c, 0x25004) = gd0 & ~1u;
 +	}
 +	uint32_t gd = cam_poll(c, 0x25004, 0x80000000u, 0x80000000u, 100000);
-+	printf("@@K@@ gdsc on %#x cfg %#x\n", gd, R32(c, 0x25008));
++	printf("@@Q@@ gdsc on %#x cfg %#x\n", gd, R32(c, 0x25008));
 +	if (!(gd & 0x80000000u)) {
 +		return -2;
 +	}
@@ -1880,7 +1886,7 @@ index 0000000..680ecb4
 +		}
 +		R32(c, rcg[i]) = cmd0 | 1u;
 +		uint32_t cmd = cam_poll(c, rcg[i], 1u, 0u, 2000);
-+		printf("@@K@@ rcg %#x cmd %#x cfg %#x -> cmd %#x cfg %#x\n", rcg[i], cmd0, cfg0, cmd, R32(c, rcg[i] + 4));
++		printf("@@Q@@ rcg %#x cmd %#x cfg %#x -> cmd %#x cfg %#x\n", rcg[i], cmd0, cfg0, cmd, R32(c, rcg[i] + 4));
 +	}
 +	static const uint32_t br[6] = { 0x23004, 0x2501c, 0x24010, 0x24004, 0x2101c, 0x1801c };
 +	uint32_t bv[6];
@@ -1888,9 +1894,9 @@ index 0000000..680ecb4
 +		R32(c, br[i]) |= 1;
 +		bv[i] = cam_poll(c, br[i], 0x80000000u, 0u, 5000);
 +	}
-+	printf("@@K@@ br cpas %#x core %#x hfaxi %#x sfaxi %#x cci %#x mclk %#x\n", bv[0], bv[1], bv[2], bv[3], bv[4], bv[5]);
++	printf("@@Q@@ br cpas %#x core %#x hfaxi %#x sfaxi %#x cci %#x mclk %#x\n", bv[0], bv[1], bv[2], bv[3], bv[4], bv[5]);
 +	if ((bv[0] | bv[1] | bv[4]) & 0x80000000u) {
-+		printf("@@K@@ cci clocks off, abort\n");
++		printf("@@Q@@ cci clocks off, abort\n");
 +		return -3;
 +	}
 +	/* pins: reset low, CCI pull-up func1, MCLK func1 */
@@ -1919,7 +1925,9 @@ index 0000000..680ecb4
 +	R32(cam_cci, 0x108) = (10u << 16) | 77u;
 +	R32(cam_cci, 0x10c) = 118u;
 +	R32(cam_cci, 0x110) = (6u << 4) | 1u;
-+	printf("@@K@@ cci ver %#x reset st %#x\n", ver, rs);
++	for (int k = 0; k < 3; k++) {
++		printf("@@Q@@ cci ver %#x reset st %#x scl %#x misc %#x\n", ver, rs, R32(cam_cci, 0x100), R32(cam_cci, 0x110));
++	}
 +	static const struct { uint8_t a; uint16_t r; } pr[4] = {
 +		{ 0x20, 0x0000 }, { 0x20, 0x0002 }, { 0x5a, 0x0000 }, { 0x34, 0x0016 },
 +	};
@@ -1931,7 +1939,7 @@ index 0000000..680ecb4
 +			id0 = v;
 +		}
 +		for (int k = 0; k < 2; k++) {
-+			printf("@@K@@ sensor %#x reg %#x -> %d (%#x) wst %#x rst %#x lvl %u raw %#x %#x\n",
++			printf("@@Q@@ sensor %#x reg %#x -> %d (%#x) wst %#x rst %#x lvl %u raw %#x %#x\n",
 +			    pr[i].a, pr[i].r, v, v, ws, rsx, lv, r0, r1);
 +		}
 +	}
