@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..2b932d1
+index 0000000..79ca1d5
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,2125 @@
+@@ -0,0 +1,2133 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15908,6 +15908,15 @@ index 0000000..2b932d1
 +#define FBG_SIZE   (((uint64_t)FBG_STRIDE * FBG_H + 4095) & ~4095ull)
 +static bool fbg_mapped;
 +
++/* one pixel of the framebuffer through a 4K uncached window (a 10 MB ml_io_map ran out of KVA, log397) */
++static uint32_t
++fb_px(uint32_t idx)
++{
++	uint64_t off = (uint64_t)idx * 4;
++	volatile uint32_t *w = (volatile uint32_t *)ml_io_map(FBG_PA + (off & ~4095ull), 4096);
++	return w ? w[(off & 4095) / 4] : 0xdeadbeef;
++}
++
 +static void
 +a2d_fill(uint64_t iova, uint32_t pitch, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1, uint32_t r, uint32_t g,
 +    uint32_t bl, uint32_t a)
@@ -15949,10 +15958,9 @@ index 0000000..2b932d1
 +		IOLog("VGPU: SUMMARY fbfill no mapping\n");
 +		return;
 +	}
-+	volatile uint32_t *fb = (volatile uint32_t *)ml_io_map(FBG_PA, FBG_SIZE);
 +	const uint32_t p2 = FBG_STRIDE * 2;             /* 8640 = 135 * 64 */
 +	const uint32_t y0 = 1000 / 2, y1 = 1400 / 2 - 1;
-+	uint32_t before = fb ? fb[1200 * 1080 + 540] : 0;
++	uint32_t before = fb_px(1200 * 1080 + 540);
 +	uint64_t t0 = mach_absolute_time();
 +	bool ok = true;
 +	const int N = 10;
@@ -15978,8 +15986,8 @@ index 0000000..2b932d1
 +	a2d_fill(FBG_IOVA, p2, 0, y0, 2159, y1, 0, 0xff, 0, 0xff);
 +	ok2 = rb_flush("FB_BAND") && ok2;
 +	IODelay(1000);
-+	uint32_t mid = fb ? fb[1200 * 1080 + 540] : 0, top = fb ? fb[10 * 1080 + 5] : 0, edge = fb ? fb[1399 * 1080 + 1079] : 0,
-+	    out = fb ? fb[1400 * 1080 + 5] : 0;
++	uint32_t mid = fb_px(1200 * 1080 + 540), top = fb_px(10 * 1080 + 5), edge = fb_px(1399 * 1080 + 1079),
++	    out = fb_px(1400 * 1080 + 5);
 +	for (int k = 0; k < 3; k++) {
 +		IOLog("VGPU: SUMMARY fbfill %s/%s before %08x mid %08x edge %08x below %08x top %08x band10 %llu us full %llu us rbbm %08x\n",
 +		    ok ? "OK" : "STUCK", ok2 ? "OK" : "STUCK", before, mid, edge, out, top, ns / 1000, ns2 / 1000, g_rd(R_RBBM_STATUS));
