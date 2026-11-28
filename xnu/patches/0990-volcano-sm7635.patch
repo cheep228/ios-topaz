@@ -495,10 +495,10 @@ index 94c7552..1a5a91a 100644
  		return 0;
 diff --git a/bsd/dev/sweet_glyph.c b/bsd/dev/sweet_glyph.c
 new file mode 100755
-index 0000000..0bc81b1
+index 0000000..62dbcf1
 --- /dev/null
 +++ b/bsd/dev/sweet_glyph.c
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,208 @@
 +/*
 + * sweet_glyph.c: Nothing Phone 3a (volcano) Glyph LEDs.
 + * AW20036 36-channel LED matrix driver on QUP1 SE0 (Linux i2c-7) at 0x3a.
@@ -690,6 +690,23 @@ index 0000000..0bc81b1
 +
 +SYSCTL_PROC(_kern, OID_AUTO, sweet_gpu, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
 +    0, 0, sysctl_sweet_gpu, "A", "Adreno ring state");
++
++/* kern.sweet_gpu_ib: the first submission's command buffers (iokit/Kernel/arm/RedwoodGPU.cpp) */
++extern uint32_t sweet_gpu_ib[4096] __attribute__((weak));
++extern uint32_t sweet_gpu_ib_n __attribute__((weak));
++
++static int
++sysctl_sweet_gpu_ib SYSCTL_HANDLER_ARGS
++{
++#pragma unused(arg1, arg2, oidp)
++	if (&sweet_gpu_ib_n == NULL || sweet_gpu_ib_n == 0) {
++		return SYSCTL_OUT(req, "", 0);
++	}
++	return SYSCTL_OUT(req, sweet_gpu_ib, 4 * (sweet_gpu_ib_n > 4096 ? 4096 : sweet_gpu_ib_n));
++}
++
++SYSCTL_PROC(_kern, OID_AUTO, sweet_gpu_ib, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
++    0, 0, sysctl_sweet_gpu_ib, "S", "first GPU submission");
 diff --git a/bsd/dev/sweet_i2c13.c b/bsd/dev/sweet_i2c13.c
 new file mode 100644
 index 0000000..a418268
