@@ -14411,10 +14411,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..00e2533
+index 0000000..cb07288
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,2513 @@
+@@ -0,0 +1,2534 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -16800,6 +16800,18 @@ index 0000000..00e2533
 +	}
 +}
 +
++extern "C" unsigned int vm_page_free_count, vm_page_wire_count;
++/* every 10 s: free / wired pages and the ring, to find the ~100 s kmem_alloc KERN_NO_SPACE panic */
++static void
++mem_watch(void *, wait_result_t)
++{
++	for (int i = 0; i < 60; i++) {
++		IOSleep(10000);
++		IOLog("VGPU: SUMMARY memw t%d free %u wired %u rptr %u wptr %u subs %u\n", (i + 1) * 10,
++		    vm_page_free_count, vm_page_wire_count, rd(base, R_CP_RB_RPTR), (unsigned)rb_wptr, (unsigned)rg_subs);
++	}
++}
++
 +/* after the boot tests (vgpu=5): hand the GPU to RedwoodGPU */
 +static void
 +rg_start(void)
@@ -16811,9 +16823,18 @@ index 0000000..00e2533
 +	((volatile uint32_t *)memb.va)[0x80] = 0;
 +	sweet_dcache_clean((vm_offset_t)memb.va, (unsigned)memb.size);
 +	rg_ready = true;
++	thread_t t;
++	if (kernel_thread_start(mem_watch, NULL, &t) == KERN_SUCCESS) {
++		thread_deallocate(t);
++	}
++	uint32_t pub = 1;
++	PE_parse_boot_argn("vrgpub", &pub, sizeof(pub));
++	if (!pub) {
++		IOLog("VGPU: SUMMARY Adreno 810 ready, RedwoodGPU NOT published (vrgpub=0)\n");
++		return;
++	}
 +	RedwoodGPUStart();
 +	IOLog("VGPU: SUMMARY Adreno 810 ready, RedwoodGPU published (tables used %u)\n", tables_used);
-+	thread_t t;
 +	if (kernel_thread_start(rg_selftest, NULL, &t) == KERN_SUCCESS) {
 +		thread_deallocate(t);
 +	}
