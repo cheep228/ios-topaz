@@ -495,7 +495,7 @@ index 94c7552..1a5a91a 100644
  		return 0;
 diff --git a/bsd/dev/sweet_glyph.c b/bsd/dev/sweet_glyph.c
 new file mode 100755
-index 0000000..62dbcf1
+index 0000000..0c1b4a3
 --- /dev/null
 +++ b/bsd/dev/sweet_glyph.c
 @@ -0,0 +1,208 @@
@@ -692,14 +692,14 @@ index 0000000..62dbcf1
 +    0, 0, sysctl_sweet_gpu, "A", "Adreno ring state");
 +
 +/* kern.sweet_gpu_ib: the first submission's command buffers (iokit/Kernel/arm/RedwoodGPU.cpp) */
-+extern uint32_t sweet_gpu_ib[4096] __attribute__((weak));
-+extern uint32_t sweet_gpu_ib_n __attribute__((weak));
++uint32_t sweet_gpu_ib[4096];
++uint32_t sweet_gpu_ib_n;
 +
 +static int
 +sysctl_sweet_gpu_ib SYSCTL_HANDLER_ARGS
 +{
 +#pragma unused(arg1, arg2, oidp)
-+	if (&sweet_gpu_ib_n == NULL || sweet_gpu_ib_n == 0) {
++	if (sweet_gpu_ib_n == 0) {
 +		return SYSCTL_OUT(req, "", 0);
 +	}
 +	return SYSCTL_OUT(req, sweet_gpu_ib, 4 * (sweet_gpu_ib_n > 4096 ? 4096 : sweet_gpu_ib_n));
@@ -4851,6 +4851,66 @@ index 7a32a23..1d10d4b 100644
  	if (gIOPlatform) {
  		// note that this will not necessarily halt or restart the system...
  		// Implementors of this function will check the type and take action accordingly
+diff --git a/iokit/Kernel/arm/RedwoodGPU.cpp b/iokit/Kernel/arm/RedwoodGPU.cpp
+index a4e5569..1455d62 100644
+--- a/iokit/Kernel/arm/RedwoodGPU.cpp
++++ b/iokit/Kernel/arm/RedwoodGPU.cpp
+@@ -65,6 +65,11 @@ void redwood_gpu_unmap(uint64_t address, uint64_t size);
+ void redwood_gpu_to_memory(void * start, uint64_t size);
+ uint32_t redwood_gpu_submit(const uint64_t * addresses, const uint32_t * words, uint32_t count);
+ extern uint32_t gpu_log;
++
++/* the first submission with commands, as the GPU sees it: [d00d0001, address lo, hi, words, the words...] for each
++ * command buffer and each buffer an IB packet in one names (kern.sweet_gpu_ib, bsd/dev/sweet_glyph.c) */
++extern "C" uint32_t sweet_gpu_ib[4096];
++extern "C" uint32_t sweet_gpu_ib_n;
+ bool redwood_gpu_done(uint32_t fence);
+ uint32_t redwood_gpu_last(void);
+ void redwood_gpu_worked(uint64_t * microseconds, uint32_t * submissions, uint32_t by[7]);
+@@ -1081,6 +1086,43 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+ 		addresses[count] = b->address + cmds[i].submit_offset;
+ 		words[count++] = cmds[i].size / 4;
+ 	}
++	if (sweet_gpu_ib_n == 0 && count > 0) {
++		uint64_t todo_a[24]; uint32_t todo_w[24], todo = 0;
++		for (uint32_t i = 0; i < count && todo < 24; i++) {
++			todo_a[todo] = addresses[i]; todo_w[todo++] = words[i];
++		}
++		for (uint32_t t = 0; t < todo; t++) {
++			const uint32_t *w = NULL;
++			for (uint32_t i = 0; i < request->nr_bos && w == NULL; i++) {
++				struct gpu_buffer * b = buffer(bos[i].handle);
++				if (b != NULL && b->kernel != NULL && todo_a[t] >= b->address && todo_a[t] + 4ull * todo_w[t] <= b->address + b->size) {
++					w = (const uint32_t *) (b->kernel + (todo_a[t] - b->address));
++				}
++			}
++			uint32_t n = todo_w[t];
++			if (sweet_gpu_ib_n + 4 >= 4096) {
++				break;
++			}
++			if (n > 4096 - 4 - sweet_gpu_ib_n) {
++				n = 4096 - 4 - sweet_gpu_ib_n;
++			}
++			sweet_gpu_ib[sweet_gpu_ib_n++] = w ? 0xd00d0001 : 0xd00d0000;
++			sweet_gpu_ib[sweet_gpu_ib_n++] = (uint32_t) todo_a[t];
++			sweet_gpu_ib[sweet_gpu_ib_n++] = (uint32_t) (todo_a[t] >> 32);
++			sweet_gpu_ib[sweet_gpu_ib_n++] = todo_w[t];
++			for (uint32_t k = 0; w != NULL && k < n; k++) {
++				uint32_t v = w[k];
++				sweet_gpu_ib[sweet_gpu_ib_n++] = v;
++				if ((v >> 28) == 7 && ((v >> 16) & 0x7f) == 0x3f && k + 3 < todo_w[t] && todo < 24) {
++					todo_a[todo] = w[k + 1] | ((uint64_t) w[k + 2] << 32);
++					todo_w[todo++] = w[k + 3] & 0xfffff;
++				}
++			}
++		}
++		if (sweet_gpu_ib_n == 0) {
++			sweet_gpu_ib_n = 1;
++		}
++	}
+ 	request->fence = redwood_gpu_submit(addresses, words, count);
+ 	if (gpu_log && request->fence != 0) {
+ 		/* "tl: Q FENCE at US: N buffers, B of 4 MB or more, W words of commands": what was given (tl: q: what it took) */
 diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
 index ed9a0c7..cc85e2d 100644
 --- a/iokit/Kernel/arm/SweetBattery.cpp
