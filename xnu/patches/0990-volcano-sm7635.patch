@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..7fca203
+index 0000000..da27b9f
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1929 @@
+@@ -0,0 +1,1931 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15064,6 +15064,8 @@ index 0000000..7fca203
 +{
 +	uint32_t m[64] = {};
 +	uint32_t n = 1;
++	uint32_t vperf_mhz = 0;
++	PE_parse_boot_argn("vperfmhz", &vperf_mhz, sizeof(vperf_mhz));
 +	m[n++] = 0;     /* version */
 +	m[n++] = 1;     /* HFI_TABLE_GPU_PERF */
 +	m[n++] = 10;
@@ -15071,13 +15073,13 @@ index 0000000..7fca203
 +	for (int i = 0; i < 10; i++) {
 +		m[n++] = gx_votes[i];
 +		m[n++] = dep_votes[i];
-+		m[n++] = gpu_khz[i] / 1000;
++		m[n++] = vperf_mhz ? gpu_khz[i] / 1000 : gpu_khz[i];  /* kgsl/upstream: freq in kHz (log393: MHz = CP clock dead) */
 +	}
 +	m[n++] = 3;
 +	m[n++] = 2;
 +	for (int i = 0; i < 3; i++) {
 +		m[n++] = cx_votes[i];
-+		m[n++] = gmu_khz[i] / 1000;
++		m[n++] = vperf_mhz ? gmu_khz[i] / 1000 : gmu_khz[i];
 +	}
 +	return hfi_send(15, m, n, NULL, 0, "PERF_TABLE");
 +}
