@@ -14249,10 +14249,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..21d101e
+index 0000000..01613c5
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1579 @@
+@@ -0,0 +1,1612 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15273,6 +15273,39 @@ index 0000000..21d101e
 +					}
 +				}
 +			}
++		}
++		/*
++		 * Crash dumper (independent CP DMA engine): reads regs into memory per a script.
++		 * If it completes, the GX -> SMMU -> DDR path works and the SQE problem is elsewhere.
++		 */
++		volatile uint64_t *sc = (volatile uint64_t *)(memb.va + 0x2000);
++		volatile uint32_t *dd = (volatile uint32_t *)(memb.va + 0x3000);
++		for (int i = 0; i < 0x100; i++) {
++			dd[i] = 0x55555555u;
++		}
++		dd[0x40] = 0xaaaaaaaau;
++		sc[0] = memb.iova + 0x3000; sc[1] = (0x000ull << 44) | 16;   /* RBBM 0x0..0xf */
++		sc[2] = memb.iova + 0x3040; sc[3] = (0x800ull << 44) | 16;   /* CP 0x800..0x80f */
++		sc[4] = memb.iova + 0x3100; sc[5] = (0x845ull << 44) | 1;    /* CRASH_DUMP_STATUS -> end marker */
++		sc[6] = 0; sc[7] = 0;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		sweet_dcache_clean((vm_offset_t)memb.va + 0x2000, 0x2000);
++		g_wr64(0x842, memb.iova + 0x2000);
++		g_wr(0x844, 1);
++		uint32_t cds = 0, end = 0;
++		for (int i = 0; i < 2000; i++) {
++			IODelay(50);
++			sweet_dcache_flush((vm_offset_t)memb.va + 0x3000, 0x1000);
++			end = dd[0x40];
++			if (end != 0xaaaaaaaau) {
++				break;
++			}
++		}
++		cds = g_rd(0x845);
++		g_wr(0x844, 0);
++		for (int k = 0; k < 3; k++) {
++			IOLog("VGPU: SUMMARY crashdump status %08x end %08x d0 %08x %08x %08x cp %08x %08x %08x rbbm %08x\n",
++			    cds, end, dd[0], dd[1], dd[2], dd[0x10], dd[0x12], dd[0x17], g_rd(R_RBBM_STATUS));
 +		}
 +	}
 +	volatile uint8_t *cb = gpu_cb();
