@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..79ca1d5
+index 0000000..21ff05c
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,2133 @@
+@@ -0,0 +1,2217 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15950,6 +15950,89 @@ index 0000000..79ca1d5
 +	out_pkt7(0x26, 0);
 +}
 +
++/* A2D copy (BLIT_OP_SCALE, 1:1): RGBA8 linear src texture -> RGBA8 linear dst (turnip r2d_src + r2d_dst, a8xx offsets) */
++static void
++a2d_copy(uint64_t src, uint32_t spitch, uint32_t sw, uint32_t sh, uint32_t sx, uint32_t sy, uint64_t dst, uint32_t dpitch,
++    uint32_t dx, uint32_t dy, uint32_t w, uint32_t h)
++{
++	const uint32_t fmt = 0x30;
++	const uint32_t blit = (fmt << 8) | (0xfu << 20);
++	out_pkt7(0x65, 1);
++	out_ring(12);
++	out_reg(0x8c00, blit);
++	out_reg(0x8500, blit);
++	out_reg(0xa9bf, (fmt << 3) | (0xfu << 12));
++	out_reg(0x8c01, 0);
++	out_pkt4(0xb2c0, 5);                            /* TPL1_A2D_SRC_TEXTURE_INFO, SIZE, BASE lo/hi, PITCH */
++	out_ring(fmt);
++	out_ring(sw | (sh << 15));
++	out_ring((uint32_t)src);
++	out_ring((uint32_t)(src >> 32));
++	out_ring(spitch << 3);
++	out_reg(0xb2d2, 1u << 29);                      /* TPL1_A2D_BLT_CNTL TYPE = TEX_2D */
++	out_reg(0xb2d7, 0);                             /* TPL1_A2D_FILTER_CNTL */
++	out_pkt4(0x8c17, 4);
++	out_ring(fmt);
++	out_ring((uint32_t)dst);
++	out_ring((uint32_t)(dst >> 32));
++	out_ring(dpitch >> 6);
++	out_pkt4(0x8501, 4);                            /* SRC X/Y MIN/MAX, 24.8 */
++	out_ring(sx << 8);
++	out_ring((sx + w - 1) << 8);
++	out_ring(sy << 8);
++	out_ring((sy + h - 1) << 8);
++	out_pkt4(0x8505, 2);
++	out_ring(dx | (dy << 16));
++	out_ring((dx + w - 1) | ((dy + h - 1) << 16));
++	out_pkt7(0x2c, 1);
++	out_ring(3);
++	out_pkt7(0x46, 1);
++	out_ring(0x21);
++	out_pkt7(0x46, 1);
++	out_ring(0x31);
++	out_pkt7(0x26, 0);
++}
++
++static void
++gpu_copy_test(void)
++{
++	if (!fbg_mapped || fillb.va == NULL) {
++		return;
++	}
++	volatile uint32_t *px = (volatile uint32_t *)fillb.va;
++	for (uint32_t y = 0; y < FILL_H; y++) {
++		for (uint32_t x = 0; x < FILL_W; x++) {
++			px[y * FILL_W + x] = 0xff000000u | ((y * 4) << 8) | (x * 4) | ((255 - x * 4) << 16);
++		}
++	}
++	sweet_dcache_clean((vm_offset_t)fillb.va, (unsigned)fillb.size);
++	const uint32_t p2 = FBG_STRIDE * 2;
++	/* texture -> FB at double-row (1000,100): screen rows 200..327, x 1000..1063 */
++	out_pkt7(23, 1);
++	out_ring((1u << 31) | 1);
++	out_pkt7(0x46, 1);                              /* CACHE_INVALIDATE before sampling CPU-written data */
++	out_ring(0x33);
++	a2d_copy(fillb.iova, FILL_W * 4, FILL_W, FILL_H, 0, 0, FBG_IOVA, p2, 1000, 100, FILL_W, FILL_H);
++	bool ok = rb_flush("A2D_COPY");
++	IODelay(500);
++	uint32_t a = fb_px(2 * (100 + 5) * 1080 + 1000 + 7), b = fb_px(2 * (100 + 63) * 1080 + 1063);
++	/* FB -> FB: double rows 0..299 -> 600..899 (src pitch 8640: not 128-aligned, test), timed */
++	uint64_t t0 = mach_absolute_time(), ns = 0;
++	out_pkt7(23, 1);
++	out_ring((1u << 31) | 1);
++	a2d_copy(FBG_IOVA, p2, 2160, FBG_H / 2, 0, 0, FBG_IOVA, p2, 0, 600, 2160, 300);
++	bool ok2 = rb_flush("FB_COPY");
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	IODelay(500);
++	uint32_t s1 = fb_px(2 * 50 * 1080 + 300), d1 = fb_px(2 * 650 * 1080 + 300), s2 = fb_px(2 * 250 * 1080 + 1500 - 1080 + 1080),
++	    d2 = fb_px(2 * 850 * 1080 + 1500 - 1080 + 1080);
++	for (int k = 0; k < 3; k++) {
++		IOLog("VGPU: SUMMARY a2dcopy %s/%s tex5,7 %08x want %08x tex63,63 %08x want %08x fbcopy %llu us s1 %08x d1 %08x s2 %08x d2 %08x rbbm %08x\n",
++		    ok ? "OK" : "STUCK", ok2 ? "OK" : "STUCK", a, px[5 * FILL_W + 7], b, px[63 * FILL_W + 63], ns / 1000, s1, d1, s2, d2,
++		    g_rd(R_RBBM_STATUS));
++	}
++}
++
 +/* GPU fill of a visible band (rows 1000..1399) of the real framebuffer, timed */
 +static void
 +gpu_fb_test(void)
@@ -16218,6 +16301,7 @@ index 0000000..79ca1d5
 +	IOLog("VGPU: SUMMARY mem_write readback %08x\n", ((volatile uint32_t *)memb.va)[0x40]);
 +	gpu_fill_test();
 +	gpu_fb_test();
++	gpu_copy_test();
 +}
 +
 +static bool
