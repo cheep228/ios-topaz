@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..f13ec60
+index 0000000..87e5579
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1620 @@
+@@ -0,0 +1,1650 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -15372,6 +15372,36 @@ index 0000000..f13ec60
 +			}
 +			g_wr(0x8f8, 0);
 +			uint32_t u0 = g_rd(0x8f9), u1 = g_rd(0x8f9), u2 = g_rd(0x8f9), u3 = g_rd(0x8f9);
++			{
++				/* kgsl snapshot sets CP_CHICKEN_DBG[StabilizeMVC] (0x8b2 bit2) before indexed dumps */
++				uint32_t ch = g_rd(0x8b2);
++				g_wr(0x8b2, ch | 4);
++				const uint32_t *fw = (const uint32_t *)sqeb.va;
++				uint32_t nfw = 0x53d4, match = 0, firstbad = 0xffffffff, fbv = 0, fbf = 0, nz = 0;
++				uint32_t s0[8];
++				g_wr(0x8f8, 0);
++				for (uint32_t i = 0; i < nfw; i++) {
++					uint32_t v = g_rd(0x8f9);
++					if (i < 8) {
++						s0[i] = v;
++					}
++					if (v) {
++						nz++;
++					}
++					if (v == fw[i]) {
++						match++;
++					} else if (firstbad == 0xffffffff) {
++						firstbad = i; fbv = v; fbf = fw[i];
++					}
++				}
++				uint32_t st0 = 0, st1 = 0;
++				g_wr(0x8f0, 0); st0 = g_rd(0x8f1); st1 = g_rd(0x8f1);
++				g_wr(0x8b2, ch);
++				for (int k = 0; k < 3; k++) {
++					IOLog("VGPU: SUMMARY ucodecmp chk %08x match %u/%u nz %u bad@%x %08x fw %08x u %08x %08x %08x %08x fw %08x %08x stat %08x %08x\n",
++					    ch, match, nfw, nz, firstbad, fbv, fbf, s0[0], s0[1], s0[2], s0[3], fw[0], fw[1], st0, st1);
++				}
++			}
 +			aperture(0);
 +			for (unsigned k = 0; k < 2; k++) {
 +				IOLog("VGPU: SUMMARY sqepc %08x %08x %08x %08x %08x %08x %08x %08x rbbm1 %08x gfx %08x %08x br %08x bv %08x misc %08x\n",
