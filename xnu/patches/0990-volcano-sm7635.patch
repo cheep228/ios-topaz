@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..973692e
+index 0000000..b89468d
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1870 @@
+@@ -0,0 +1,1890 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14555,6 +14555,7 @@ index 0000000..973692e
 +}
 +
 +static uint64_t *l1, l1pa;
++static int map_ap = -1;         /* >= 0: AP[2:1] for the next mappings (kgsl-like per-buffer priv/RO) */
 +static uint64_t *l2v[4], *l3v[4][512];
 +
 +static bool
@@ -14584,6 +14585,9 @@ index 0000000..973692e
 +		ap = (3ull << 6);
 +	} else if (iova >= 0x20100000ull && iova < 0x40000000ull) {
 +		ap = (1ull << 6);
++	}
++	if (map_ap >= 0) {
++		ap = (uint64_t)map_ap << 6;
 +	}
 +	l3v[i1][i2][i3] = pa | PTE_PAGE | ap;
 +	return true;
@@ -14902,7 +14906,15 @@ index 0000000..973692e
 +		struct gbuf *b = &mab[mab_n];
 +		uint64_t *va = gfx ? &mab_gpu_va : &mab_gmu_va;
 +		uint64_t iova = (*va + a - 1) & ~(a - 1);
-+		if (gbuf_alloc(b, size, iova, "hfimem") && gbuf_map(b)) {
++		uint32_t vap = 0;
++		PE_parse_boot_argn("vhwsap", &vap, sizeof(vap));
++		if (vap && gfx) {
++			bool pr = (flags & 2) != 0, wrt = (flags & 4) != 0;
++			map_ap = pr ? (wrt ? 0 : 2) : (wrt ? 1 : 3);
++		}
++		bool okm = gbuf_alloc(b, size, iova, "hfimem") && gbuf_map(b);
++		map_ap = -1;
++		if (okm) {
 +			*va = iova + b->size;
 +			mab_n++;
 +			sweet_dcache_clean((vm_offset_t)b->va, (unsigned)b->size);
@@ -15767,7 +15779,15 @@ index 0000000..973692e
 +		return;
 +	}
 +	memcpy(sqeb.va, (const uint8_t *)data + 4, size - 4);
-+	if (!gbuf_map(&sqeb) || !gbuf_map(&rbb) || !gbuf_map(&memb)) {
++	uint32_t vap2 = 0;
++	PE_parse_boot_argn("vhwsap", &vap2, sizeof(vap2));
++	bool mok = gbuf_map(&sqeb);
++	map_ap = vap2 ? 2 : -1;         /* Android: RB privileged read-only */
++	mok = mok && gbuf_map(&rbb);
++	map_ap = vap2 ? 0 : -1;         /* memptrs: privileged RW */
++	mok = mok && gbuf_map(&memb);
++	map_ap = -1;
++	if (!mok) {
 +		return;
 +	}
 +	sweet_dcache_clean((vm_offset_t)sqeb.va, (unsigned)sqeb.size);
