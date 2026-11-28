@@ -14260,10 +14260,10 @@ index 8aa0c2f..9f0aac6 100644
  #endif
 diff --git a/iokit/Kernel/arm/VolcanoAdreno.cpp b/iokit/Kernel/arm/VolcanoAdreno.cpp
 new file mode 100644
-index 0000000..fccbb25
+index 0000000..7fca203
 --- /dev/null
 +++ b/iokit/Kernel/arm/VolcanoAdreno.cpp
-@@ -0,0 +1,1906 @@
+@@ -0,0 +1,1929 @@
 +/*
 + * volcano: Adreno 810 (gen8_3_0, chip id 0x44010000) bring-up, step 1: a probe.
 + *
@@ -14284,6 +14284,7 @@ index 0000000..fccbb25
 +#include <IOKit/IOBufferMemoryDescriptor.h>
 +#include <pexpert/pexpert.h>
 +#include <kern/thread.h>
++#include <kern/clock.h>
 +
 +#if defined(VOLCANO)
 +
@@ -15722,11 +15723,33 @@ index 0000000..fccbb25
 +	for (uint32_t i = 0; i < n && i < 23; i++) {
 +		m[1 + i] = cmds[i];
 +	}
++	/* CP0 perfcounter = CP cycles (upstream "Select CP0 to always count cycles"): measures the real GX/CP clock */
++	g_wr(0x0460, 1);                        /* RBBM_PERFCTR_CNTL */
++	g_wr(0x0500, 1);                        /* RBBM_SLICE_PERFCTR_CNTL */
++	g_wr(0x08d0, 1);                        /* CP_PERFCTR_CP_SEL(0) = cycles */
 +	int r = hfi_send(131, m, n + 1, NULL, 0, name);
 +	bool idle = poll(base, 4 * 0x23b0c, 1u << 23, 0, 200000);
 +	aperture(PIPE_BR);
 +	uint32_t sqs = g_rd(R_CP_SQE_STATUS_PIPE), hwf = g_rd(R_CP_HW_FAULT_PIPE);
++	g_wr(0x8f0, 0);
++	uint32_t s0 = g_rd(0x8f1);
 +	aperture(0);
++	uint32_t c0l = g_rd(0x01b0), c0h = g_rd(0x01b1), sel = g_rd(0x08d0), pc = g_rd(0x0460);
++	uint64_t t0 = mach_absolute_time();
++	IODelay(1000);
++	uint32_t c1l = g_rd(0x01b0), c1h = g_rd(0x01b1);
++	uint64_t t1 = mach_absolute_time();
++	aperture(PIPE_BR);
++	g_wr(0x8f0, 0);
++	uint32_t s1 = g_rd(0x8f1);
++	aperture(0);
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(t1 - t0, &ns);
++	uint64_t dc = (((uint64_t)c1h << 32) | c1l) - (((uint64_t)c0h << 32) | c0l);
++	for (int k = 0; k < 3; k++) {
++		IOLog("VGPU: SUMMARY cpclk %s cyc %08x%08x -> %08x%08x d %llu in %llu ns = %llu kHz sel %08x pcntl %08x sqestat %08x -> %08x\n",
++		    name, c0h, c0l, c1h, c1l, dc, ns, ns ? dc * 1000000ull / ns : 0, sel, pc, s0, s1);
++	}
 +	for (int k = 0; k < 3; k++) {
 +		IOLog("VGPU: SUMMARY hws %s ack %d idle %d busy %08x rbbm %08x sqe_cntl %08x rb_base %08x%08x rptr %08x "
 +		    "br sqe %08x hwfault %08x\n", name, r, idle, gmu_rd(0x23b0c), g_rd(R_RBBM_STATUS), g_rd(R_CP_SQE_CNTL),
